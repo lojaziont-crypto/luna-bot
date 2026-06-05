@@ -1,10 +1,10 @@
 {
-  "name": "luna-whatsapp",
+  "name": "zaya-whatsapp",
   "version": "1.0.0",
-  "description": "Luna - Agente de IA para WhatsApp",
-  "main": "Luna.js",
+  "description": "Zaya - Assistente Virtual de Atendimento para WhatsApp",
+  "main": "Zaya.js",
   "scripts": {
-    "start": "node Luna.js"
+    "start": "node Zaya.js"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
