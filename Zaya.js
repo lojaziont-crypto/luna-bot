@@ -13,6 +13,10 @@ const pino = require('pino')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const conversations = new Map()
+const humanAttending = new Map() // JID -> timestamp da última mensagem manual do dono
+const lastActivity = new Map()   // JID -> timestamp da última mensagem do cliente
+const HUMAN_TIMEOUT_MS = 30 * 60 * 1000    // 30 minutos sem resposta do dono reativa Zaya
+const INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000 // 1 hora sem mensagem reinicia a conversa
 
 const SYSTEM_PROMPT = `Você é Zaya, assistente virtual de atendimento. Conversa de forma natural e humana no WhatsApp — nunca parece robô.
 
@@ -117,13 +121,33 @@ async function connectToWhatsApp() {
     })
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        // Registra respostas manuais do dono antes de qualquer filtro de tipo
+        for (const msg of messages) {
+            if (msg.key.fromMe && msg.key.remoteJid) {
+                humanAttending.set(msg.key.remoteJid, Date.now())
+            }
+        }
+
         if (type !== 'notify') return
 
         for (const msg of messages) {
+            const from = msg.key.remoteJid
+
             if (msg.key.fromMe) continue
+
+            // Nunca responde em grupos
+            if (from.endsWith('@g.us')) continue
+
             if (!msg.message) continue
 
-            const from = msg.key.remoteJid
+            // Pausa se o dono respondeu manualmente nos últimos 30 minutos
+            const lastOwner = humanAttending.get(from)
+            if (lastOwner && (Date.now() - lastOwner) < HUMAN_TIMEOUT_MS) {
+                const sender = from.replace('@s.whatsapp.net', '')
+                console.log(`⏸️  [${sender}]: Atendimento humano ativo, Zaya pausada.`)
+                continue
+            }
+
             const text =
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
@@ -131,13 +155,30 @@ async function connectToWhatsApp() {
 
             if (!text) continue
 
+            // Reinicia conversa se ficou inativo por mais de 1 hora
+            const last = lastActivity.get(from)
+            if (last && (Date.now() - last) > INACTIVITY_TIMEOUT_MS) {
+                conversations.delete(from)
+                console.log(`🔄 [${from.replace('@s.whatsapp.net', '')}]: Inatividade detectada, conversa reiniciada.`)
+            }
+            lastActivity.set(from, Date.now())
+
             const isFirstMessage = !conversations.has(from) || conversations.get(from).length === 0
-            const sender = from.replace('@s.whatsapp.net', '').replace('@g.us', ' (grupo)')
+            const sender = from.replace('@s.whatsapp.net', '')
             console.log(`\n💬 [${sender}]: ${text}`)
 
             try {
                 await sock.sendPresenceUpdate('composing', from)
                 await new Promise(resolve => setTimeout(resolve, 7000))
+
+                // Verifica novamente após o delay — dono pode ter respondido durante a espera
+                const ownerCheck = humanAttending.get(from)
+                if (ownerCheck && (Date.now() - ownerCheck) < HUMAN_TIMEOUT_MS) {
+                    await sock.sendPresenceUpdate('paused', from)
+                    console.log(`⏸️  [${sender}]: Dono respondeu durante a espera, Zaya cancelou.`)
+                    continue
+                }
+
                 const reply = await getAIResponse(from, text, isFirstMessage)
 
                 const resumoMatch = reply.match(/---RESUMO---([\s\S]*?)---FIM---/)
