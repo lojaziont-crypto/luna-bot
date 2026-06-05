@@ -1,0 +1,16 @@
+{
+  "name": "luna-whatsapp",
+  "version": "1.0.0",
+  "description": "Luna - Agente de IA para WhatsApp",
+  "main": "Luna.js",
+  "scripts": {
+    "start": "node Luna.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "dotenv": "^16.0.0",
+    "groq-sdk": "^0.9.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
