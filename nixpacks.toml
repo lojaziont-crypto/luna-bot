@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "glib", "fontconfig"]
+nixPkgs = ["chromium", "nss", "freetype", "harfbuzz", "cacert", "glib", "fontconfig"]
 
 [variables]
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
