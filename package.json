@@ -9,8 +9,15 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "chrome-cookies-secure": "^3.0.2",
     "dotenv": "^16.0.0",
     "groq-sdk": "^0.9.0",
-    "qrcode-terminal": "^0.12.0"
+    "node-cron": "^3.0.3",
+    "pino": "^8.21.0",
+    "puppeteer": "^22.15.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "qrcode-terminal": "^0.12.0",
+    "sql.js": "^1.14.1"
   }
 }
