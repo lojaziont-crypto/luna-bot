@@ -28,30 +28,35 @@ function launchBrowser(executablePath) {
 }
 
 function resolverChrome() {
-    const paths = [
-        // Variável explícita (Railway: defina CHROME_PATH ou PUPPETEER_EXECUTABLE_PATH)
-        process.env.CHROME_PATH,
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        // Linux — nixpacks/Railway
-        '/run/current-system/sw/bin/chromium',
+    // 1. Variável de ambiente explícita
+    for (const ev of [process.env.CHROME_PATH, process.env.PUPPETEER_EXECUTABLE_PATH]) {
+        if (ev && fs.existsSync(ev)) return ev
+    }
+
+    // 2. Chrome embutido no puppeteer — baixado em .cache/puppeteer durante npm install
+    try {
+        const ep = require('puppeteer').executablePath()
+        if (ep && fs.existsSync(ep)) return ep
+    } catch {}
+
+    // 3. Caminhos Linux (sistema)
+    const linuxPaths = [
         '/usr/bin/chromium',
         '/usr/bin/chromium-browser',
+        '/run/current-system/sw/bin/chromium',
         '/usr/bin/google-chrome',
         '/usr/bin/google-chrome-stable',
-        // Windows — desenvolvimento local
+    ]
+
+    // 4. Windows (desenvolvimento local)
+    const winPaths = [
         process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null,
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
         'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
     ].filter(Boolean)
 
-    // Chrome embutido no pacote puppeteer (fallback final)
-    try {
-        const ep = require('puppeteer').executablePath()
-        if (ep && !paths.includes(ep)) paths.push(ep)
-    } catch {}
-
-    const found = paths.find(p => fs.existsSync(p))
-    if (!found) throw new Error('Chrome não encontrado. Defina CHROME_PATH ou PUPPETEER_EXECUTABLE_PATH.')
+    const found = [...linuxPaths, ...winPaths].find(p => fs.existsSync(p))
+    if (!found) throw new Error('Chrome não encontrado. Defina CHROME_PATH nas variáveis de ambiente.')
     return found
 }
 
