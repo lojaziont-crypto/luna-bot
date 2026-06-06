@@ -1,11 +1,5 @@
 require('dotenv').config()
 
-const {
-    default: makeWASocket,
-    DisconnectReason,
-    useMultiFileAuthState,
-    Browsers
-} = require('@whiskeysockets/baileys')
 const { Boom } = require('@hapi/boom')
 const Groq = require('groq-sdk')
 const qrcode = require('qrcode-terminal')
@@ -125,6 +119,8 @@ async function getAIResponse(from, userMessage, isFirstMessage) {
 }
 
 async function connectToWhatsApp() {
+    const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, Browsers } = await import('@whiskeysockets/baileys')
+
     const { state, saveCreds } = await useMultiFileAuthState('auth_info')
 
     const sock = makeWASocket({
