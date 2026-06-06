@@ -156,7 +156,7 @@ async function coletarStatusPedidos() {
 
         // 1. Overview — faturamento do dia e do mês
         await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
-        await new Promise(r => setTimeout(r, 6000))
+        await new Promise(r => setTimeout(r, 10000))
 
         if (page.url().includes('/account/login')) {
             throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
@@ -165,7 +165,7 @@ async function coletarStatusPedidos() {
         const overviewText = await page.evaluate(() =>
             document.body.innerText.replace(/\s+/g, ' ').trim()
         )
-        console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 600)}`)
+        console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 1000)}`)
 
         // 2. Pedidos — A Enviar, Enviados, Concluídos, Alertas
         await page.goto(

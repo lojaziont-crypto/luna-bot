@@ -366,21 +366,29 @@ async function gerarResumoShopee() {
         // A Enviar — aba de pedidos
         const aEnviar = extrair(orderText, /A Enviar\s*\((\d+)\)/i)
 
-        // Faturamento — todos os valores R$ encontrados no overview
-        const moedas = [...overviewText.matchAll(/R\$\s*([\d.]+,\d{2})/g)].map(m => m[1])
-        const fatDia = moedas[0] ?? '?'
-        const fatMes = moedas[1] ?? moedas[0] ?? '?'
+        // Faturamento — tenta encontrar "Faturamento R$ X R$ Y" (dia e mês na mesma linha)
+        // Se não achar, usa os dois primeiros valores R$ do overview
+        let fatDia = '?', fatMes = '?'
+        const fatPair = overviewText.match(/[Ff]aturamento[^R$]{0,40}R\$\s*([\d.]+,\d{2})[^R$]{0,60}R\$\s*([\d.]+,\d{2})/)
+        if (fatPair) {
+            fatDia = fatPair[1]
+            fatMes = fatPair[2]
+        } else {
+            const moedas = [...overviewText.matchAll(/R\$\s*([\d.]+,\d{2})/g)].map(m => m[1])
+            fatDia = moedas[0] ?? '?'
+            fatMes = moedas[1] ?? moedas[0] ?? '?'
+        }
 
-        // Alertas — palavras-chave de urgência
+        // Alertas — palavras-chave de desempenho/urgência
         const allText = overviewText + ' ' + orderText
-        const alertas = /atraso|atrasado|reclamação|disputa|cancelamento pendente/i.test(allText)
-            ? 'Há itens que precisam de atenção — verifique o painel'
+        const alertas = /atraso|cancelamento|reclamação|disputa|penalidade|violação|aviso|atenção/i.test(allText)
+            ? 'Há itens que precisam de atenção — verifique o painel Shopee'
             : 'Nenhum'
 
         const data = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
 
         const mensagemFinal = [
-            `🛍 *Relatório Shopee — ${data}*`,
+            `🛍 *Shopee — ${data}*`,
             ``,
             `💰 *Faturamento do dia:* R$ ${fatDia}`,
             `📦 *A Enviar:* ${aEnviar}`,
