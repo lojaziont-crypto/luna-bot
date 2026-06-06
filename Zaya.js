@@ -168,12 +168,15 @@ async function connectToWhatsApp() {
                 setInterval(checarNovosPedidos, 10 * 60 * 1000)
                 console.log('🛍️ Monitoramento de vendas ativo (verificação a cada 10 min)')
             }
-            // Auto-detecta JID real do dono (suporta @lid e @s.whatsapp.net)
+            // Auto-detecta JID real do dono — garante prefixo 55 antes de consultar
             ;(async () => {
                 try {
-                    const results = await sock.onWhatsApp(process.env.OWNER_PHONE)
+                    const phone = process.env.OWNER_PHONE || ''
+                    const phoneCC = phone.startsWith('55') ? phone : `55${phone}`
+                    const results = await sock.onWhatsApp(phoneCC)
                     if (results?.[0]?.exists && results[0].jid) {
                         salvarOwnerJid(results[0].jid)
+                        console.log(`👤 JID do dono auto-detectado: ${results[0].jid}`)
                     }
                 } catch {
                     console.log('⚠️ JID do dono não detectado — use !registrar para registrar manualmente')
@@ -257,14 +260,16 @@ async function connectToWhatsApp() {
             const sender = from.replace('@s.whatsapp.net', '')
             console.log(`\n💬 [${sender}]: ${text}`)
 
+            // Typing indicator — falha aqui não deve abortar a resposta
+            try { await sock.sendPresenceUpdate('composing', from) } catch {}
+
             try {
-                await sock.sendPresenceUpdate('composing', from)
-                await new Promise(resolve => setTimeout(resolve, 7000))
+                await new Promise(resolve => setTimeout(resolve, 3000))
 
                 // Verifica novamente após o delay — dono pode ter respondido durante a espera
                 const ownerCheck = humanAttending.get(from)
                 if (ownerCheck && (Date.now() - ownerCheck) < HUMAN_TIMEOUT_MS) {
-                    await sock.sendPresenceUpdate('paused', from)
+                    try { await sock.sendPresenceUpdate('paused', from) } catch {}
                     console.log(`⏸️  [${sender}]: Dono respondeu durante a espera, Zaya cancelou.`)
                     continue
                 }
@@ -292,6 +297,9 @@ async function connectToWhatsApp() {
             } catch (err) {
                 console.error('❌ Erro ao responder:', err.message)
                 console.error(err.stack?.split('\n').slice(0, 3).join('\n'))
+                try {
+                    await sock.sendMessage(from, { text: 'Desculpe, tive um problema técnico. Tente novamente em instantes! 🙏' })
+                } catch {}
             }
         }
     })
@@ -324,7 +332,7 @@ async function checarNovosPedidos() {
         }
 
         // Primeiro ID mudou — chegou pedido novo
-        const ownerJidToSend = process.env.OWNER_JID || ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+        const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
         botSentJids.add(ownerJidToSend)
         await activeSock.sendMessage(ownerJidToSend, {
             text: `🛍 *Nova Venda!*\n\nPedido *#${primeiroId}* confirmado! 🎉\n\nAcesse a Shopee para preparar o envio.`
@@ -344,8 +352,8 @@ async function gerarResumoShopee() {
         return
     }
 
-    const ownerJidToSend = process.env.OWNER_JID || ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
-    console.log('\n🛍️  Iniciando coleta de dados Shopee...')
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    console.log(`\n🛍️  Iniciando coleta de dados Shopee... (envio para: ${ownerJidToSend})`)
 
     try {
         botSentJids.add(ownerJidToSend)
