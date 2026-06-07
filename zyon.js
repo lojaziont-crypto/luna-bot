@@ -227,6 +227,7 @@ INSTRUÇÕES GERAIS
 - Se uma informação não estiver disponível no anúncio ou na Base de Conhecimento, responda: "No momento não temos essa informação."
 - Nunca invente informações.
 - Seja cordial, objetivo e profissional.
+- RESPOSTAS CURTAS: para perguntas diretas e simples, responda em no máximo 3 linhas — direto ao ponto, sem rodeios nem explicações longas desnecessárias. Se não tiver certeza absoluta da resposta, NÃO especule nem tente "completar" a informação por conta própria — prefira encaminhar para atendimento humano (precisaHumano = true) a arriscar uma resposta incorreta.
 - Sempre que o cliente digitar "falar com atendente", responda: "Certo! Vou chamar um atendente para você. Antes, aqui está um resumo da nossa conversa: [resumo]. Em breve alguém entrará em contato. 😊"
 - RESUMO FINAL PARA HUMANO: sempre que a conversa for encaminhada para atendimento humano (precisaHumano = true), o campo "resumoParaDono" deve ser preenchido OBRIGATORIAMENTE neste formato exato:
 "📋 *Resumo para atendimento:*
@@ -236,10 +237,12 @@ INSTRUÇÕES GERAIS
 - O que foi tratado: [resumo do que foi discutido]
 - O que precisa ser feito: [ação necessária]"
 - INFORMAÇÕES IMPORTANTES DO CLIENTE: sempre que o cliente fornecer NESTA interação uma informação relevante para o atendimento — área de personalização, nome, número, observação especial, prazo urgente, reclamação — preencha o campo "informacaoImportante" com uma frase curta e objetiva descrevendo o que foi informado (ex: "Cliente pediu personalização no lado direito do peito", "Cliente informou nome e número para a Camiseta do Brasil: João, 42"). Use null quando nada relevante foi informado nesta interação. Não repita uma informação já sinalizada em mensagens anteriores.
-- ÚLTIMA MENSAGEM: O Zyon deve sempre ser o último a responder na conversa. Quando o cliente encerrar com "ok", "obrigado", "entendi" ou similar, responda com uma mensagem curta e cordial de encerramento. Exemplos:
+- ÚLTIMA MENSAGEM: O Zyon deve sempre ser o último a responder na conversa. Quando o cliente encerrar com "ok", "obrigado", "entendi" ou similar — ou enviar um adesivo, figurinha, emoji, imagem sem texto, ou qualquer mensagem que indique que a conversa está sendo encerrada — responda com uma mensagem curta e cordial de encerramento. Exemplos:
 "Fico à disposição! 😊"
 "Qualquer dúvida, estamos aqui! 😊"
 "Foi um prazer ajudar! Estamos à disposição. 😊"
+"Obrigado pelo contato! Estamos à disposição. 😊"
+"Foi um prazer! Qualquer dúvida, estamos aqui. 😊"
 Não envie mais de uma mensagem de encerramento. Se já houver uma mensagem de encerramento do Zyon como última mensagem, não envie outra.
 
 BASE DE CONHECIMENTO
@@ -503,10 +506,15 @@ async function verificarChatClientes() {
         await executarComBrowser('verificação de chat', async (browser, page) => {
             await abrirChat(page)
 
+            // Conversas já abertas neste ciclo — passadas como filtro para abrirProximaConversaNaoRespondida
+            // para nunca reabrir a mesma conversa duas vezes na mesma rodada (evita loop)
+            const conversasVisitadas = []
+
             // Limite por ciclo evita ficar preso processando uma fila grande de uma só vez
             for (let i = 0; i < 5; i++) {
-                const cliente = await abrirProximaConversaNaoRespondida(page)
+                const cliente = await abrirProximaConversaNaoRespondida(page, conversasVisitadas)
                 if (!cliente) break
+                conversasVisitadas.push(cliente)
                 try {
                     await processarConversaAberta(page, cliente)
                 } catch (err) {

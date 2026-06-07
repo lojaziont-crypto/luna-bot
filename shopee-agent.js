@@ -445,8 +445,11 @@ async function abrirChat(page) {
 // por linhas separadoras com id="tab_unreplied" ("Sem resposta (N)") e id="tab_manually_replied"
 // ("Replied (N)"), irmãs diretas das células de conversa ([data-cy="webchat-conversation-cell-root"]).
 // Pega a primeira célula entre essas duas marcações — a Shopee já filtra "sem resposta" para nós.
-async function abrirProximaConversaNaoRespondida(page) {
-    const resultado = await page.evaluate(() => {
+// `ignorar` lista nomes de conversas já abertas neste ciclo — evita reabrir a mesma
+// conversa em loop quando a Shopee não a remove imediatamente da seção "Sem resposta"
+// após o envio da resposta (ex: indicador de não lida com atraso para atualizar)
+async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
+    const resultado = await page.evaluate((ignorar) => {
         const container = document.querySelector('[data-cy="webchat-conversation-list"] .ReactVirtualized__Grid__innerScrollContainer')
         if (!container) return { erro: 'lista de conversas não encontrada (container ReactVirtualized ausente)' }
 
@@ -462,7 +465,7 @@ async function abrirProximaConversaNaoRespondida(page) {
 
             const nomeEl = cell.querySelector('[data-cy="webchat-conversation-cell-name"]')
             const nome = (nomeEl?.getAttribute('title') || nomeEl?.textContent || '').trim()
-            if (!nome) continue
+            if (!nome || ignorar.includes(nome)) continue
 
             const badgeEl = cell.querySelector('[data-cy="webchat-conversation-cell-message"]')?.nextElementSibling
             const badge = (badgeEl?.textContent || '').trim() || null
@@ -471,7 +474,7 @@ async function abrirProximaConversaNaoRespondida(page) {
             return { nome, badge }
         }
         return { nome: null }
-    })
+    }, ignorar)
 
     if (resultado.erro) {
         console.log(`⚠️  [Zyon/chat] ${resultado.erro}`)
