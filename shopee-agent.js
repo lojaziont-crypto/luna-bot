@@ -165,7 +165,7 @@ async function coletarStatusPedidos() {
         const overviewText = await page.evaluate(() =>
             document.body.innerText.replace(/\s+/g, ' ').trim()
         )
-        console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 1000)}`)
+        console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 2000)}`)
 
         // 2. Pedidos — A Enviar, Enviados, Concluídos, Alertas
         await page.goto(
