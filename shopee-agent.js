@@ -430,11 +430,23 @@ async function abrirChat(page) {
     }
 
     const seletorLista = '[class*="conversation"], [class*="chat-list"], [class*="session-list"], [class*="webchat"]'
-    try {
-        await page.waitForSelector(seletorLista, { timeout: 25000 })
-        await page.waitForNetworkIdle({ idleTime: 1500, timeout: 20000 })
-    } catch (_) {
-        console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu dentro do tempo esperado — screenshot ainda será salvo para diagnóstico')
+    let listaCarregou = false
+    for (let tentativa = 1; tentativa <= 2 && !listaCarregou; tentativa++) {
+        try {
+            await page.waitForSelector(seletorLista, { timeout: 40000 })
+            await page.waitForNetworkIdle({ idleTime: 1500, timeout: 20000 })
+            listaCarregou = true
+        } catch (_) {
+            if (tentativa === 1) {
+                // O seletor falha intermitentemente porque a SPA às vezes trava no carregamento
+                // inicial — recarregar a página costuma resolver antes de desistir de vez.
+                console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu — recarregando a página e tentando novamente')
+                await page.reload({ waitUntil: 'networkidle2', timeout: 30000 })
+                await new Promise(r => setTimeout(r, 5000))
+            } else {
+                console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu dentro do tempo esperado — screenshot ainda será salvo para diagnóstico')
+            }
+        }
     }
     await new Promise(r => setTimeout(r, 3000))
 
@@ -504,6 +516,12 @@ async function lerConversaCompleta(page) {
         await new Promise(r => setTimeout(r, 2000))
     }
 
+    // O painel "Interesse do comprador" carrega o card do produto via requisição assíncrona
+    // separada — em conversas mais lentas o evaluate() abaixo rodava antes do card aparecer
+    // e o nome saía como null. Espera o elemento existir (com timeout curto, pois nem toda
+    // conversa tem produto associado) antes de tentar ler os dados.
+    await page.waitForSelector('[data-cy="webchat-station-root"] [title][style*="word-break"]', { timeout: 8000 }).catch(() => {})
+
     const dados = await page.evaluate(() => {
         const mensagens = []
         const itens = document.querySelectorAll('[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"]')
@@ -535,7 +553,16 @@ async function lerConversaCompleta(page) {
             const checkbox = stationRoot.querySelector('input[type="checkbox"][value]')
             if (checkbox) produtoId = checkbox.getAttribute('value') || null
 
-            const nomeEl = stationRoot.querySelector('[title][style*="word-break"]')
+            // Seletor primário: nome do produto no card "Interesse do comprador" (texto longo
+            // com word-break para não quebrar o layout). Fallback: qualquer [title] dentro do
+            // card que pareça um nome de produto (texto longo, não preço/contagem/avaliação).
+            let nomeEl = stationRoot.querySelector('[title][style*="word-break"]')
+            if (!nomeEl) {
+                nomeEl = Array.from(stationRoot.querySelectorAll('[title]')).find((el) => {
+                    const t = (el.getAttribute('title') || '').trim()
+                    return t.length > 15 && !/^R\$/.test(t) && !/dispon[íi]vel|vendido/i.test(t)
+                }) || null
+            }
             if (nomeEl) produtoNome = (nomeEl.getAttribute('title') || nomeEl.textContent || '').trim().substring(0, 200) || null
 
             const precoEl = stationRoot.querySelector('[title^="R$"]')
