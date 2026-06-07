@@ -869,38 +869,70 @@ async function listarPedidosEmAberto(page) {
     return pedidos
 }
 
-// Busca uma conversa pelo nome do comprador usando o campo "Buscar Tudo" do chat
-// (input[placeholder="Buscar Tudo"], confirmado em debug_shopee/chat_lista.html) e abre
-// o primeiro resultado da lista. Retorna true se uma conversa foi aberta.
-async function abrirConversaPorNome(page, nome) {
-    const seletorBusca = 'input[placeholder="Buscar Tudo"]'
-    try {
-        await page.waitForSelector(seletorBusca, { timeout: 15000 })
-        await page.click(seletorBusca, { clickCount: 3 })
-        await page.keyboard.press('Backspace')
-        await page.type(seletorBusca, nome, { delay: 30 })
-        await new Promise(r => setTimeout(r, 3000))
+// Abre o chat do comprador diretamente pelo ícone de chat no card do pedido, na própria
+// listagem "A Enviar — Em aberto" (botão com data-testid="buyer-chat-action", ao lado do
+// nome do comprador — confirmado em debug_shopee/pedidos_personalizacao.html). Isso é bem
+// mais confiável que buscar pelo nome dentro do chat (a busca pode não achar a conversa,
+// abrir a pessoa errada em caso de nomes parecidos, etc).
+// A página precisa já estar na listagem de pedidos (ORDERS_TOSHIP_URL) ao chamar esta função.
+// O clique pode tanto abrir o chat numa aba nova quanto trocar a própria aba para o
+// new-webchat — os dois casos são tratados, e o retorno indica qual aba usar e se ela
+// precisa ser fechada depois (aba nova) ou não (mesma aba, basta navegar de volta).
+async function abrirChatDoPedido(page, browser, orderId) {
+    const clicou = await page.evaluate((orderId) => {
+        const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
+        const marcador = folhas.find(el => (el.textContent || '').includes(`ID do Pedido ${orderId}`))
+        if (!marcador) return false
 
-        const encontrou = await page.evaluate(() => {
-            const cell = document.querySelector('[data-cy="webchat-conversation-cell-root"]')
-            if (!cell) return false
-            cell.click()
-            return true
-        })
-        if (!encontrou) return false
-
-        await new Promise(r => setTimeout(r, 4000))
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'arte_conversa.png') })
-        return true
-    } catch (err) {
-        console.error(`❌ [Zyon/arte] Erro ao buscar conversa de "${nome}": ${err.message}`)
+        let container = marcador
+        for (let i = 0; i < 12 && container; i++) {
+            const botao = container.querySelector('[data-testid="buyer-chat-action"]')
+            if (botao) {
+                botao.scrollIntoView({ block: 'center' })
+                botao.click()
+                return true
+            }
+            container = container.parentElement
+        }
         return false
+    }, orderId)
+
+    if (!clicou) return null
+
+    // O clique pode abrir uma aba nova com o webchat — espera até 6s para detectar isso
+    const totalAntes = (await browser.pages()).length
+    let novaPagina = null
+    const limite = Date.now() + 6000
+    while (Date.now() < limite && !novaPagina) {
+        const paginas = await browser.pages()
+        if (paginas.length > totalAntes) novaPagina = paginas[paginas.length - 1]
+        else await new Promise(r => setTimeout(r, 300))
     }
+
+    const paginaChat = novaPagina || page
+    if (novaPagina) {
+        await novaPagina.bringToFront()
+        await novaPagina.setViewport({ width: 1366, height: 768 })
+    }
+
+    try {
+        await paginaChat.waitForSelector(
+            '[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"], [data-cy="webchat-conversation-detail-input"]',
+            { timeout: 25000 }
+        )
+    } catch {
+        if (novaPagina) await novaPagina.close().catch(() => {})
+        return null
+    }
+
+    await new Promise(r => setTimeout(r, 3000))
+    await paginaChat.screenshot({ path: path.join(DEBUG_DIR, 'arte_conversa.png') })
+    return { pagina: paginaChat, abaNova: !!novaPagina }
 }
 
 module.exports = {
     coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
     launchBrowser, resolverChrome,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
-    listarPedidosEmAberto, abrirConversaPorNome,
+    listarPedidosEmAberto, abrirChatDoPedido, ORDERS_TOSHIP_URL,
 }

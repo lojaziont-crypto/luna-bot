@@ -16,7 +16,7 @@ const {
     verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos,
     launchBrowser, resolverChrome,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
-    listarPedidosEmAberto, abrirConversaPorNome,
+    listarPedidosEmAberto, abrirChatDoPedido, ORDERS_TOSHIP_URL,
 } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
@@ -509,12 +509,14 @@ function verificadoHoje(registro) {
     return new Date(registro.verificadoEm).toDateString() === new Date().toDateString()
 }
 
-// Verifica TODOS os pedidos em "A Enviar — Em aberto" (independente do nome do produto) e,
-// para os que ainda não enviaram nenhuma imagem/arquivo no chat, solicita a arte educadamente.
-// Roda só quando não há conversas pendentes no chat (chamada a partir de verificarChatClientes),
-// reaproveitando a mesma página/sessão do browser. Registra cada pedido verificado em
-// arte_solicitada.json para nunca solicitar duas vezes no mesmo dia.
-async function verificarPedidosSemArte(page) {
+// Verifica TODOS os pedidos em "A Enviar — Em aberto" (independente do nome do produto): para
+// cada um, abre o chat do comprador clicando direto no ícone do card do pedido (abrirChatDoPedido
+// — muito mais confiável que buscar pelo nome dentro do chat) e, se ele ainda não enviou
+// nenhuma imagem/arquivo na conversa, solicita a arte educadamente. Roda só quando não há
+// conversas pendentes no chat (chamada a partir de verificarChatClientes), reaproveitando a
+// mesma sessão/browser. Registra cada pedido verificado em arte_solicitada.json para nunca
+// solicitar duas vezes no mesmo dia.
+async function verificarPedidosSemArte(browser, page) {
     console.log(`\n🎨 [Zyon] Verificando pedidos em aberto sem arte enviada...`)
     const pedidos = await listarPedidosEmAberto(page)
     const pendentes = pedidos.filter(p => !verificadoHoje(arteSolicitada[p.orderId]))
@@ -526,27 +528,32 @@ async function verificarPedidosSemArte(page) {
     console.log(`🎨 [Zyon] ${pendentes.length} pedido(s) a verificar`)
 
     for (const pedido of pendentes) {
-        if (!pedido.comprador) {
-            console.log(`⚠️  [Zyon/arte] Pedido #${pedido.orderId} (${pedido.produtoNome}) — não foi possível identificar o comprador, pulando`)
-            continue
-        }
         try {
-            await abrirChat(page)
-            const aberto = await abrirConversaPorNome(page, pedido.comprador)
-            if (!aberto) {
-                console.log(`⚠️  [Zyon/arte] Pedido #${pedido.orderId} — conversa de "${pedido.comprador}" não encontrada no chat, pulando`)
+            // O passo anterior pode ter trocado de aba/navegado para fora da listagem de
+            // pedidos (chat abre em aba nova ou substitui a atual) — garante que estamos
+            // na listagem antes de procurar o ícone de chat do próximo pedido
+            if (!page.url().includes('/portal/sale/order')) {
+                await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+                await new Promise(r => setTimeout(r, 8000))
+            }
+
+            const chat = await abrirChatDoPedido(page, browser, pedido.orderId)
+            if (!chat) {
+                console.log(`⚠️  [Zyon/arte] Pedido #${pedido.orderId} — não foi possível abrir o chat pelo ícone do pedido, pulando`)
                 continue
             }
 
-            const { mensagens } = await lerConversaCompleta(page)
+            const { mensagens } = await lerConversaCompleta(chat.pagina)
             const arteEnviada = mensagens.some(m => m.remetente === 'cliente' && m.texto.includes('[imagem/arquivo enviado]'))
 
             if (arteEnviada) {
-                console.log(`✅ [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador} já enviou a arte`)
+                console.log(`✅ [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador || '?'} já enviou a arte`)
             } else {
-                console.log(`📨 [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador} ainda não enviou a arte, solicitando...`)
-                await enviarMensagemNoChat(page, MENSAGEM_SOLICITAR_ARTE)
+                console.log(`📨 [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador || '?'} ainda não enviou a arte, solicitando...`)
+                await enviarMensagemNoChat(chat.pagina, MENSAGEM_SOLICITAR_ARTE)
             }
+
+            if (chat.abaNova) await chat.pagina.close().catch(() => {})
 
             arteSolicitada[pedido.orderId] = {
                 comprador: pedido.comprador,
@@ -636,7 +643,7 @@ async function verificarChatClientes() {
             // queremos atrasar o atendimento normal por causa dela
             if (semConversasPendentes) {
                 try {
-                    await verificarPedidosSemArte(page)
+                    await verificarPedidosSemArte(browser, page)
                 } catch (err) {
                     console.error('❌ [Zyon/arte] Erro ao verificar pedidos sem arte:', err.message)
                 }
