@@ -495,8 +495,8 @@ async function atualizarProdutosSalvos() {
     }
 }
 
-const INTERVALO_MS = 3 * 60 * 1000
-const INTERVALO_DADOS_MS = 30 * 60 * 1000
+const INTERVALO_MS = 10 * 60 * 1000
+const INTERVALO_DADOS_MS = 60 * 60 * 1000
 const INTERVALO_CHAT_MS = 5 * 60 * 1000
 const INTERVALO_PRODUTOS_MS = 24 * 60 * 60 * 1000
 const ZYON_PORT = Number(process.env.ZYON_PORT) || 3001
@@ -522,6 +522,23 @@ console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados comp
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
 console.log('─────────────────────────────────────────────────')
 
+// Agenda a coleta de faturamento para disparar exatamente no início de cada hora
+// (1h00, 2h00, ...), aguardando com setTimeout até a próxima hora cheia e então
+// passando a rodar a cada 60 min — assim o relatório sempre bate na hora certa.
+function agendarColetaDeDadosNaHoraCheia() {
+    const agora = new Date()
+    const proximaHora = new Date(agora)
+    proximaHora.setHours(proximaHora.getHours() + 1, 0, 0, 0)
+    const msAteProximaHora = proximaHora - agora
+
+    console.log(`🕐 [Zyon] Próxima coleta de faturamento agendada para ${proximaHora.toLocaleTimeString('pt-BR')} (em ${Math.round(msAteProximaHora / 60000)} min)`)
+
+    setTimeout(() => {
+        coletarEEnviarDados()
+        setInterval(coletarEEnviarDados, INTERVALO_DADOS_MS)
+    }, msAteProximaHora)
+}
+
 // Executa em sequência na inicialização (nunca dois browsers ao mesmo tempo)
 ;(async () => {
     await checarNovosPedidos()
@@ -529,6 +546,6 @@ console.log('──────────────────────�
     await verificarChatClientes()
 })()
 setInterval(checarNovosPedidos, INTERVALO_MS)
-setInterval(coletarEEnviarDados, INTERVALO_DADOS_MS)
+agendarColetaDeDadosNaHoraCheia()
 setInterval(verificarChatClientes, INTERVALO_CHAT_MS)
 setInterval(atualizarProdutosSalvos, INTERVALO_PRODUTOS_MS)
