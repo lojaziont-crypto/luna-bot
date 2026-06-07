@@ -208,6 +208,7 @@ INSTRUÇÕES GERAIS
 - Assunto: [motivo do contato]
 - O que foi tratado: [resumo do que foi discutido]
 - O que precisa ser feito: [ação necessária]"
+- INFORMAÇÕES IMPORTANTES DO CLIENTE: sempre que o cliente fornecer NESTA interação uma informação relevante para o atendimento — área de personalização, nome, número, observação especial, prazo urgente, reclamação — preencha o campo "informacaoImportante" com uma frase curta e objetiva descrevendo o que foi informado (ex: "Cliente pediu personalização no lado direito do peito", "Cliente informou nome e número para a Camiseta do Brasil: João, 42"). Use null quando nada relevante foi informado nesta interação. Não repita uma informação já sinalizada em mensagens anteriores.
 
 BASE DE CONHECIMENTO
 ATRASO NA ENTREGA: Orientar o cliente a entrar em contato com a plataforma, pois não há acesso às informações logísticas.
@@ -219,6 +220,8 @@ PERSONALIZAÇÃO DOS DEMAIS PRODUTOS: O cliente deve enviar a arte final pronta 
 PEDIDOS A ENVIAR OU CLIENTES COBRANDO POSICIONAMENTO: Responder "No momento estamos com uma alta demanda de pedidos e nossa equipe está trabalhando para liberar todos os pedidos o mais rápido possível."
 PRAZO DE POSTAGEM / ENTREGA: Verifique o prazo de envio informado no cabeçalho da conversa. Se disponível, informe ao cliente: "O prazo de envio do seu pedido é até [prazoEnvio]. Após a postagem, o prazo de entrega é gerenciado pela Shopee. Para mais detalhes sobre rastreamento ou atrasos, você pode falar diretamente com a Shopee pelo chat deles. 😊"
 CONFIRMAÇÃO DE ÁREA DE PERSONALIZAÇÃO: Sempre que o cliente enviar a arte para personalização, após confirmar o recebimento e a qualidade, pergunte em qual área deseja a personalização. Resposta sugerida: "A personalização será só no peito, nas costas, ou frente e costas? 😊"
+ARTE JÁ ENVIADA: Antes de pedir a arte de personalização, verifique no histórico se o cliente já enviou uma imagem/arquivo (mensagens marcadas como "[imagem/arquivo enviado]"). Se já enviou, NÃO peça a arte novamente — reconheça que ela foi recebida e avance para a próxima etapa (confirmar qualidade, área de personalização, etc).
+LOCALIZAÇÃO DA ARTE: Quando o cliente informar onde quer a personalização (ex: "lado direito do peito", "costas", "frente"), confirme a informação e registre. Resposta sugerida: "Perfeito! Arte no [local informado]. Vou registrar isso para a produção. ✅"
 SUGESTÃO DE PRODUTOS: Quando o contexto da conversa permitir (cliente perguntando sobre outros produtos, cliente que fez um pedido pequeno, cliente satisfeito, etc), você pode sugerir outros produtos da loja com o link direto, usando a lista de OUTROS PRODUTOS DA LOJA fornecida no contexto (use o link exatamente como informado). Se não houver outros produtos disponíveis no contexto, não sugira nenhum. Exemplo de resposta: "Aproveite e conheça também nossos outros modelos! 😊 [link do produto]"
 
 QUANDO NÃO RESPONDER E ENCAMINHAR PARA ANÁLISE HUMANA:
@@ -259,7 +262,7 @@ async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMe
         : '\n\nNenhum outro produto disponível no catálogo local para sugestão no momento — não sugira produtos nesta conversa.'
 
     const formatoSaida = `\n\nResponda EXCLUSIVAMENTE em JSON, neste formato exato (sem texto fora do JSON):
-{"precisaHumano": true ou false, "resposta": "mensagem a enviar ao cliente agora no chat — a resposta normal de atendimento, ou, quando precisaHumano for true, a mensagem de encaminhamento com o resumo já embutido conforme instruído", "resumoParaDono": "resumo completo da conversa no formato indicado em RESUMO FINAL PARA HUMANO — use null quando precisaHumano for false"}`
+{"precisaHumano": true ou false, "resposta": "mensagem a enviar ao cliente agora no chat — a resposta normal de atendimento, ou, quando precisaHumano for true, a mensagem de encaminhamento com o resumo já embutido conforme instruído", "resumoParaDono": "resumo completo da conversa no formato indicado em RESUMO FINAL PARA HUMANO — use null quando precisaHumano for false", "informacaoImportante": "frase curta descrevendo uma informação relevante fornecida pelo cliente NESTA interação, conforme INFORMAÇÕES IMPORTANTES DO CLIENTE — use null quando nada relevante foi informado agora"}`
 
     const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + contextoPrazo + contextoCatalogo + formatoSaida }]
     if (primeiraMensagem) {
@@ -278,7 +281,7 @@ async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMe
         return JSON.parse(response.choices[0].message.content)
     } catch (err) {
         console.error('❌ [Zyon/chat] IA não retornou JSON válido:', err.message)
-        return { precisaHumano: false, resposta: 'No momento não temos essa informação.', resumoParaDono: null }
+        return { precisaHumano: false, resposta: 'No momento não temos essa informação.', resumoParaDono: null, informacaoImportante: null }
     }
 }
 
@@ -310,6 +313,39 @@ function notificarAtendimentoHumano(nomeCliente, ultimaMensagem, resumo) {
         console.log(`📨 [Zyon] Dono notificado para atendimento humano (HTTP ${res.statusCode}): ${nomeCliente}`)
     })
     req.on('error', err => console.error(`❌ [Zyon] Erro ao notificar atendimento humano: ${err.message}`))
+    req.write(data)
+    req.end()
+}
+
+// Notifica o dono (via Zaya) quando o cliente fornece, durante o atendimento, uma informação
+// importante (área de personalização, nome/número, observação especial, prazo urgente, reclamação)
+function notificarAtualizacaoAtendimento(nomeCliente, informacao) {
+    const url = process.env.ZAYA_URL
+    if (!url) {
+        console.log(`⚠️  [Zyon] ZAYA_URL não definida — informação importante de ${nomeCliente} não notificada: ${informacao}`)
+        return
+    }
+
+    const data = JSON.stringify({ nomeCliente, informacao })
+    let parsedUrl
+    try { parsedUrl = new URL(`${url}/notify-chat-update`) } catch {
+        console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
+        return
+    }
+
+    const lib = parsedUrl.protocol === 'https:' ? https : http
+    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+
+    const req = lib.request({
+        hostname: parsedUrl.hostname,
+        port,
+        path: parsedUrl.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    }, res => {
+        console.log(`📌 [Zyon] Dono notificado sobre informação importante (HTTP ${res.statusCode}): ${nomeCliente} — ${informacao}`)
+    })
+    req.on('error', err => console.error(`❌ [Zyon] Erro ao notificar informação importante: ${err.message}`))
     req.write(data)
     req.end()
 }
@@ -374,6 +410,11 @@ async function processarConversaAberta(page, nomeCliente) {
     if (resultado.precisaHumano) {
         console.log(`🙋 [Zyon/chat] ${nomeCliente}: encaminhado para atendimento humano`)
         notificarAtendimentoHumano(nomeCliente, ultimaMsgCliente.texto, resultado.resumoParaDono || resultado.resposta)
+    }
+
+    if (resultado.informacaoImportante) {
+        console.log(`📌 [Zyon/chat] ${nomeCliente}: informação importante identificada — ${resultado.informacaoImportante}`)
+        notificarAtualizacaoAtendimento(nomeCliente, resultado.informacaoImportante)
     }
 
     mensagensRespondidas[nomeCliente] = idMensagem

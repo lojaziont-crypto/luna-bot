@@ -187,6 +187,22 @@ async function notifyChatHuman(nomeCliente, ultimaMensagem, resumo) {
     }
 }
 
+async function notifyChatUpdate(nomeCliente, informacao) {
+    if (!activeSock) {
+        console.log('⚠️ notifyChatUpdate: WhatsApp não conectado')
+        return
+    }
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+            text: `📌 *Atualização de atendimento*\nCliente: ${nomeCliente}\nPedido: não informado\nInformação: ${informacao}`
+        }))
+        console.log(`📌 [Zyon→Zaya] Notificação de informação importante enviada: ${nomeCliente}`)
+    } catch (err) {
+        console.error('❌ Erro ao enviar notificação de informação importante:', err.message)
+    }
+}
+
 // HTTP server — Zyon envia POST /notify-order para notificar nova venda
 const PORT = process.env.PORT || 3000
 const server = http.createServer((req, res) => {
@@ -216,6 +232,21 @@ const server = http.createServer((req, res) => {
                 res.end(JSON.stringify({ ok: true }))
             } catch (err) {
                 console.error('❌ /notify-chat-human error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+    } else if (req.method === 'POST' && req.url === '/notify-chat-update') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { nomeCliente, informacao } = JSON.parse(body)
+                await notifyChatUpdate(nomeCliente, informacao)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /notify-chat-update error:', err.message)
                 res.writeHead(400, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err.message }))
             }
