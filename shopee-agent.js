@@ -530,11 +530,29 @@ async function lerConversaCompleta(page) {
             if (precoEl) produtoPreco = (precoEl.getAttribute('title') || '').trim() || null
         }
 
-        return { mensagens, produtoId, produtoNome, produtoPreco }
+        // Prazo de envio: aparece no cabeçalho da conversa, logo abaixo do nome do cliente
+        // (ex: "A Enviar — Enviar até: 08/06/2026"). Não há data-cy específico para esse trecho,
+        // então procuramos por um elemento "folha" (sem filhos) com texto curto que bata o padrão
+        // "Enviar até" / "A Enviar", dentro do cabeçalho e fora da área de mensagens/estação.
+        let prazoEnvio = null
+        const detalheConversa = document.querySelector('[data-cy="webchat-conversation-detail"]')
+        if (detalheConversa) {
+            const areaChat = detalheConversa.querySelector('[data-cy="webchat-conversation-detail-chat"]')
+            const candidatos = Array.from(detalheConversa.querySelectorAll('div, span'))
+            const alvo = candidatos.find((el) => {
+                if (areaChat && areaChat.contains(el)) return false
+                if (el.children.length > 0) return false
+                const txt = (el.textContent || '').trim()
+                return /enviar\s+at[ée]|^a\s+enviar/i.test(txt) && txt.length > 0 && txt.length < 150
+            })
+            if (alvo) prazoEnvio = alvo.textContent.replace(/\s+/g, ' ').trim()
+        }
+
+        return { mensagens, produtoId, produtoNome, produtoPreco, prazoEnvio }
     })
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_historico.png') })
-    console.log(`📖 [Zyon/chat] Conversa lida: ${dados.mensagens.length} mensagens | Produto: ${dados.produtoNome || '(não identificado)'}${dados.produtoId ? ` (#${dados.produtoId})` : ''}`)
+    console.log(`📖 [Zyon/chat] Conversa lida: ${dados.mensagens.length} mensagens | Produto: ${dados.produtoNome || '(não identificado)'}${dados.produtoId ? ` (#${dados.produtoId})` : ''} | Prazo de envio: ${dados.prazoEnvio || '(não encontrado)'}`)
     return dados
 }
 

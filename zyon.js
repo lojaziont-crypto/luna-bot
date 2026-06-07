@@ -208,6 +208,7 @@ TROCAS: A plataforma não realiza trocas. Orientar o cliente a solicitar a devol
 CAMISETA DO BRASIL: Solicitar nome e número do cliente.
 PERSONALIZAÇÃO DOS DEMAIS PRODUTOS: O cliente deve enviar a arte final pronta pelo chat. Não criamos arte. Solicitar que o cliente confira se a imagem está em boa resolução antes do envio. Não nos responsabilizamos por imagens enviadas com baixa qualidade. Áreas máximas de personalização: Frente A3, Costas A3, Frente e costas: Frente 9x9cm / Costas 28x28cm. Essas regras não se aplicam à Camiseta do Brasil. Quando o cliente enviar uma foto do produto vestido ou uma foto tirada com celular da estampa, oriente que isso não é a arte adequada para personalização — a arte precisa ser o ARQUIVO da estampa (PNG com fundo transparente, preferencialmente). Exemplo de resposta: "Para personalização, precisamos do arquivo da arte em si, preferencialmente em PNG com fundo transparente — não uma foto da camiseta ou imagem tirada com celular. Você tem o arquivo da estampa? Pode ser enviado aqui no chat mesmo."
 PEDIDOS A ENVIAR OU CLIENTES COBRANDO POSICIONAMENTO: Responder "No momento estamos com uma alta demanda de pedidos e nossa equipe está trabalhando para liberar todos os pedidos o mais rápido possível."
+PRAZO DE POSTAGEM / ENTREGA: Verifique o prazo de envio informado no cabeçalho da conversa. Se disponível, informe ao cliente: "O prazo de envio do seu pedido é até [prazoEnvio]. Após a postagem, o prazo de entrega é gerenciado pela Shopee. Para mais detalhes sobre rastreamento ou atrasos, você pode falar diretamente com a Shopee pelo chat deles. 😊"
 
 QUANDO NÃO RESPONDER E ENCAMINHAR PARA ANÁLISE HUMANA:
 - Cliente solicitar "falar com atendente"
@@ -226,17 +227,21 @@ EM TODOS OS CASOS DE ENCAMINHAMENTO HUMANO:
 // Pede à IA a resposta ao cliente e, no mesmo retorno em JSON, se a conversa precisa
 // de atendimento humano e o resumo a enviar ao dono — assim o código decide com segurança
 // sem depender de interpretar texto livre.
-async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem) {
+async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem, prazoEnvio) {
     const transcricao = mensagens.map(m => `${m.remetente === 'cliente' ? 'Cliente' : 'Loja'}: ${m.texto}`).join('\n')
 
     const contextoProduto = infoProduto
         ? `\n\nINFORMAÇÕES DO ANÚNCIO DO PRODUTO EM DISCUSSÃO (use como referência):\n${JSON.stringify(infoProduto).substring(0, 4000)}`
         : '\n\nNenhuma informação de produto disponível para esta conversa — se a dúvida depender do anúncio, responda "No momento não temos essa informação."'
 
+    const contextoPrazo = prazoEnvio
+        ? `\n\nPRAZO DE ENVIO DESTE PEDIDO (extraído do cabeçalho da conversa): ${prazoEnvio}`
+        : '\n\nNenhum prazo de envio identificado no cabeçalho desta conversa — se o cliente perguntar sobre prazo, responda "No momento não temos essa informação."'
+
     const formatoSaida = `\n\nResponda EXCLUSIVAMENTE em JSON, neste formato exato (sem texto fora do JSON):
 {"precisaHumano": true ou false, "resposta": "mensagem a enviar ao cliente agora no chat — a resposta normal de atendimento, ou, quando precisaHumano for true, a mensagem de encaminhamento com o resumo já embutido conforme instruído", "resumoParaDono": "resumo completo da conversa (nome do cliente, produto, motivo do contato, o que já foi tentado e por que precisa de humano) — use null quando precisaHumano for false"}`
 
-    const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + formatoSaida }]
+    const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + contextoPrazo + formatoSaida }]
     if (primeiraMensagem) {
         messages.push({ role: 'system', content: 'Esta é a primeira mensagem desta conversa — comece com a apresentação indicada nas instruções.' })
     }
@@ -324,7 +329,7 @@ async function obterInfoProduto(page, produtoId, produtoNome) {
 // Processa a conversa atualmente aberta: lê o histórico, identifica o produto, gera a
 // resposta com IA e envia — encaminhando para atendimento humano com resumo quando necessário
 async function processarConversaAberta(page, nomeCliente) {
-    const { mensagens, produtoId, produtoNome } = await lerConversaCompleta(page)
+    const { mensagens, produtoId, produtoNome, prazoEnvio } = await lerConversaCompleta(page)
     if (mensagens.length === 0) return
 
     const ultimaMsgCliente = [...mensagens].reverse().find(m => m.remetente === 'cliente')
@@ -342,7 +347,7 @@ async function processarConversaAberta(page, nomeCliente) {
     console.log(`🧑 [Zyon/chat] ${nomeCliente} — produto: ${produtoNome || '(não identificado)'}${produtoId ? ` (#${produtoId})` : ''} — gerando resposta...`)
 
     const infoProduto = await obterInfoProduto(page, produtoId, produtoNome)
-    const resultado = await gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem)
+    const resultado = await gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem, prazoEnvio)
 
     await enviarMensagemNoChat(page, resultado.resposta)
 
