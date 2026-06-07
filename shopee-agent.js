@@ -155,11 +155,23 @@ async function coletarStatusPedidos() {
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
 
         // 1. Overview — faturamento do dia e do mês
-        await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
-        await new Promise(r => setTimeout(r, 10000))
+        // O dashboard principal (/portal/) contém os cards de KPI com faturamento
+        await page.goto(`${BASE_URL}/portal/`, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 8000))
 
-        if (page.url().includes('/account/login')) {
+        const urlOverview = page.url()
+        console.log(`🌐 [Zyon/overview] URL real: ${urlOverview}`)
+
+        if (urlOverview.includes('/account/login')) {
             throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+        }
+
+        // Se redirecionou para página de pedidos, tenta a rota alternativa de overview
+        if (urlOverview.includes('/order') || urlOverview.includes('/sale/order')) {
+            console.log('⚠️  [Zyon] Redirecionado para pedidos — tentando /portal/sale/overview ...')
+            await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
+            await new Promise(r => setTimeout(r, 8000))
+            console.log(`🌐 [Zyon/overview] URL fallback: ${page.url()}`)
         }
 
         await page.screenshot({ path: path.join(DEBUG_DIR, 'overview.png') })
@@ -186,6 +198,8 @@ async function coletarStatusPedidos() {
         console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 2000)}`)
         if (dadosOverview.valores.length) {
             console.log(`💰 [Zyon/overview] Valores DOM: ${JSON.stringify(dadosOverview.valores.slice(0, 6))}`)
+        } else {
+            console.log('⚠️  [Zyon/overview] Nenhum valor monetário encontrado na página')
         }
 
         let fatDia = null, fatMes = null
