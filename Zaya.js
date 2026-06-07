@@ -8,7 +8,6 @@ process.on('unhandledRejection', (err) => {
 })
 
 const { Boom } = require('@hapi/boom')
-const Groq = require('groq-sdk')
 const qrcode = require('qrcode-terminal')
 const pino = require('pino')
 const cron = require('node-cron')
@@ -17,58 +16,11 @@ const path = require('path')
 const http = require('http')
 const https = require('https')
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
-const conversations = new Map()
-const humanAttending = new Map()   // JID -> timestamp da última mensagem manual do dono
-const lastActivity = new Map()     // JID -> timestamp da última mensagem do cliente
-const botSentMessages = new Set()  // IDs de mensagens enviadas pela Zaya (evita falso humanAttending em echoes)
 let activeSock = null
 let ownerJid = null
 let reconnectTimer = null
 let ultimoFaturamento = { fatDia: null, fatMes: null, aEnviar: null, atualizadoEm: null }
 const STARTUP_TS = Math.floor(Date.now() / 1000) // segundos — filtra mensagens antigas no sync
-
-const CONVERSATIONS_FILE = path.join(__dirname, 'conversations.json')
-const STATE_FILE = path.join(__dirname, 'state.json')
-
-function loadState() {
-    try {
-        if (fs.existsSync(CONVERSATIONS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, 'utf8'))
-            for (const [jid, history] of Object.entries(data)) {
-                conversations.set(jid, history)
-            }
-            console.log(`📂 Conversas carregadas: ${conversations.size} contatos`)
-        }
-    } catch (e) { console.error('⚠️ Erro ao carregar conversations.json:', e.message) }
-
-    try {
-        if (fs.existsSync(STATE_FILE)) {
-            const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
-            for (const [jid, ts] of Object.entries(data.humanAttending || {})) {
-                humanAttending.set(jid, ts)
-            }
-            for (const [jid, ts] of Object.entries(data.lastActivity || {})) {
-                lastActivity.set(jid, ts)
-            }
-        }
-    } catch (e) { console.error('⚠️ Erro ao carregar state.json:', e.message) }
-}
-
-function saveConversations() {
-    try {
-        fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(Object.fromEntries(conversations)))
-    } catch (e) { console.error('⚠️ Erro ao salvar conversations.json:', e.message) }
-}
-
-function saveState() {
-    try {
-        fs.writeFileSync(STATE_FILE, JSON.stringify({
-            humanAttending: Object.fromEntries(humanAttending),
-            lastActivity: Object.fromEntries(lastActivity),
-        }))
-    } catch (e) { console.error('⚠️ Erro ao salvar state.json:', e.message) }
-}
 
 const OWNER_JID_FILE = path.join(__dirname, 'owner_jid.json')
 try {
@@ -88,80 +40,6 @@ function normalizePhone(jid) {
     return jid.replace(/@.*$/, '').replace(/^55/, '')
 }
 
-// Rastreia mensagens enviadas pela Zaya para não confundir echoes com respostas humanas
-function trackSend(sent) {
-    if (sent?.key?.id) {
-        botSentMessages.add(sent.key.id)
-        if (botSentMessages.size > 200) botSentMessages.clear()
-    }
-}
-
-const HUMAN_TIMEOUT_MS = 30 * 60 * 1000
-const INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000
-
-const SYSTEM_PROMPT = `Você é Zaya, assistente virtual de atendimento. Conversa de forma natural e humana no WhatsApp — nunca parece robô.
-
-Como você se comporta:
-- Tom leve, amigável e cordial, como uma atendente prestativa de verdade
-- Respostas CURTAS e diretas — 1 a 3 linhas, estilo WhatsApp
-- Sem enrolação, sem textão, sem listas ou FAQs
-- Foco em resolver o problema do cliente de forma direta
-- Emojis ocasionais para deixar a conversa mais natural 😊
-- Nunca menciona que é IA; se perguntada, desvie com leveza: "Sou a Zaya, pode falar! 😄"
-
-Na primeira mensagem de um contato novo, use EXATAMENTE esta saudação:
-"Olá! Sou a Zaya, assistente treinada pelo Maurício para te auxiliar. Estou aqui para responder suas dúvidas e, ao final da nossa conversa, encaminharei um resumo para ele. Como posso te ajudar?"
-
-Quando não conseguir resolver o problema:
-- Informe que vai transferir para um atendente humano
-- Pergunte o nome da pessoa e o assunto
-- Exemplo: "Vou te passar para um atendente humano que pode te ajudar melhor! Me diz seu nome e o assunto, por favor? 😊"
-- Após coletar nome e assunto, confirme: "Perfeito! Já chamo alguém pra você, aguarda um instante 🙏"
-- Em seguida, gere um resumo interno usando EXATAMENTE este formato, sem alterar nada:
-
----RESUMO---
-👤 *Contato:* [nome informado ou "Não informado"]
-❓ *Problema:* [resumo do que a pessoa relatou]
-🔧 *O que foi tentado:* [o que Zaya tentou resolver, ou "Nenhuma solução tentada"]
----FIM---
-
-Responda sempre em português.`
-
-async function getAIResponse(from, userMessage, isFirstMessage) {
-    if (!conversations.has(from)) {
-        conversations.set(from, [])
-    }
-
-    const history = conversations.get(from)
-    history.push({ role: 'user', content: userMessage })
-
-    const messages = [{ role: 'system', content: SYSTEM_PROMPT }]
-
-    if (isFirstMessage) {
-        messages.push({
-            role: 'system',
-            content: 'Esta é a primeira mensagem deste contato. Use EXATAMENTE esta saudação, sem alterar nada: "Olá! Sou a Zaya, assistente treinada pelo Maurício para te auxiliar. Estou aqui para responder suas dúvidas e, ao final da nossa conversa, encaminharei um resumo para ele. Como posso te ajudar?"'
-        })
-    }
-
-    messages.push(...history)
-
-    const response = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 400,
-        messages
-    })
-
-    const reply = response.choices[0].message.content
-    history.push({ role: 'assistant', content: reply })
-
-    if (history.length > 20) {
-        history.splice(0, history.length - 20)
-    }
-
-    return reply
-}
-
 async function notifyNewOrder(orderId) {
     if (!activeSock) {
         console.log('⚠️ notifyNewOrder: WhatsApp não conectado')
@@ -169,9 +47,9 @@ async function notifyNewOrder(orderId) {
     }
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
     try {
-        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+        await activeSock.sendMessage(ownerJidToSend, {
             text: `🛍 *Nova Venda!*\n\nPedido *#${orderId}* confirmado! 🎉\n\nAcesse a Shopee para preparar o envio.`
-        }))
+        })
         console.log(`🛍️ [Zyon→Zaya] Notificação enviada: pedido #${orderId}`)
     } catch (err) {
         console.error('❌ Erro ao enviar notificação de novo pedido:', err.message)
@@ -185,9 +63,9 @@ async function notifyChatHuman(nomeCliente, ultimaMensagem, resumo) {
     }
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
     try {
-        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+        await activeSock.sendMessage(ownerJidToSend, {
             text: `🙋 *Atendimento humano necessário (Shopee)*\n\n*Cliente:* ${nomeCliente}\n*Última mensagem:* ${ultimaMensagem}\n\n*Resumo da conversa:*\n${resumo}`
-        }))
+        })
         console.log(`🙋 [Zyon→Zaya] Notificação de atendimento humano enviada: ${nomeCliente}`)
     } catch (err) {
         console.error('❌ Erro ao enviar notificação de atendimento humano:', err.message)
@@ -201,9 +79,9 @@ async function notifyChatUpdate(nomeCliente, informacao) {
     }
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
     try {
-        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+        await activeSock.sendMessage(ownerJidToSend, {
             text: `📌 *Atualização de atendimento*\nCliente: ${nomeCliente}\nPedido: não informado\nInformação: ${informacao}`
-        }))
+        })
         console.log(`📌 [Zyon→Zaya] Notificação de informação importante enviada: ${nomeCliente}`)
     } catch (err) {
         console.error('❌ Erro ao enviar notificação de informação importante:', err.message)
@@ -351,30 +229,6 @@ async function connectToWhatsApp() {
         // Mensagens antigas do histórico são filtradas pelo timestamp abaixo
         if (type !== 'notify' && type !== 'append') return
 
-        // Detecta mensagens enviadas manualmente pelo dono (fromMe = true, mas não enviadas pela Zaya)
-        // Só processa para type='notify' para evitar falso humanAttending em histórico
-        if (type === 'notify') {
-            for (const msg of messages) {
-                if (msg.key.fromMe && msg.key.remoteJid) {
-                    // Echo da própria Zaya — ignorar
-                    if (botSentMessages.has(msg.key.id)) {
-                        botSentMessages.delete(msg.key.id)
-                        continue
-                    }
-                    // Echo de sessão anterior (entregue no reconnect) — não ativar humanAttending
-                    const echoTs = Number(msg.messageTimestamp)
-                    if (echoTs && echoTs < STARTUP_TS - 30) continue
-                    const jid = msg.key.remoteJid
-                    const isOwnerJid = jid === ownerJid || jid === process.env.OWNER_JID ||
-                        normalizePhone(jid) === normalizePhone(process.env.OWNER_PHONE || '')
-                    if (!isOwnerJid) {
-                        humanAttending.set(jid, Date.now())
-                        saveState()
-                    }
-                }
-            }
-        }
-
         for (const msg of messages) {
             const from = msg.key.remoteJid
             if (!from) { console.log('⏭️ skip: sem remoteJid'); continue }
@@ -389,14 +243,6 @@ async function connectToWhatsApp() {
             const msgTs = Number(msg.messageTimestamp)
             if (msgTs && msgTs < STARTUP_TS - 120) {
                 console.log(`⏭️ skip: mensagem antiga (${new Date(msgTs * 1000).toLocaleTimeString('pt-BR')})`)
-                continue
-            }
-
-            // Pausa se o dono respondeu manualmente nos últimos 30 minutos
-            const lastOwner = humanAttending.get(from)
-            if (lastOwner && (Date.now() - lastOwner) < HUMAN_TIMEOUT_MS) {
-                const sender = from.replace('@s.whatsapp.net', '')
-                console.log(`⏸️  [${sender}]: humanAttending ativo, Zaya pausada`)
                 continue
             }
 
@@ -424,65 +270,14 @@ async function connectToWhatsApp() {
             // Registro manual do dono (caso auto-detecção falhe)
             if (text.trim() === `!registrar ${process.env.OWNER_PHONE}`) {
                 salvarOwnerJid(from)
-                trackSend(await sock.sendMessage(from, { text: '✅ Você foi registrado como dono! Agora use *!shopee* para gerar o relatório.' }))
+                await sock.sendMessage(from, { text: '✅ Você foi registrado como dono! Agora use *!shopee* para gerar o relatório.' })
                 continue
             }
 
-            // Reinicia conversa se ficou inativo por mais de 1 hora
-            const last = lastActivity.get(from)
-            if (last && (Date.now() - last) > INACTIVITY_TIMEOUT_MS) {
-                conversations.delete(from)
-                console.log(`🔄 [${from.replace('@s.whatsapp.net', '')}]: Inatividade detectada, conversa reiniciada.`)
-            }
-            lastActivity.set(from, Date.now())
-            saveState()
-
-            const isFirstMessage = !conversations.has(from) || conversations.get(from).length === 0
+            // Respostas automáticas a clientes foram desativadas — Zaya agora só repassa ao
+            // dono os avisos vindos do Zyon (pedidos, chat, faturamento) e atende !shopee/!registrar
             const sender = from.replace('@s.whatsapp.net', '')
-            console.log(`\n💬 [${sender}]: ${text}`)
-
-            try { await sock.sendPresenceUpdate('composing', from) } catch {}
-
-            try {
-                await new Promise(resolve => setTimeout(resolve, 3000))
-
-                // Verifica novamente após o delay — dono pode ter respondido durante a espera
-                const ownerCheck = humanAttending.get(from)
-                if (ownerCheck && (Date.now() - ownerCheck) < HUMAN_TIMEOUT_MS) {
-                    try { await sock.sendPresenceUpdate('paused', from) } catch {}
-                    console.log(`⏸️  [${sender}]: cancelado (humanAttending ativo após delay)`)
-                    continue
-                }
-
-                console.log(`🤖 [${sender}]: chamando Groq...`)
-                const reply = await getAIResponse(from, text, isFirstMessage)
-                console.log(`🤖 [${sender}]: Groq respondeu (${reply.length} chars), enviando...`)
-
-                const resumoMatch = reply.match(/---RESUMO---([\s\S]*?)---FIM---/)
-                if (resumoMatch) {
-                    const mensagemCliente = reply.slice(0, reply.indexOf('---RESUMO---')).trim()
-                    const resumo = resumoMatch[1].trim()
-
-                    if (mensagemCliente) {
-                        trackSend(await sock.sendMessage(from, { text: mensagemCliente }))
-                    }
-                    trackSend(await sock.sendMessage(from, { text: `📋 *Resumo para atendimento:*\n\n${resumo}` }))
-                    saveConversations()
-                    console.log(`✅ [${sender}]: resumo enviado`)
-                } else {
-                    trackSend(await sock.sendMessage(from, { text: reply }))
-                    saveConversations()
-                    console.log(`✅ [${sender}]: resposta enviada`)
-                }
-            } catch (err) {
-                console.error(`❌ [${sender}] Erro ao responder: ${err.message}`)
-                console.error(err.stack?.split('\n').slice(0, 4).join('\n'))
-                try {
-                    trackSend(await sock.sendMessage(from, { text: 'Desculpe, tive um problema técnico. Tente novamente em instantes! 🙏' }))
-                } catch (sendErr) {
-                    console.error(`❌ [${sender}] Falha também ao enviar erro: ${sendErr.message}`)
-                }
-            }
+            console.log(`⏭️  [${sender}]: resposta automática desativada`)
         }
     })
 }
@@ -530,18 +325,18 @@ async function gerarResumoShopee() {
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
 
     try {
-        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+        await activeSock.sendMessage(ownerJidToSend, {
             text: '⏳ Coletando dados atualizados, aguarde...'
-        }))
+        })
 
         console.log('📲 [Zaya] Solicitando coleta imediata ao Zyon...')
         await solicitarFaturamentoZyon()
 
         if (!ultimoFaturamento.atualizadoEm) {
             console.log('⚠️  [Zaya] Zyon não respondeu ou não está rodando')
-            trackSend(await activeSock.sendMessage(ownerJidToSend, {
+            await activeSock.sendMessage(ownerJidToSend, {
                 text: '⏳ Zyon não respondeu.\nVerifique se ele está rodando: `node zyon.js`'
-            }))
+            })
             return
         }
 
@@ -562,15 +357,15 @@ async function gerarResumoShopee() {
             `💰 *Faturamento do mês:* R$ ${fatMes}`,
         ].join('\n')
 
-        trackSend(await activeSock.sendMessage(ownerJidToSend, { text: mensagemFinal }))
+        await activeSock.sendMessage(ownerJidToSend, { text: mensagemFinal })
         console.log('📨 Resumo Shopee enviado via WhatsApp')
 
     } catch (err) {
         console.error('❌ Erro no resumo Shopee:', err.message)
         try {
-            trackSend(await activeSock.sendMessage(ownerJidToSend, {
+            await activeSock.sendMessage(ownerJidToSend, {
                 text: `❌ Erro ao gerar relatório:\n${err.message}`
-            }))
+            })
         } catch {}
     }
 }
@@ -580,7 +375,6 @@ cron.schedule('0 21 * * *', () => {
     gerarResumoShopee()
 }, { timezone: 'America/Sao_Paulo' })
 
-loadState()
 console.log('⚡ Iniciando Zaya...')
 console.log('📅 Resumo diário Shopee agendado para 21h (Brasília)')
 connectToWhatsApp()
