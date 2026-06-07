@@ -19,6 +19,48 @@ let activeSock = null
 let ownerJid = null
 let reconnectTimer = null
 
+const CONVERSATIONS_FILE = path.join(__dirname, 'conversations.json')
+const STATE_FILE = path.join(__dirname, 'state.json')
+
+function loadState() {
+    try {
+        if (fs.existsSync(CONVERSATIONS_FILE)) {
+            const data = JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, 'utf8'))
+            for (const [jid, history] of Object.entries(data)) {
+                conversations.set(jid, history)
+            }
+            console.log(`📂 Conversas carregadas: ${conversations.size} contatos`)
+        }
+    } catch (e) { console.error('⚠️ Erro ao carregar conversations.json:', e.message) }
+
+    try {
+        if (fs.existsSync(STATE_FILE)) {
+            const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+            for (const [jid, ts] of Object.entries(data.humanAttending || {})) {
+                humanAttending.set(jid, ts)
+            }
+            for (const [jid, ts] of Object.entries(data.lastActivity || {})) {
+                lastActivity.set(jid, ts)
+            }
+        }
+    } catch (e) { console.error('⚠️ Erro ao carregar state.json:', e.message) }
+}
+
+function saveConversations() {
+    try {
+        fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(Object.fromEntries(conversations)))
+    } catch (e) { console.error('⚠️ Erro ao salvar conversations.json:', e.message) }
+}
+
+function saveState() {
+    try {
+        fs.writeFileSync(STATE_FILE, JSON.stringify({
+            humanAttending: Object.fromEntries(humanAttending),
+            lastActivity: Object.fromEntries(lastActivity),
+        }))
+    } catch (e) { console.error('⚠️ Erro ao salvar state.json:', e.message) }
+}
+
 const OWNER_JID_FILE = path.join(__dirname, 'owner_jid.json')
 try {
     if (fs.existsSync(OWNER_JID_FILE)) {
@@ -222,6 +264,7 @@ async function connectToWhatsApp() {
                 const recentBotSend = (botSentAt.get(jid) || 0) > Date.now() - BOT_ECHO_WINDOW_MS
                 if (!recentBotSend && !isOwnerJid) {
                     humanAttending.set(jid, Date.now())
+                    saveState()
                 }
             }
         }
@@ -281,6 +324,7 @@ async function connectToWhatsApp() {
                 console.log(`🔄 [${from.replace('@s.whatsapp.net', '')}]: Inatividade detectada, conversa reiniciada.`)
             }
             lastActivity.set(from, Date.now())
+            saveState()
 
             const isFirstMessage = !conversations.has(from) || conversations.get(from).length === 0
             const sender = from.replace('@s.whatsapp.net', '')
@@ -312,11 +356,13 @@ async function connectToWhatsApp() {
                     }
                     botSentAt.set(from, Date.now())
                     await sock.sendMessage(from, { text: `📋 *Resumo para atendimento:*\n\n${resumo}` })
+                    saveConversations()
                     console.log(`🤖 Zaya: ${mensagemCliente}`)
                     console.log(`📋 Resumo enviado`)
                 } else {
                     botSentAt.set(from, Date.now())
                     await sock.sendMessage(from, { text: reply })
+                    saveConversations()
                     console.log(`🤖 Zaya: ${reply}`)
                 }
             } catch (err) {
@@ -396,6 +442,7 @@ cron.schedule('0 21 * * *', () => {
     gerarResumoShopee()
 }, { timezone: 'America/Sao_Paulo' })
 
+loadState()
 console.log('⚡ Iniciando Zaya...')
 console.log('📅 Resumo diário Shopee agendado para 21h (Brasília)')
 connectToWhatsApp()
