@@ -255,20 +255,42 @@ async function coletarFaturamentoGerencial() {
             console.log('💾 [Zyon] Salvo: debug_shopee/gerencial_api.json')
         } catch (_) {}
 
-        // Busca faturamento nas respostas capturadas
+        // Extração direta pelas APIs conhecidas do /datacenter/overview
         let fatDia = null, fatMes = null
-        for (const resp of respostasApi) {
-            if (fatDia && fatMes) break
-            const urlL = resp.url.toLowerCase()
-            const snippet = JSON.stringify(resp.json).substring(0, 1000).toLowerCase()
-            const relevante = /revenue|gmv|income|earning|sales|finance|report|gerencial|overview|dashboard/.test(urlL + snippet)
-            if (!relevante) continue
-            const encontrado = buscarReceitaRecursivo(resp.json, '', 0)
-            if (encontrado.campos.length) {
-                console.log('📡 [Zyon/api] ' + resp.url + ': ' + JSON.stringify(encontrado.campos).substring(0, 300))
+        for (const { url, json } of respostasApi) {
+            // /api/mydata/v3/dashboard/key-metrics/ → result.paid_gmv.value
+            if (url.includes('/mydata/') && url.includes('/key-metric')) {
+                const paid = json && json.result && json.result.paid_gmv
+                if (paid != null) {
+                    if (typeof paid.value === 'number' && !fatDia) {
+                        fatDia = formatarBRL(paid.value)
+                        console.log('💰 [Zyon] key-metrics paid_gmv.value = ' + paid.value + ' → fatDia = ' + fatDia)
+                    }
+                    // Tenta variações de nome para valor mensal no mesmo objeto
+                    const monthVal = (json.result.paid_gmv_month && json.result.paid_gmv_month.value)
+                                  || (json.result.paid_gmv_mtd   && json.result.paid_gmv_mtd.value)
+                                  || paid.month_value || paid.mtd_value || paid.this_month_value || null
+                    if (typeof monthVal === 'number' && !fatMes) {
+                        fatMes = formatarBRL(monthVal)
+                        console.log('💰 [Zyon] key-metrics monthly = ' + monthVal + ' → fatMes = ' + fatMes)
+                    }
+                }
             }
-            if (!fatDia && encontrado.dia) fatDia = encontrado.dia
-            if (!fatMes && encontrado.mes) fatMes = encontrado.mes
+            // /api/mydata/v1/dashboard/traffic-sources/ → result.overview.total_sales
+            if (url.includes('/mydata/') && url.includes('/traffic-source')) {
+                const overview = json && json.result && json.result.overview
+                if (overview) {
+                    if (typeof overview.total_sales === 'number' && !fatDia) {
+                        fatDia = formatarBRL(overview.total_sales)
+                        console.log('💰 [Zyon] traffic-sources total_sales = ' + overview.total_sales + ' → fatDia = ' + fatDia)
+                    }
+                    const monthSales = overview.total_sales_month || overview.month_total_sales || overview.mtd_total_sales || null
+                    if (typeof monthSales === 'number' && !fatMes) {
+                        fatMes = formatarBRL(monthSales)
+                        console.log('💰 [Zyon] traffic-sources monthly = ' + monthSales + ' → fatMes = ' + fatMes)
+                    }
+                }
+            }
         }
 
         const textoDebug = await page.evaluate(function() {
