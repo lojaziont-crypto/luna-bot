@@ -18,6 +18,7 @@ const botSentMessages = new Set()  // IDs de mensagens enviadas pela Zaya (evita
 let activeSock = null
 let ownerJid = null
 let reconnectTimer = null
+const STARTUP_TS = Math.floor(Date.now() / 1000) // segundos — filtra mensagens antigas no sync
 
 const CONVERSATIONS_FILE = path.join(__dirname, 'conversations.json')
 const STATE_FILE = path.join(__dirname, 'state.json')
@@ -260,44 +261,54 @@ async function connectToWhatsApp() {
     })
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        // Processa apenas mensagens novas — ignora histórico/sincronização
-        if (type !== 'notify') return
+        console.log(`📬 [upsert] type=${type} msgs=${messages.length}`)
+
+        // Aceita 'notify' (tempo real) e 'append' (sync de reconexão recente)
+        // Mensagens antigas do histórico são filtradas pelo timestamp abaixo
+        if (type !== 'notify' && type !== 'append') return
 
         // Detecta mensagens enviadas manualmente pelo dono (fromMe = true, mas não enviadas pela Zaya)
-        for (const msg of messages) {
-            if (msg.key.fromMe && msg.key.remoteJid) {
-                // Echo de mensagem enviada pela própria Zaya — ignorar
-                if (botSentMessages.has(msg.key.id)) {
-                    botSentMessages.delete(msg.key.id)
-                    continue
-                }
-                const jid = msg.key.remoteJid
-                const isOwnerJid = jid === ownerJid || jid === process.env.OWNER_JID ||
-                    normalizePhone(jid) === normalizePhone(process.env.OWNER_PHONE || '')
-                // Mensagem fromMe para um cliente (não o próprio dono) = dono respondeu manualmente
-                if (!isOwnerJid) {
-                    humanAttending.set(jid, Date.now())
-                    saveState()
+        // Só processa para type='notify' para evitar falso humanAttending em histórico
+        if (type === 'notify') {
+            for (const msg of messages) {
+                if (msg.key.fromMe && msg.key.remoteJid) {
+                    if (botSentMessages.has(msg.key.id)) {
+                        botSentMessages.delete(msg.key.id)
+                        continue
+                    }
+                    const jid = msg.key.remoteJid
+                    const isOwnerJid = jid === ownerJid || jid === process.env.OWNER_JID ||
+                        normalizePhone(jid) === normalizePhone(process.env.OWNER_PHONE || '')
+                    if (!isOwnerJid) {
+                        humanAttending.set(jid, Date.now())
+                        saveState()
+                    }
                 }
             }
         }
 
         for (const msg of messages) {
             const from = msg.key.remoteJid
-            if (!from) continue
+            if (!from) { console.log('⏭️ skip: sem remoteJid'); continue }
 
             if (msg.key.fromMe) continue
 
-            // Nunca responde em grupos
-            if (from.endsWith('@g.us')) continue
+            if (from.endsWith('@g.us')) { console.log(`⏭️ skip: grupo`); continue }
 
-            if (!msg.message) continue
+            if (!msg.message) { console.log(`⏭️ skip: sem msg.message`); continue }
+
+            // Ignora mensagens antigas do histórico (chegam via type='append')
+            const msgTs = Number(msg.messageTimestamp)
+            if (msgTs && msgTs < STARTUP_TS - 120) {
+                console.log(`⏭️ skip: mensagem antiga (${new Date(msgTs * 1000).toLocaleTimeString('pt-BR')})`)
+                continue
+            }
 
             // Pausa se o dono respondeu manualmente nos últimos 30 minutos
             const lastOwner = humanAttending.get(from)
             if (lastOwner && (Date.now() - lastOwner) < HUMAN_TIMEOUT_MS) {
                 const sender = from.replace('@s.whatsapp.net', '')
-                console.log(`⏸️  [${sender}]: Atendimento humano ativo, Zaya pausada.`)
+                console.log(`⏸️  [${sender}]: humanAttending ativo, Zaya pausada`)
                 continue
             }
 
@@ -306,7 +317,11 @@ async function connectToWhatsApp() {
                 msg.message.extendedTextMessage?.text ||
                 null
 
-            if (!text) continue
+            if (!text) {
+                const keys = Object.keys(msg.message).join(',')
+                console.log(`⏭️ skip: sem texto (campos: ${keys})`)
+                continue
+            }
 
             // Mensagens do dono nunca vão para a IA
             const isOwner = from === ownerJid || from === process.env.OWNER_JID ||
@@ -316,6 +331,8 @@ async function connectToWhatsApp() {
                 if (text.trim() === '!shopee') {
                     console.log('📲 Comando !shopee recebido — gerando relatório...')
                     gerarResumoShopee()
+                } else {
+                    console.log(`👤 skip: mensagem do dono (from=${from})`)
                 }
                 continue
             }
