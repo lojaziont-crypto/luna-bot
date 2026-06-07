@@ -8,7 +8,6 @@ const cron = require('node-cron')
 const fs = require('fs')
 const path = require('path')
 const http = require('http')
-const { coletarStatusPedidos } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const conversations = new Map()
@@ -18,7 +17,7 @@ const botSentMessages = new Set()  // IDs de mensagens enviadas pela Zaya (evita
 let activeSock = null
 let ownerJid = null
 let reconnectTimer = null
-let ultimoFaturamento = { fatDia: null, fatMes: null, atualizadoEm: null }
+let ultimoFaturamento = { fatDia: null, fatMes: null, aEnviar: null, atualizadoEm: null }
 const STARTUP_TS = Math.floor(Date.now() / 1000) // segundos — filtra mensagens antigas no sync
 
 const CONVERSATIONS_FILE = path.join(__dirname, 'conversations.json')
@@ -194,9 +193,9 @@ const server = http.createServer((req, res) => {
         req.on('data', chunk => { body += chunk })
         req.on('end', () => {
             try {
-                const { fatDia, fatMes } = JSON.parse(body)
-                ultimoFaturamento = { fatDia, fatMes, atualizadoEm: new Date().toISOString() }
-                console.log(`💰 [Zaya] Faturamento recebido do Zyon — Dia: R$ ${fatDia}, Mês: R$ ${fatMes}`)
+                const { fatDia, fatMes, aEnviar } = JSON.parse(body)
+                ultimoFaturamento = { fatDia, fatMes, aEnviar: aEnviar || null, atualizadoEm: new Date().toISOString() }
+                console.log(`📊 [Zaya] Dados recebidos do Zyon — Dia: R$ ${fatDia} | Mês: R$ ${fatMes} | A Enviar: ${aEnviar}`)
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: true }))
             } catch (err) {
@@ -425,40 +424,31 @@ async function gerarResumoShopee() {
     }
 
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
-    console.log(`\n🛍️  Iniciando coleta de dados Shopee... (envio para: ${ownerJidToSend})`)
 
     try {
-        trackSend(await activeSock.sendMessage(ownerJidToSend, { text: '⏳ Coletando dados da sua loja Shopee, aguarde...' }))
-
-        const { orderText } = await coletarStatusPedidos()
-
-        const extrair = (texto, regex) => { const m = texto.match(regex); return m ? m[1] : '?' }
-
-        const aEnviar = extrair(orderText, /A Enviar\s*\((\d+)\)/i)
-
-        // Faturamento enviado pelo Zyon via POST /update-faturamento
-        const fatDia = ultimoFaturamento.fatDia || '?'
-        const fatMes = ultimoFaturamento.fatMes || '?'
-        if (ultimoFaturamento.atualizadoEm) {
-            const hora = new Date(ultimoFaturamento.atualizadoEm).toLocaleTimeString('pt-BR')
-            console.log(`💰 [Zaya] Faturamento (Zyon ${hora}) — Dia: R$ ${fatDia}, Mês: R$ ${fatMes}`)
-        } else {
-            console.log('⚠️  [Zaya] Faturamento ainda não recebido do Zyon')
+        if (!ultimoFaturamento.atualizadoEm) {
+            console.log('⚠️  [Zaya] !shopee: dados do Zyon ainda não recebidos')
+            trackSend(await activeSock.sendMessage(ownerJidToSend, {
+                text: '⏳ Aguardando dados do Zyon...\nO Zyon coleta a cada 30 minutos. Verifique se ele está rodando.'
+            }))
+            return
         }
 
-        const alertas = /atraso|cancelamento|reclamação|disputa|penalidade|violação|aviso|atenção/i.test(orderText)
-            ? 'Há itens que precisam de atenção — verifique o painel Shopee'
-            : 'Nenhum'
+        const fatDia  = ultimoFaturamento.fatDia  || '?'
+        const fatMes  = ultimoFaturamento.fatMes  || '?'
+        const aEnviar = ultimoFaturamento.aEnviar || '?'
+        const hora    = new Date(ultimoFaturamento.atualizadoEm).toLocaleTimeString('pt-BR')
+        const data    = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
 
-        const data = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+        console.log(`📊 [Zaya] !shopee — usando dados do Zyon (${hora})`)
 
         const mensagemFinal = [
             `🛍 *Shopee — ${data}*`,
+            `_atualizado às ${hora}_`,
             ``,
             `💰 *Faturamento do dia:* R$ ${fatDia}`,
             `📦 *A Enviar:* ${aEnviar}`,
             `💰 *Faturamento do mês:* R$ ${fatMes}`,
-            `⚠️ *Alertas:* ${alertas}`,
         ].join('\n')
 
         trackSend(await activeSock.sendMessage(ownerJidToSend, { text: mensagemFinal }))
@@ -468,7 +458,7 @@ async function gerarResumoShopee() {
         console.error('❌ Erro no resumo Shopee:', err.message)
         try {
             trackSend(await activeSock.sendMessage(ownerJidToSend, {
-                text: `❌ Erro ao coletar dados da Shopee:\n${err.message}`
+                text: `❌ Erro ao gerar relatório:\n${err.message}`
             }))
         } catch {}
     }

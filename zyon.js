@@ -4,7 +4,7 @@ const fs = require('fs')
 const path = require('path')
 const https = require('https')
 const http = require('http')
-const { verificarNovosPedidos, coletarFaturamentoGerencial } = require('./shopee-agent')
+const { verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos } = require('./shopee-agent')
 
 const PEDIDOS_FILE = path.join(__dirname, 'pedidos_vistos.json')
 let ultimoPedidoVisto = null
@@ -100,15 +100,15 @@ async function checarNovosPedidos() {
     }
 }
 
-// Envia faturamento coletado para Zaya via POST /update-faturamento
-function enviarFaturamentoParaZaya(fatDia, fatMes) {
+// Envia todos os dados Shopee para Zaya via POST /update-faturamento
+function enviarDadosParaZaya(fatDia, fatMes, aEnviar) {
     const url = process.env.ZAYA_URL
     if (!url) {
-        console.log('⚠️  [Zyon] ZAYA_URL não definida — faturamento não enviado à Zaya')
+        console.log('⚠️  [Zyon] ZAYA_URL não definida — dados não enviados à Zaya')
         return
     }
 
-    const data = JSON.stringify({ fatDia, fatMes })
+    const data = JSON.stringify({ fatDia, fatMes, aEnviar })
     let parsedUrl
     try { parsedUrl = new URL(`${url}/update-faturamento`) } catch {
         console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
@@ -125,38 +125,42 @@ function enviarFaturamentoParaZaya(fatDia, fatMes) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
     }, res => {
-        console.log(`📨 [Zyon] Faturamento enviado à Zaya (HTTP ${res.statusCode})`)
+        console.log(`📨 [Zyon] Dados enviados à Zaya (HTTP ${res.statusCode}) — Dia: R$ ${fatDia || '?'}, Mês: R$ ${fatMes || '?'}, A Enviar: ${aEnviar || '?'}`)
     })
-    req.on('error', err => console.error(`❌ [Zyon] Erro ao enviar faturamento: ${err.message}`))
+    req.on('error', err => console.error(`❌ [Zyon] Erro ao enviar dados: ${err.message}`))
     req.write(data)
     req.end()
 }
 
-async function coletarEEnviarFaturamento() {
+async function coletarEEnviarDados() {
     try {
-        console.log(`\n💰 [Zyon] Coletando faturamento — ${new Date().toLocaleTimeString('pt-BR')}`)
-        const { fatDia, fatMes } = await coletarFaturamentoGerencial()
+        console.log(`\n📊 [Zyon] Coletando dados Shopee — ${new Date().toLocaleTimeString('pt-BR')}`)
 
-        if (fatDia || fatMes) {
-            console.log(`💰 [Zyon] Faturamento OK — Dia: R$ ${fatDia || '?'}, Mês: R$ ${fatMes || '?'}`)
-            enviarFaturamentoParaZaya(fatDia, fatMes)
-        } else {
-            console.log('⚠️  [Zyon] Faturamento não extraído — verifique debug_shopee/gerencial.png')
-        }
+        // Faturamento (datacenter/overview) e pedidos A Enviar em sequência
+        const [{ fatDia, fatMes }, { orderText }] = await Promise.all([
+            coletarFaturamentoGerencial(),
+            coletarStatusPedidos(),
+        ])
+
+        const m = orderText.match(/A Enviar\s*\((\d+)\)/i)
+        const aEnviar = m ? m[1] : null
+
+        console.log(`💰 [Zyon] Dia: R$ ${fatDia || '?'} | Mês: R$ ${fatMes || '?'} | A Enviar: ${aEnviar || '?'}`)
+        enviarDadosParaZaya(fatDia, fatMes, aEnviar)
     } catch (err) {
-        console.error('❌ [Zyon] Erro ao coletar faturamento:', err.message)
+        console.error('❌ [Zyon] Erro ao coletar dados Shopee:', err.message)
     }
 }
 
 const INTERVALO_MS = 3 * 60 * 1000
-const INTERVALO_FAT_MS = 30 * 60 * 1000  // faturamento a cada 30 min
+const INTERVALO_DADOS_MS = 30 * 60 * 1000  // dados Shopee a cada 30 min
 
 console.log('⚡ Zyon iniciado — monitoramento de pedidos Shopee')
-console.log(`🔁 Pedidos: a cada ${INTERVALO_MS / 60000} min | Faturamento: a cada ${INTERVALO_FAT_MS / 60000} min`)
+console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados completos: a cada ${INTERVALO_DADOS_MS / 60000} min`)
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
 console.log('─────────────────────────────────────────────────')
 
 checarNovosPedidos()
-coletarEEnviarFaturamento()
+coletarEEnviarDados()
 setInterval(checarNovosPedidos, INTERVALO_MS)
-setInterval(coletarEEnviarFaturamento, INTERVALO_FAT_MS)
+setInterval(coletarEEnviarDados, INTERVALO_DADOS_MS)
