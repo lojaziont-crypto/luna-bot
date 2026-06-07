@@ -502,11 +502,17 @@ async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
     return resultado.nome
 }
 
-// Rola para o topo do histórico (carrega mensagens antigas) e extrai toda a conversa,
-// classificando cada mensagem por data-cy ("webchat-message-receive" = cliente, "webchat-message-send" = loja).
+// Carrega o histórico antigo (rolando ao topo) e então percorre TODA a rolagem da lista
+// virtualizada de mensagens — do início ao fim — coletando e deduplicando cada uma, já que
+// o ReactVirtualized mantém só as linhas visíveis no DOM (ler de uma vez pegaria só um trecho
+// da conversa). Cada mensagem é classificada por data-cy ("webchat-message-receive" = cliente,
+// "webchat-message-send" = loja).
 // Identifica o produto em discussão pelo card "Interesse do comprador" no painel da estação (data-cy="webchat-station-root"),
 // que expõe o ID real do produto no atributo value do checkbox — muito mais confiável que adivinhar pelo texto da conversa.
 async function lerConversaCompleta(page) {
+    // A lista de mensagens é virtualizada (ReactVirtualized) — primeiro forçamos o carregamento
+    // do histórico mais antigo rolando ao topo repetidas vezes (a Shopee busca mais mensagens
+    // via API a cada rolagem, e isso leva um tempo para responder).
     for (let i = 0; i < 3; i++) {
         await page.evaluate(() => {
             const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
@@ -521,28 +527,68 @@ async function lerConversaCompleta(page) {
     // conversa tem produto associado) antes de tentar ler os dados.
     await page.waitForSelector('[data-cy="webchat-station-root"] [title][style*="word-break"]', { timeout: 8000 }).catch(() => {})
 
-    const dados = await page.evaluate(() => {
-        const mensagens = []
-        const itens = document.querySelectorAll('[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"]')
-        itens.forEach((el) => {
-            const remetente = el.getAttribute('data-cy') === 'webchat-message-send' ? 'loja' : 'cliente'
-            // O texto vem com o horário colado (ex: "Boa noite21:47") porque o timestamp fica
-            // num <div> aninhado dentro do próprio texto — removemos o sufixo "HH:MM" do final.
-            let texto = (el.innerText || '')
-                .replace(/\s+/g, ' ')
-                .trim()
-                .replace(/\s*\d{1,2}:\d{2}\s*$/, '')
-                .trim()
+    const dados = await page.evaluate(async () => {
+        // CRÍTICO: a lista é virtualizada — o DOM só contém as linhas visíveis no momento
+        // (o ReactVirtualized desmonta as demais para economizar memória). Ler o DOM uma
+        // única vez captura só um trecho da conversa (geralmente o mais recente), fazendo
+        // a IA "esquecer" a apresentação inicial, dados que o cliente já informou etc.
+        // Por isso percorremos TODA a rolagem da lista — do topo ao fim — coletando as
+        // mensagens visíveis a cada passo e deduplicando pela posição "top" de cada linha
+        // (estável entre re-renderizações, pois o ReactVirtualized posiciona cada linha de
+        // forma absoluta conforme o índice dela na lista).
+        const coletadas = new Map()
 
-            // Mensagens de imagem/arquivo não têm texto (ou só o nome do arquivo) — sem isso
-            // elas seriam descartadas silenciosamente e a IA nunca saberia que algo foi enviado.
-            // Marcamos explicitamente para que o prompt possa orientar a não pedir a arte de novo.
-            const temAnexo = !!el.querySelector('img, [class*="image" i], [class*="photo" i], [class*="attachment" i], [class*="thumbnail" i], [class*="file-message" i]')
-            if (temAnexo) texto = texto ? `${texto} [imagem/arquivo enviado]` : '[imagem/arquivo enviado]'
+        const coletarVisiveis = () => {
+            const itens = document.querySelectorAll('[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"]')
+            itens.forEach((el) => {
+                const remetente = el.getAttribute('data-cy') === 'webchat-message-send' ? 'loja' : 'cliente'
+                // O texto vem com o horário colado (ex: "Boa noite21:47") porque o timestamp fica
+                // num <div> aninhado dentro do próprio texto — removemos o sufixo "HH:MM" do final.
+                let texto = (el.innerText || '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .replace(/\s*\d{1,2}:\d{2}\s*$/, '')
+                    .trim()
 
-            if (!texto) return
-            mensagens.push({ remetente, texto: texto.substring(0, 1000) })
-        })
+                // Mensagens de imagem/arquivo não têm texto (ou só o nome do arquivo) — sem isso
+                // elas seriam descartadas silenciosamente e a IA nunca saberia que algo foi enviado.
+                // Marcamos explicitamente para que o prompt possa orientar a não pedir a arte de novo.
+                const temAnexo = !!el.querySelector('img, [class*="image" i], [class*="photo" i], [class*="attachment" i], [class*="thumbnail" i], [class*="file-message" i]')
+                if (temAnexo) texto = texto ? `${texto} [imagem/arquivo enviado]` : '[imagem/arquivo enviado]'
+                if (!texto) return
+
+                const linha = el.closest('[style*="position: absolute"]')
+                const topMatch = linha?.getAttribute('style')?.match(/top:\s*([\d.]+)px/)
+                const chave = topMatch ? `${topMatch[1]}::${remetente}` : `${remetente}::${texto.substring(0, 80)}`
+                if (!coletadas.has(chave)) {
+                    coletadas.set(chave, { remetente, texto: texto.substring(0, 1000), ordem: topMatch ? parseFloat(topMatch[1]) : coletadas.size })
+                }
+            })
+        }
+
+        const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
+        if (grid) {
+            const fimRolagem = Math.max(0, grid.scrollHeight - grid.clientHeight)
+            const passo = Math.max(grid.clientHeight * 0.6, 100)
+
+            grid.scrollTop = 0
+            await new Promise(r => setTimeout(r, 500))
+            coletarVisiveis()
+
+            let pos = 0
+            while (pos < fimRolagem) {
+                pos = Math.min(pos + passo, fimRolagem)
+                grid.scrollTop = pos
+                await new Promise(r => setTimeout(r, 500))
+                coletarVisiveis()
+            }
+        } else {
+            coletarVisiveis()
+        }
+
+        const mensagens = Array.from(coletadas.values())
+            .sort((a, b) => a.ordem - b.ordem)
+            .map(({ remetente, texto }) => ({ remetente, texto }))
 
         let produtoId = null
         let produtoNome = null
