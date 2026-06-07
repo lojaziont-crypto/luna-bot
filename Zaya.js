@@ -18,6 +18,7 @@ const botSentMessages = new Set()  // IDs de mensagens enviadas pela Zaya (evita
 let activeSock = null
 let ownerJid = null
 let reconnectTimer = null
+let ultimoFaturamento = { fatDia: null, fatMes: null, atualizadoEm: null }
 const STARTUP_TS = Math.floor(Date.now() / 1000) // segundos — filtra mensagens antigas no sync
 
 const CONVERSATIONS_FILE = path.join(__dirname, 'conversations.json')
@@ -186,6 +187,22 @@ const server = http.createServer((req, res) => {
                 console.error('❌ /notify-order error:', err.message)
                 res.writeHead(400, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+    } else if (req.method === 'POST' && req.url === '/update-faturamento') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', () => {
+            try {
+                const { fatDia, fatMes } = JSON.parse(body)
+                ultimoFaturamento = { fatDia, fatMes, atualizadoEm: new Date().toISOString() }
+                console.log(`💰 [Zaya] Faturamento recebido do Zyon — Dia: R$ ${fatDia}, Mês: R$ ${fatMes}`)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /update-faturamento error:', err.message)
+                res.writeHead(400)
+                res.end(JSON.stringify({ ok: false }))
             }
         })
     } else if (req.url === '/health') {
@@ -413,41 +430,23 @@ async function gerarResumoShopee() {
     try {
         trackSend(await activeSock.sendMessage(ownerJidToSend, { text: '⏳ Coletando dados da sua loja Shopee, aguarde...' }))
 
-        const { overviewText, orderText, fatDia: fatDiaDom, fatMes: fatMesDom } = await coletarStatusPedidos()
+        const { orderText } = await coletarStatusPedidos()
 
         const extrair = (texto, regex) => { const m = texto.match(regex); return m ? m[1] : '?' }
 
         const aEnviar = extrair(orderText, /A Enviar\s*\((\d+)\)/i)
 
-        let fatDia = fatDiaDom || '?'
-        let fatMes = fatMesDom || '?'
-
-        // Fallback 1: R$ explícito no texto
-        if (fatDia === '?' || fatMes === '?') {
-            const comRS = [...overviewText.matchAll(/R\$\s*([\d.]+,\d{2})/g)].map(m => m[1])
-            if (fatDia === '?') fatDia = comRS[0] ?? '?'
-            if (fatMes === '?') fatMes = comRS[1] ?? comRS[0] ?? '?'
-        }
-        // Fallback 2: âncoras "Hoje" / "Este mês" (Shopee às vezes omite R$)
-        if (fatDia === '?' || fatMes === '?') {
-            const hojeM = overviewText.match(/[Hh]oje[^0-9\n]{0,20}(?:R\$\s*)?([\d.]+,\d{2})/) ||
-                          overviewText.match(/(?:R\$\s*)?([\d.]+,\d{2})[^0-9\n]{0,20}[Hh]oje/)
-            const mesM  = overviewText.match(/[Ee]ste\s+[Mm]ês[^0-9\n]{0,20}(?:R\$\s*)?([\d.]+,\d{2})/) ||
-                          overviewText.match(/(?:R\$\s*)?([\d.]+,\d{2})[^0-9\n]{0,20}[Ee]ste\s+[Mm]ês/)
-            if (fatDia === '?' && hojeM) fatDia = hojeM[1] ?? hojeM[2] ?? '?'
-            if (fatMes === '?' && mesM)  fatMes = mesM[1]  ?? mesM[2]  ?? '?'
-        }
-        // Fallback 3: qualquer número em formato brasileiro (último recurso)
-        if (fatDia === '?' || fatMes === '?') {
-            const nums = [...overviewText.matchAll(/\b([\d.]+,\d{2})\b/g)].map(m => m[1])
-            if (fatDia === '?') fatDia = nums[0] ?? '?'
-            if (fatMes === '?') fatMes = nums[1] ?? nums[0] ?? '?'
+        // Faturamento enviado pelo Zyon via POST /update-faturamento
+        const fatDia = ultimoFaturamento.fatDia || '?'
+        const fatMes = ultimoFaturamento.fatMes || '?'
+        if (ultimoFaturamento.atualizadoEm) {
+            const hora = new Date(ultimoFaturamento.atualizadoEm).toLocaleTimeString('pt-BR')
+            console.log(`💰 [Zaya] Faturamento (Zyon ${hora}) — Dia: R$ ${fatDia}, Mês: R$ ${fatMes}`)
+        } else {
+            console.log('⚠️  [Zaya] Faturamento ainda não recebido do Zyon')
         }
 
-        console.log(`💰 [Zaya] Faturamento final — Dia: ${fatDia}, Mês: ${fatMes}`)
-
-        const allText = overviewText + ' ' + orderText
-        const alertas = /atraso|cancelamento|reclamação|disputa|penalidade|violação|aviso|atenção/i.test(allText)
+        const alertas = /atraso|cancelamento|reclamação|disputa|penalidade|violação|aviso|atenção/i.test(orderText)
             ? 'Há itens que precisam de atenção — verifique o painel Shopee'
             : 'Nenhum'
 

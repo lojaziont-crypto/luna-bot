@@ -189,15 +189,17 @@ function buscarReceitaRecursivo(obj, caminho, profundidade) {
     return resultado
 }
 
-async function coletarStatusPedidos() {
+// Acessa a página de Informações Gerenciais da Shopee, trata o diálogo de senha,
+// intercepta as respostas de API e extrai o faturamento do dia e do mês.
+// Chamada pelo Zyon a cada 30 min; os valores são enviados à Zaya via POST.
+async function coletarFaturamentoGerencial() {
     const browser = await launchBrowser(resolverChrome())
     try {
         const page = await browser.newPage()
         await page.setViewport({ width: 1366, height: 768 })
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
 
-        // Intercepta respostas JSON da API Shopee antes de navegar
-        // A Shopee usa obfuscação de fonte no DOM — os valores reais estão nas chamadas à API
+        // Intercepta respostas JSON da API antes de navegar
         const respostasApi = []
         page.on('response', function(response) {
             const url = response.url()
@@ -214,43 +216,54 @@ async function coletarStatusPedidos() {
             }).catch(function() {})
         })
 
-        // 1. Overview — faturamento do dia e do mês
-        await page.goto(`${BASE_URL}/portal/`, { waitUntil: 'networkidle2', timeout: 30000 })
-        await new Promise(r => setTimeout(r, 8000))
+        // URL da página de Informações Gerenciais — ajuste se necessário
+        // (verifique debug_shopee/gerencial.png após a primeira execução)
+        await page.goto(`${BASE_URL}/portal/finance/`, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 5000))
 
-        const urlOverview = page.url()
-        console.log(`🌐 [Zyon/overview] URL real: ${urlOverview}`)
+        const urlAtual = page.url()
+        console.log(`🌐 [Zyon/gerencial] URL: ${urlAtual}`)
 
-        if (urlOverview.includes('/account/login')) {
+        if (urlAtual.includes('/account/login')) {
             throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
         }
 
-        // Aguarda mais 3s para que chamadas de API assíncronas completem
-        await new Promise(r => setTimeout(r, 3000))
+        // Shopee exige confirmação de senha em páginas financeiras — preenche automaticamente
+        try {
+            await page.waitForSelector('input[type="password"]', { timeout: 6000, visible: true })
+            console.log('🔐 [Zyon] Diálogo de senha detectado — inserindo...')
+            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 80 })
+            await page.keyboard.press('Enter')
+            await new Promise(r => setTimeout(r, 5000))
+            console.log('🔐 [Zyon] Senha inserida')
+        } catch (_) {
+            console.log('🔓 [Zyon] Sem diálogo de senha (ou já autenticado)')
+        }
 
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'overview.png') })
-        console.log('📸 [Zyon] Screenshot: debug_shopee/overview.png')
-        console.log(`📡 [Zyon] APIs JSON capturadas: ${respostasApi.length}`)
+        // Aguarda APIs assíncronas após possível autenticação
+        await new Promise(r => setTimeout(r, 5000))
+
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'gerencial.png') })
+        console.log('📸 [Zyon] Screenshot: debug_shopee/gerencial.png')
+        console.log(`📡 [Zyon/gerencial] APIs capturadas: ${respostasApi.length}`)
         respostasApi.forEach(function(r) { console.log('  → ' + r.url) })
 
-        // Salva todas as respostas para debug
         try {
             fs.writeFileSync(
-                path.join(DEBUG_DIR, 'api_responses.json'),
+                path.join(DEBUG_DIR, 'gerencial_api.json'),
                 JSON.stringify(respostasApi, null, 2).substring(0, 500000)
             )
-            console.log('💾 [Zyon] APIs salvas em debug_shopee/api_responses.json')
+            console.log('💾 [Zyon] Salvo: debug_shopee/gerencial_api.json')
         } catch (_) {}
 
-        // Procura receita nas respostas de API
+        // Busca faturamento nas respostas capturadas
         let fatDia = null, fatMes = null
         for (const resp of respostasApi) {
             if (fatDia && fatMes) break
             const urlL = resp.url.toLowerCase()
             const snippet = JSON.stringify(resp.json).substring(0, 1000).toLowerCase()
-            const relevante = /revenue|gmv|income|earning|sales|overview|dashboard|performance|finance/.test(urlL + snippet)
+            const relevante = /revenue|gmv|income|earning|sales|finance|report|gerencial|overview|dashboard/.test(urlL + snippet)
             if (!relevante) continue
-
             const encontrado = buscarReceitaRecursivo(resp.json, '', 0)
             if (encontrado.campos.length) {
                 console.log('📡 [Zyon/api] ' + resp.url + ': ' + JSON.stringify(encontrado.campos).substring(0, 300))
@@ -259,29 +272,45 @@ async function coletarStatusPedidos() {
             if (!fatMes && encontrado.mes) fatMes = encontrado.mes
         }
 
-        console.log('💰 [Zyon] API — Dia: ' + (fatDia || 'não encontrado') + ', Mês: ' + (fatMes || 'não encontrado'))
-
-        const overviewText = await page.evaluate(function() {
+        const textoDebug = await page.evaluate(function() {
             return document.body.innerText.replace(/\s+/g, ' ').trim()
         })
-        console.log('📊 [Zyon/overview] ' + overviewText.substring(0, 500))
+        console.log('📊 [Zyon/gerencial] ' + textoDebug.substring(0, 500))
+        console.log('💰 [Zyon] Faturamento — Dia: ' + (fatDia || 'não encontrado') + ', Mês: ' + (fatMes || 'não encontrado'))
 
-        // 2. Pedidos — A Enviar
+        return { fatDia: fatDia, fatMes: fatMes }
+    } finally {
+        await browser.close()
+    }
+}
+
+// Busca apenas a contagem de pedidos A Enviar — faturamento vem do Zyon via /update-faturamento
+async function coletarStatusPedidos() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await page.setViewport({ width: 1366, height: 768 })
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+
         await page.goto(
             `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`,
             { waitUntil: 'networkidle2', timeout: 30000 }
         )
         await new Promise(r => setTimeout(r, 15000))
 
+        if (page.url().includes('/account/login')) {
+            throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+        }
+
         const orderText = await page.evaluate(function() {
             return document.body.innerText.replace(/\s+/g, ' ').trim()
         })
         console.log('📊 [Zyon/orders] ' + orderText.substring(0, 600))
 
-        return { overviewText: overviewText, orderText: orderText, fatDia: fatDia, fatMes: fatMes }
+        return { orderText: orderText }
     } finally {
         await browser.close()
     }
 }
 
-module.exports = { coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos }
+module.exports = { coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial }
