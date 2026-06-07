@@ -519,6 +519,9 @@ function verificadoHoje(registro) {
 async function verificarPedidosSemArte(browser, page) {
     console.log(`\n🎨 [Zyon] Verificando pedidos em aberto sem arte enviada...`)
     const pedidos = await listarPedidosEmAberto(page)
+    pedidos.forEach((p, i) => {
+        console.log(`🎨 [Zyon/arte] ${i + 1}/${pedidos.length} — Pedido #${p.orderId} | Comprador: ${p.comprador || '?'} | Produto: ${p.produtoNome}`)
+    })
     const pendentes = pedidos.filter(p => !verificadoHoje(arteSolicitada[p.orderId]))
 
     if (pendentes.length === 0) {

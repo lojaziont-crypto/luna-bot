@@ -844,18 +844,23 @@ async function listarPedidosEmAberto(page) {
             if (resultado.some(p => p.orderId === orderId)) continue
 
             // Sobe pelos containers até achar um "cartão" que tenha tanto o nome do
-            // produto quanto o nome do comprador — ambos costumam estar no mesmo bloco
+            // produto quanto o nome do comprador — ambos costumam estar no mesmo bloco.
+            // O nome do produto fica em [class*="item-name"] (ex: "Camisa Camiseta Polo...")
+            // e o nome do comprador em [class*="buyer-username"] — confirmado inspecionando
+            // debug_shopee/pedidos_personalizacao.html (não são links com /product//buyer/
+            // nem têm atributo [title], como a versão antiga deste seletor assumia — por
+            // isso a função vinha retornando 0 pedidos).
             let produtoNome = null
             let comprador = null
             let container = marcador
             for (let i = 0; i < 10 && container; i++) {
                 if (!produtoNome) {
-                    const produtoEl = container.querySelector('a[href*="/product/"], [title]')
-                    const txt = (produtoEl?.getAttribute('title') || produtoEl?.textContent || '').trim()
+                    const produtoEl = container.querySelector('[class*="item-name"]')
+                    const txt = (produtoEl?.textContent || '').trim()
                     if (txt.length > 3) produtoNome = txt.substring(0, 200)
                 }
                 if (!comprador) {
-                    const compradorEl = container.querySelector('a[href*="/buyer/"], a[href*="/user/"], a[href*="/usercenter/"]')
+                    const compradorEl = container.querySelector('[class*="buyer-username"]')
                     const txt = (compradorEl?.textContent || '').trim()
                     if (txt.length > 1 && txt.length < 60) comprador = txt
                 }
