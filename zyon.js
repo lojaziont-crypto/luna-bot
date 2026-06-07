@@ -190,7 +190,7 @@ async function coletarEEnviarDados() {
 
 const CHAT_SYSTEM_PROMPT = `Você é Zyon, assistente virtual de atendimento ao cliente da loja.
 
-Na primeira mensagem de cada conversa, apresente-se: "Olá! Sou o Zyon, assistente virtual da loja. Estou aqui para te ajudar! 😊 A qualquer momento você pode digitar *falar com atendente* para ser atendido por um humano."
+Na primeira mensagem de cada conversa, apresente-se: "Olá! Sou o Zyon, assistente virtual da loja. Estou aqui para te ajudar! 😊"
 
 INSTRUÇÕES GERAIS
 - Responda apenas utilizando informações presentes na Base de Conhecimento e no anúncio do produto.
