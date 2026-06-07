@@ -162,10 +162,42 @@ async function coletarStatusPedidos() {
             throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
         }
 
-        const overviewText = await page.evaluate(() =>
-            document.body.innerText.replace(/\s+/g, ' ').trim()
-        )
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'overview.png') })
+        console.log('📸 [Zyon] Screenshot: debug_shopee/overview.png')
+
+        const dadosOverview = await page.evaluate(() => {
+            const text = document.body.innerText.replace(/\s+/g, ' ').trim()
+
+            // Extrai nós folha com valores no formato monetário BR (com ou sem R$)
+            const valores = []
+            for (const el of document.querySelectorAll('span, div, p, td, strong, b, h1, h2, h3')) {
+                if (el.children.length > 0) continue
+                const t = (el.innerText || el.textContent || '').trim()
+                if (!/^(?:R\$\s*)?[\d.]*\d,\d{2}$/.test(t)) continue
+                const bloco = el.closest('[class]') || el.parentElement
+                const ctx = bloco ? (bloco.innerText || '').replace(/\s+/g, ' ').trim() : ''
+                valores.push({ v: t, ctx: ctx.substring(0, 300) })
+            }
+
+            return { text, valores: valores.slice(0, 20) }
+        })
+
+        const overviewText = dadosOverview.text
         console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 2000)}`)
+        if (dadosOverview.valores.length) {
+            console.log(`💰 [Zyon/overview] Valores DOM: ${JSON.stringify(dadosOverview.valores.slice(0, 6))}`)
+        }
+
+        let fatDia = null, fatMes = null
+        for (const { v, ctx } of dadosOverview.valores) {
+            const num = v.replace(/^R\$\s*/, '').trim()
+            const c = ctx.toLowerCase()
+            if (!fatDia && c.includes('hoje')) fatDia = num
+            if (!fatMes && (c.includes('este mês') || c.includes('este mes') ||
+                (c.includes('mês') && !c.includes('hoje')) ||
+                (c.includes('mes') && !c.includes('hoje')))) fatMes = num
+        }
+        console.log(`💰 [Zyon] Extração DOM — Dia: ${fatDia ?? 'não encontrado'}, Mês: ${fatMes ?? 'não encontrado'}`)
 
         // 2. Pedidos — A Enviar, Enviados, Concluídos, Alertas
         await page.goto(
@@ -179,7 +211,7 @@ async function coletarStatusPedidos() {
         )
         console.log(`📊 [Zyon/orders] ${orderText.substring(0, 600)}`)
 
-        return { overviewText, orderText }
+        return { overviewText, orderText, fatDia, fatMes }
     } finally {
         await browser.close()
     }

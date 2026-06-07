@@ -413,22 +413,38 @@ async function gerarResumoShopee() {
     try {
         trackSend(await activeSock.sendMessage(ownerJidToSend, { text: '⏳ Coletando dados da sua loja Shopee, aguarde...' }))
 
-        const { overviewText, orderText } = await coletarStatusPedidos()
+        const { overviewText, orderText, fatDia: fatDiaDom, fatMes: fatMesDom } = await coletarStatusPedidos()
 
         const extrair = (texto, regex) => { const m = texto.match(regex); return m ? m[1] : '?' }
 
         const aEnviar = extrair(orderText, /A Enviar\s*\((\d+)\)/i)
 
-        let fatDia = '?', fatMes = '?'
-        const fatPair = overviewText.match(/[Ff]aturamento[^R$]{0,40}R\$\s*([\d.]+,\d{2})[^R$]{0,60}R\$\s*([\d.]+,\d{2})/)
-        if (fatPair) {
-            fatDia = fatPair[1]
-            fatMes = fatPair[2]
-        } else {
-            const moedas = [...overviewText.matchAll(/R\$\s*([\d.]+,\d{2})/g)].map(m => m[1])
-            fatDia = moedas[0] ?? '?'
-            fatMes = moedas[1] ?? moedas[0] ?? '?'
+        let fatDia = fatDiaDom || '?'
+        let fatMes = fatMesDom || '?'
+
+        // Fallback 1: R$ explícito no texto
+        if (fatDia === '?' || fatMes === '?') {
+            const comRS = [...overviewText.matchAll(/R\$\s*([\d.]+,\d{2})/g)].map(m => m[1])
+            if (fatDia === '?') fatDia = comRS[0] ?? '?'
+            if (fatMes === '?') fatMes = comRS[1] ?? comRS[0] ?? '?'
         }
+        // Fallback 2: âncoras "Hoje" / "Este mês" (Shopee às vezes omite R$)
+        if (fatDia === '?' || fatMes === '?') {
+            const hojeM = overviewText.match(/[Hh]oje[^0-9\n]{0,20}(?:R\$\s*)?([\d.]+,\d{2})/) ||
+                          overviewText.match(/(?:R\$\s*)?([\d.]+,\d{2})[^0-9\n]{0,20}[Hh]oje/)
+            const mesM  = overviewText.match(/[Ee]ste\s+[Mm]ês[^0-9\n]{0,20}(?:R\$\s*)?([\d.]+,\d{2})/) ||
+                          overviewText.match(/(?:R\$\s*)?([\d.]+,\d{2})[^0-9\n]{0,20}[Ee]ste\s+[Mm]ês/)
+            if (fatDia === '?' && hojeM) fatDia = hojeM[1] ?? hojeM[2] ?? '?'
+            if (fatMes === '?' && mesM)  fatMes = mesM[1]  ?? mesM[2]  ?? '?'
+        }
+        // Fallback 3: qualquer número em formato brasileiro (último recurso)
+        if (fatDia === '?' || fatMes === '?') {
+            const nums = [...overviewText.matchAll(/\b([\d.]+,\d{2})\b/g)].map(m => m[1])
+            if (fatDia === '?') fatDia = nums[0] ?? '?'
+            if (fatMes === '?') fatMes = nums[1] ?? nums[0] ?? '?'
+        }
+
+        console.log(`💰 [Zaya] Faturamento final — Dia: ${fatDia}, Mês: ${fatMes}`)
 
         const allText = overviewText + ' ' + orderText
         const alertas = /atraso|cancelamento|reclamação|disputa|penalidade|violação|aviso|atenção/i.test(allText)
