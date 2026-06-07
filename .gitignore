@@ -7,3 +7,5 @@ shopee_session.json
 conversations.json
 state.json
 pedidos_vistos.json
+produtos.json
+mensagens_respondidas.json

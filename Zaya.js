@@ -8,6 +8,7 @@ const cron = require('node-cron')
 const fs = require('fs')
 const path = require('path')
 const http = require('http')
+const https = require('https')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const conversations = new Map()
@@ -170,6 +171,22 @@ async function notifyNewOrder(orderId) {
     }
 }
 
+async function notifyChatHuman(nomeCliente, ultimaMensagem, resumo) {
+    if (!activeSock) {
+        console.log('⚠️ notifyChatHuman: WhatsApp não conectado')
+        return
+    }
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+            text: `🙋 *Atendimento humano necessário (Shopee)*\n\n*Cliente:* ${nomeCliente}\n*Última mensagem:* ${ultimaMensagem}\n\n*Resumo da conversa:*\n${resumo}`
+        }))
+        console.log(`🙋 [Zyon→Zaya] Notificação de atendimento humano enviada: ${nomeCliente}`)
+    } catch (err) {
+        console.error('❌ Erro ao enviar notificação de atendimento humano:', err.message)
+    }
+}
+
 // HTTP server — Zyon envia POST /notify-order para notificar nova venda
 const PORT = process.env.PORT || 3000
 const server = http.createServer((req, res) => {
@@ -184,6 +201,21 @@ const server = http.createServer((req, res) => {
                 res.end(JSON.stringify({ ok: true }))
             } catch (err) {
                 console.error('❌ /notify-order error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+    } else if (req.method === 'POST' && req.url === '/notify-chat-human') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { nomeCliente, ultimaMensagem, resumo } = JSON.parse(body)
+                await notifyChatHuman(nomeCliente, ultimaMensagem, resumo)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /notify-chat-human error:', err.message)
                 res.writeHead(400, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err.message }))
             }
@@ -417,6 +449,40 @@ async function connectToWhatsApp() {
     })
 }
 
+function solicitarFaturamentoZyon() {
+    return new Promise((resolve) => {
+        const zyonUrl = process.env.ZYON_URL || 'http://localhost:3001'
+        let parsedUrl
+        try { parsedUrl = new URL(`${zyonUrl}/solicitar-faturamento`) } catch {
+            console.error('❌ [Zaya] ZYON_URL inválida:', zyonUrl)
+            return resolve()
+        }
+        const lib = parsedUrl.protocol === 'https:' ? https : http
+        const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+        const req = lib.request({
+            hostname: parsedUrl.hostname,
+            port,
+            path: '/solicitar-faturamento',
+            method: 'POST',
+            headers: { 'Content-Length': 0 }
+        }, (res) => {
+            console.log(`📥 [Zaya] Zyon concluiu coleta (HTTP ${res.statusCode})`)
+            res.resume()
+            resolve()
+        })
+        req.setTimeout(180000, () => {
+            console.log('⏰ [Zaya] Timeout aguardando Zyon (3 min)')
+            req.destroy()
+            resolve()
+        })
+        req.on('error', (err) => {
+            console.log(`⚠️  [Zaya] Zyon não disponível: ${err.message}`)
+            resolve()
+        })
+        req.end()
+    })
+}
+
 async function gerarResumoShopee() {
     if (!activeSock) {
         console.log('❌ Resumo Shopee: WhatsApp não conectado')
@@ -426,10 +492,17 @@ async function gerarResumoShopee() {
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
 
     try {
+        trackSend(await activeSock.sendMessage(ownerJidToSend, {
+            text: '⏳ Coletando dados atualizados, aguarde...'
+        }))
+
+        console.log('📲 [Zaya] Solicitando coleta imediata ao Zyon...')
+        await solicitarFaturamentoZyon()
+
         if (!ultimoFaturamento.atualizadoEm) {
-            console.log('⚠️  [Zaya] !shopee: dados do Zyon ainda não recebidos')
+            console.log('⚠️  [Zaya] Zyon não respondeu ou não está rodando')
             trackSend(await activeSock.sendMessage(ownerJidToSend, {
-                text: '⏳ Aguardando dados do Zyon...\nO Zyon coleta a cada 30 minutos. Verifique se ele está rodando.'
+                text: '⏳ Zyon não respondeu.\nVerifique se ele está rodando: `node zyon.js`'
             }))
             return
         }
@@ -440,7 +513,7 @@ async function gerarResumoShopee() {
         const hora    = new Date(ultimoFaturamento.atualizadoEm).toLocaleTimeString('pt-BR')
         const data    = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
 
-        console.log(`📊 [Zaya] !shopee — usando dados do Zyon (${hora})`)
+        console.log(`📊 [Zaya] !shopee — dados do Zyon atualizados às ${hora}`)
 
         const mensagemFinal = [
             `🛍 *Shopee — ${data}*`,

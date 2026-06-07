@@ -7,6 +7,8 @@ const fs = require('fs')
 const path = require('path')
 
 const BASE_URL = 'https://seller.shopee.com.br'
+const CHAT_URL = `${BASE_URL}/chat/`
+const PRODUTOS_LIST_URL = `${BASE_URL}/portal/product/list/all`
 const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
@@ -271,47 +273,81 @@ async function coletarFaturamentoGerencial() {
         }
 
         // ── Extração do faturamento DO MÊS ────────────────────────────────────
-        // O valor mensal fica em Fontes de Tráfego → Total de Vendas com filtro "Por Mês".
-        // A página carrega dados do dia por padrão; é preciso clicar no filtro para obter o mês.
-        const preClickCount = respostasApi.length
-
-        const filtroClicado = await page.evaluate(function() {
-            var candidatos = ['Por Mês', 'Por mês', 'Mês', 'Month']
-            for (var i = 0; i < candidatos.length; i++) {
-                var texto = candidatos[i]
-                var els = Array.prototype.slice.call(document.querySelectorAll('*'))
-                for (var j = 0; j < els.length; j++) {
-                    var el = els[j]
-                    if (el.children.length > 0) continue
-                    if (el.textContent.trim() === texto && el.offsetParent !== null) {
-                        el.click()
-                        return texto
-                    }
-                }
+        // Abordagem 1: fetch direto com parâmetros de período mensal (não depende de UI)
+        const resultMes = await page.evaluate(async function() {
+            var tentativas = [
+                'period=month',
+                'date_range_type=1',
+                'period=3',
+                'date_type=2',
+                'time_type=2',
+                'data_interval=month',
+                'period_type=2',
+                'time_granularity=2',
+                'period=2',
+                'time_period=month',
+            ]
+            for (var i = 0; i < tentativas.length; i++) {
+                try {
+                    var resp = await fetch('/api/mydata/v1/dashboard/traffic-sources/?' + tentativas[i], {
+                        credentials: 'include',
+                        headers: { 'Accept': 'application/json' }
+                    })
+                    if (!resp.ok) continue
+                    var json = await resp.json()
+                    if (!json || json.code !== 0 || !json.result || !json.result.overview) continue
+                    var sales = json.result.overview.total_sales
+                    if (typeof sales === 'number') return { param: tentativas[i], sales: sales }
+                } catch (e) {}
             }
             return null
         })
 
-        if (filtroClicado) {
-            console.log('🖱️  [Zyon] Filtro "' + filtroClicado + '" clicado — aguardando API mensal...')
-            await new Promise(r => setTimeout(r, 5000))
+        if (resultMes) {
+            fatMes = formatarBRL(resultMes.sales)
+            console.log('💰 [Zyon] fatMes fetch direto (' + resultMes.param + ') = ' + resultMes.sales + ' → ' + fatMes)
+        } else {
+            // Abordagem 2: clicar no filtro de período mensal na página
+            console.log('🖱️  [Zyon] Fetch direto sem resultado — tentando clicar no filtro "Por Mês"...')
+            const preClickCount = respostasApi.length
 
-            // Procura a nova chamada a traffic-sources (posterior ao clique)
-            var novasRespostas = respostasApi.slice(preClickCount)
-            for (var i = 0; i < novasRespostas.length; i++) {
-                var r = novasRespostas[i]
-                if (r.url.includes('/traffic-source') && !r.url.includes('/product-contribution')) {
-                    var sales = r.json && r.json.result && r.json.result.overview && r.json.result.overview.total_sales
-                    if (typeof sales === 'number') {
-                        fatMes = formatarBRL(sales)
-                        console.log('💰 [Zyon] traffic-sources[mês] total_sales = ' + sales + ' → fatMes = ' + fatMes)
-                        console.log('🔗 [Zyon] URL completa: ' + r.fullPath)
-                        break
+            const filtroClicado = await page.evaluate(function() {
+                var textos = ['Por Mês', 'Por mês', 'Mês', 'Month']
+                var seletores = ['span', 'button', 'li', 'a', 'div']
+                for (var t = 0; t < textos.length; t++) {
+                    for (var s = 0; s < seletores.length; s++) {
+                        var els = document.querySelectorAll(seletores[s])
+                        for (var i = 0; i < els.length; i++) {
+                            var el = els[i]
+                            if (el.textContent.trim() === textos[t] && el.offsetParent !== null) {
+                                el.click()
+                                return textos[t]
+                            }
+                        }
                     }
                 }
+                return null
+            })
+
+            if (filtroClicado) {
+                console.log('🖱️  [Zyon] Clicado: "' + filtroClicado + '" — aguardando API mensal...')
+                await new Promise(r => setTimeout(r, 5000))
+                var novasRespostas = respostasApi.slice(preClickCount)
+                for (var i = 0; i < novasRespostas.length; i++) {
+                    var r = novasRespostas[i]
+                    if (r.url.includes('/traffic-source') && !r.url.includes('/product-contribution')) {
+                        var salesVal = r.json && r.json.result && r.json.result.overview && r.json.result.overview.total_sales
+                        if (typeof salesVal === 'number') {
+                            fatMes = formatarBRL(salesVal)
+                            console.log('💰 [Zyon] fatMes via clique = ' + salesVal + ' → ' + fatMes + ' | URL: ' + r.fullPath)
+                            break
+                        }
+                    }
+                }
+                if (!fatMes) console.log('⚠️  [Zyon] Clique feito mas API não retornou total_sales mensal')
+            } else {
+                console.log('⚠️  [Zyon] Filtro "Por Mês" não encontrado na página')
             }
-        } else {
-            console.log('⚠️  [Zyon] Filtro "Por Mês" não encontrado — verifique debug_shopee/gerencial.png')
         }
 
         // Salva screenshot e todas as APIs (dia + mês) para debug
@@ -363,4 +399,189 @@ async function coletarStatusPedidos() {
     }
 }
 
-module.exports = { coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial }
+// ───────────────────────────── Chat de clientes ─────────────────────────────
+
+// Abre a aba de Chat do Seller Center
+async function abrirChat(page) {
+    await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+    await new Promise(r => setTimeout(r, 8000))
+
+    if (page.url().includes('/account/login')) {
+        throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+    }
+
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_lista.png') })
+    console.log('📸 [Zyon/chat] Screenshot: debug_shopee/chat_lista.png')
+}
+
+// Procura na lista o próximo item com indicador visual de "não lida" (badge/contador/ponto)
+// e clica para abri-lo. Retorna o nome do cliente ou null se não houver pendências.
+async function abrirProximaConversaNaoRespondida(page) {
+    const cliente = await page.evaluate(() => {
+        const itens = document.querySelectorAll(
+            '[class*="conversation"], [class*="chat-list"] [class*="item"], [class*="session-item"], [class*="ChatList"] li, aside li, [role="listitem"]'
+        )
+        for (const item of itens) {
+            if (item.offsetParent === null) continue
+            const indicador = item.querySelector('[class*="unread"], [class*="badge"], [class*="dot"], [class*="red-dot"], [class*="notif"]')
+            if (!indicador) continue
+            const texto = (item.innerText || '').replace(/\s+/g, ' ').trim()
+            if (!texto) continue
+            const nome = texto.split(/\s{2,}|\d{1,2}:\d{2}|·|\|/)[0].trim().substring(0, 60)
+            item.click()
+            return nome || texto.substring(0, 60)
+        }
+        return null
+    })
+
+    if (cliente) {
+        await new Promise(r => setTimeout(r, 4000))
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
+        console.log(`💬 [Zyon/chat] Conversa aberta: ${cliente}`)
+    }
+    return cliente
+}
+
+// Rola para o topo do histórico (carrega mensagens antigas) e extrai toda a conversa visível,
+// classificando cada mensagem como 'cliente' ou 'loja' pelo alinhamento/classe do balão.
+// Também tenta identificar o produto referenciado (card de anúncio exibido no painel do chat).
+async function lerConversaCompleta(page) {
+    for (let i = 0; i < 2; i++) {
+        await page.evaluate(() => {
+            const painel = document.querySelector('[class*="message-list"], [class*="chat-content"], [class*="conversation-content"], [class*="msg-list"]')
+            if (painel) painel.scrollTop = 0
+        })
+        await new Promise(r => setTimeout(r, 2500))
+    }
+
+    const dados = await page.evaluate(() => {
+        const mensagens = []
+        const itens = document.querySelectorAll('[class*="message-item"], [class*="msg-item"], [class*="bubble"], [class*="message-bubble"], [class*="chat-msg"]')
+        itens.forEach((el) => {
+            const texto = (el.innerText || '').replace(/\s+/g, ' ').trim()
+            if (!texto) return
+            const ehLoja = !!el.closest('[class*="self"], [class*="sent"], [class*="right"], [class*="seller"], [class*="outgoing"]')
+            mensagens.push({ remetente: ehLoja ? 'loja' : 'cliente', texto: texto.substring(0, 1000) })
+        })
+
+        let produtoNome = null
+        const cardProduto = document.querySelector('[class*="product-card"], [class*="product-item"], [class*="goods-card"], [class*="item-card"], [class*="product-info"]')
+        if (cardProduto) {
+            produtoNome = (cardProduto.innerText || '').replace(/\s+/g, ' ').trim().substring(0, 200) || null
+        }
+
+        return { mensagens, produtoNome }
+    })
+
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_historico.png') })
+    console.log(`📖 [Zyon/chat] Conversa lida: ${dados.mensagens.length} mensagens | Produto: ${dados.produtoNome || '(não identificado)'}`)
+    return dados
+}
+
+// Digita e envia uma mensagem no campo de texto da conversa atualmente aberta
+async function enviarMensagemNoChat(page, texto) {
+    const seletorCampo = '[class*="chat"] textarea, [class*="message-input"] [contenteditable="true"], [contenteditable="true"], textarea[class*="input"]'
+    await page.waitForSelector(seletorCampo, { timeout: 8000, visible: true })
+    await page.click(seletorCampo)
+    await page.type(seletorCampo, texto, { delay: 25 })
+    await new Promise(r => setTimeout(r, 500))
+    await page.keyboard.press('Enter')
+    await new Promise(r => setTimeout(r, 2500))
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_enviado.png') })
+    console.log(`📤 [Zyon/chat] Mensagem enviada (${texto.length} chars)`)
+}
+
+// Localiza o produto pelo nome na aba de Cadastro de Produtos, abre o menu de "3 pontinhos"
+// da linha correspondente e clica em "Visualizar página do produto" (sem editar o anúncio),
+// extraindo título, preço e descrição da página pública.
+async function extrairInfoProduto(page, nomeProduto) {
+    await page.goto(PRODUTOS_LIST_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+    await new Promise(r => setTimeout(r, 6000))
+
+    if (page.url().includes('/account/login')) {
+        throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+    }
+
+    const termoBusca = (nomeProduto || '').substring(0, 60).trim()
+    const campoBusca = await page.$('input[placeholder*="roduto"], input[placeholder*="esquisar"], input[type="search"]')
+    if (campoBusca && termoBusca) {
+        await campoBusca.click({ clickCount: 3 })
+        await campoBusca.type(termoBusca, { delay: 40 })
+        await page.keyboard.press('Enter')
+        await new Promise(r => setTimeout(r, 4000))
+    }
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'produto_busca.png') })
+    console.log(`📸 [Zyon/produto] Screenshot: debug_shopee/produto_busca.png (busca: "${termoBusca}")`)
+
+    const menuAberto = await page.evaluate(() => {
+        const botoes = Array.from(document.querySelectorAll('[class*="more"], [class*="ellipsis"], [class*="dropdown-trigger"], button[class*="action"], [class*="operation"] button'))
+        const btn = botoes.find(b => b.offsetParent !== null)
+        if (btn) { btn.click(); return true }
+        return false
+    })
+    if (!menuAberto) {
+        console.log('⚠️  [Zyon/produto] Menu de "3 pontinhos" não encontrado na lista de produtos')
+        return null
+    }
+    await new Promise(r => setTimeout(r, 1500))
+
+    const novaAbaPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(null), 7000)
+        page.browser().once('targetcreated', async (target) => {
+            clearTimeout(timer)
+            try { resolve(await target.page()) } catch { resolve(null) }
+        })
+    })
+
+    const clicado = await page.evaluate(() => {
+        const opcoes = Array.from(document.querySelectorAll('li, a, span, div'))
+        const alvo = opcoes.find(el =>
+            /visualizar p[áa]gina do produto|ver p[áa]gina do produto|view product page/i.test((el.textContent || '').trim())
+            && el.offsetParent !== null
+        )
+        if (alvo) { alvo.click(); return true }
+        return false
+    })
+    if (!clicado) {
+        console.log('⚠️  [Zyon/produto] Opção "Visualizar página do produto" não encontrada no menu')
+        return null
+    }
+
+    let paginaProduto = await novaAbaPromise
+    const abriuNovaAba = !!paginaProduto
+    if (!paginaProduto) paginaProduto = page
+    await new Promise(r => setTimeout(r, 5000))
+    await paginaProduto.screenshot({ path: path.join(DEBUG_DIR, 'produto_pagina.png') })
+    console.log('📸 [Zyon/produto] Screenshot: debug_shopee/produto_pagina.png')
+
+    const info = await paginaProduto.evaluate(() => {
+        document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
+        const titulo = document.querySelector('h1, [class*="product-title"], [class*="item-name"], [class*="product-name"]')?.innerText?.trim() || null
+        const preco = document.querySelector('[class*="price"]')?.innerText?.replace(/\s+/g, ' ').trim() || null
+        const descricao = document.querySelector('[class*="description"], [class*="detail"]')?.innerText?.replace(/\s+/g, ' ').trim().substring(0, 4000) || null
+        const corpo = document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 6000)
+        return { titulo, preco, descricao, corpo }
+    })
+
+    const urlProduto = paginaProduto.url()
+    const matchId = urlProduto.match(/i\.\d+\.(\d+)/) || urlProduto.match(/product\/\d+\/(\d+)/)
+    const produtoId = matchId ? matchId[1] : null
+
+    if (abriuNovaAba) await paginaProduto.close()
+    if (!produtoId) console.log(`⚠️  [Zyon/produto] Não foi possível extrair o ID do produto da URL: ${urlProduto}`)
+
+    return {
+        produtoId,
+        titulo: info.titulo,
+        preco: info.preco,
+        descricao: info.descricao || info.corpo,
+        url: urlProduto,
+        atualizadoEm: new Date().toISOString(),
+    }
+}
+
+module.exports = {
+    coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
+    launchBrowser, resolverChrome,
+    abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
+}
