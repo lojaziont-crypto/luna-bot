@@ -486,49 +486,70 @@ async function abrirProximaConversaNaoRespondida(page) {
     return resultado.nome
 }
 
-// Rola para o topo do histórico (carrega mensagens antigas) e extrai toda a conversa visível,
-// classificando cada mensagem como 'cliente' ou 'loja' pelo alinhamento/classe do balão.
-// Também tenta identificar o produto referenciado (card de anúncio exibido no painel do chat).
+// Rola para o topo do histórico (carrega mensagens antigas) e extrai toda a conversa,
+// classificando cada mensagem por data-cy ("webchat-message-receive" = cliente, "webchat-message-send" = loja).
+// Identifica o produto em discussão pelo card "Interesse do comprador" no painel da estação (data-cy="webchat-station-root"),
+// que expõe o ID real do produto no atributo value do checkbox — muito mais confiável que adivinhar pelo texto da conversa.
 async function lerConversaCompleta(page) {
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
         await page.evaluate(() => {
-            const painel = document.querySelector('[class*="message-list"], [class*="chat-content"], [class*="conversation-content"], [class*="msg-list"]')
-            if (painel) painel.scrollTop = 0
+            const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
+            if (grid) grid.scrollTop = 0
         })
-        await new Promise(r => setTimeout(r, 2500))
+        await new Promise(r => setTimeout(r, 2000))
     }
 
     const dados = await page.evaluate(() => {
         const mensagens = []
-        const itens = document.querySelectorAll('[class*="message-item"], [class*="msg-item"], [class*="bubble"], [class*="message-bubble"], [class*="chat-msg"]')
+        const itens = document.querySelectorAll('[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"]')
         itens.forEach((el) => {
-            const texto = (el.innerText || '').replace(/\s+/g, ' ').trim()
+            const remetente = el.getAttribute('data-cy') === 'webchat-message-send' ? 'loja' : 'cliente'
+            // O texto vem com o horário colado (ex: "Boa noite21:47") porque o timestamp fica
+            // num <div> aninhado dentro do próprio texto — removemos o sufixo "HH:MM" do final.
+            const texto = (el.innerText || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/\s*\d{1,2}:\d{2}\s*$/, '')
+                .trim()
             if (!texto) return
-            const ehLoja = !!el.closest('[class*="self"], [class*="sent"], [class*="right"], [class*="seller"], [class*="outgoing"]')
-            mensagens.push({ remetente: ehLoja ? 'loja' : 'cliente', texto: texto.substring(0, 1000) })
+            mensagens.push({ remetente, texto: texto.substring(0, 1000) })
         })
 
+        let produtoId = null
         let produtoNome = null
-        const cardProduto = document.querySelector('[class*="product-card"], [class*="product-item"], [class*="goods-card"], [class*="item-card"], [class*="product-info"]')
-        if (cardProduto) {
-            produtoNome = (cardProduto.innerText || '').replace(/\s+/g, ' ').trim().substring(0, 200) || null
+        let produtoPreco = null
+        const stationRoot = document.querySelector('[data-cy="webchat-station-root"]')
+        if (stationRoot) {
+            const checkbox = stationRoot.querySelector('input[type="checkbox"][value]')
+            if (checkbox) produtoId = checkbox.getAttribute('value') || null
+
+            const nomeEl = stationRoot.querySelector('[title][style*="word-break"]')
+            if (nomeEl) produtoNome = (nomeEl.getAttribute('title') || nomeEl.textContent || '').trim().substring(0, 200) || null
+
+            const precoEl = stationRoot.querySelector('[title^="R$"]')
+            if (precoEl) produtoPreco = (precoEl.getAttribute('title') || '').trim() || null
         }
 
-        return { mensagens, produtoNome }
+        return { mensagens, produtoId, produtoNome, produtoPreco }
     })
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_historico.png') })
-    console.log(`📖 [Zyon/chat] Conversa lida: ${dados.mensagens.length} mensagens | Produto: ${dados.produtoNome || '(não identificado)'}`)
+    console.log(`📖 [Zyon/chat] Conversa lida: ${dados.mensagens.length} mensagens | Produto: ${dados.produtoNome || '(não identificado)'}${dados.produtoId ? ` (#${dados.produtoId})` : ''}`)
     return dados
 }
 
-// Digita e envia uma mensagem no campo de texto da conversa atualmente aberta
+// Digita e envia uma mensagem no campo de texto da conversa atualmente aberta.
+// Campo real: [data-cy="webchat-conversation-detail-input"] > #inputField > textarea
+// (placeholder "Insira uma mensagem aqui"); o texto de ajuda confirma "Shift+Enter = nova linha",
+// ou seja, Enter sozinho envia — não existe botão de enviar separado.
 async function enviarMensagemNoChat(page, texto) {
-    const seletorCampo = '[class*="chat"] textarea, [class*="message-input"] [contenteditable="true"], [contenteditable="true"], textarea[class*="input"]'
-    await page.waitForSelector(seletorCampo, { timeout: 8000, visible: true })
+    const seletorCampo = '[data-cy="webchat-conversation-detail-input"] textarea'
+    await page.waitForSelector(seletorCampo, { timeout: 10000, visible: true })
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_antes_enviar.png') })
     await page.click(seletorCampo)
     await page.type(seletorCampo, texto, { delay: 25 })
     await new Promise(r => setTimeout(r, 500))
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_digitado.png') })
     await page.keyboard.press('Enter')
     await new Promise(r => setTimeout(r, 2500))
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_enviado.png') })

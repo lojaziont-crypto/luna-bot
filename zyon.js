@@ -289,24 +289,30 @@ function notificarAtendimentoHumano(nomeCliente, ultimaMensagem, resumo) {
     req.end()
 }
 
-// Retorna as informações do produto a partir do cache em produtos.json; se ainda não
-// existir, extrai do anúncio via Puppeteer (cadastro → 3 pontinhos → visualizar página) e salva
-async function obterInfoProduto(page, produtoNome) {
+// Retorna as informações do produto a partir do cache em produtos.json (chave = produtoId,
+// extraído diretamente do checkbox no painel da estação do chat — estável e confiável).
+// Se ainda não estiver salvo, extrai do anúncio via Puppeteer (cadastro → 3 pontinhos →
+// visualizar página) usando o nome para localizá-lo, e salva sob o produtoId vindo do chat.
+async function obterInfoProduto(page, produtoId, produtoNome) {
+    if (!produtoId && !produtoNome) return null
+
+    if (produtoId && produtos[produtoId]) {
+        console.log(`📦 [Zyon/produto] Usando dados salvos em produtos.json: #${produtoId} — ${produtos[produtoId].titulo}`)
+        return produtos[produtoId]
+    }
     if (!produtoNome) return null
 
-    const existente = Object.values(produtos).find(p => p.titulo && produtoNome.includes(p.titulo.substring(0, 30)))
-    if (existente) {
-        console.log(`📦 [Zyon/produto] Usando dados salvos em produtos.json: ${existente.titulo}`)
-        return existente
-    }
-
-    console.log(`🔎 [Zyon/produto] Não encontrado em produtos.json — extraindo do anúncio: ${produtoNome}`)
+    console.log(`🔎 [Zyon/produto] Produto #${produtoId || '?'} não encontrado em produtos.json — extraindo do anúncio: ${produtoNome}`)
     try {
         const info = await extrairInfoProduto(page, produtoNome)
-        if (info && info.produtoId) {
-            produtos[info.produtoId] = info
-            salvarJSON(PRODUTOS_FILE, produtos)
-            console.log(`💾 [Zyon/produto] Salvo em produtos.json: #${info.produtoId} — ${info.titulo}`)
+        if (info) {
+            const chave = produtoId || info.produtoId
+            if (chave) {
+                info.produtoId = chave
+                produtos[chave] = info
+                salvarJSON(PRODUTOS_FILE, produtos)
+                console.log(`💾 [Zyon/produto] Salvo em produtos.json: #${chave} — ${info.titulo}`)
+            }
         }
         return info
     } catch (err) {
@@ -318,7 +324,7 @@ async function obterInfoProduto(page, produtoNome) {
 // Processa a conversa atualmente aberta: lê o histórico, identifica o produto, gera a
 // resposta com IA e envia — encaminhando para atendimento humano com resumo quando necessário
 async function processarConversaAberta(page, nomeCliente) {
-    const { mensagens, produtoNome } = await lerConversaCompleta(page)
+    const { mensagens, produtoId, produtoNome } = await lerConversaCompleta(page)
     if (mensagens.length === 0) return
 
     const ultimaMsgCliente = [...mensagens].reverse().find(m => m.remetente === 'cliente')
@@ -333,9 +339,9 @@ async function processarConversaAberta(page, nomeCliente) {
     }
 
     const primeiraMensagem = !mensagens.some(m => m.remetente === 'loja')
-    console.log(`🧑 [Zyon/chat] ${nomeCliente} — produto: ${produtoNome || '(não identificado)'} — gerando resposta...`)
+    console.log(`🧑 [Zyon/chat] ${nomeCliente} — produto: ${produtoNome || '(não identificado)'}${produtoId ? ` (#${produtoId})` : ''} — gerando resposta...`)
 
-    const infoProduto = await obterInfoProduto(page, produtoNome)
+    const infoProduto = await obterInfoProduto(page, produtoId, produtoNome)
     const resultado = await gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem)
 
     await enviarMensagemNoChat(page, resultado.resposta)
