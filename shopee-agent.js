@@ -7,7 +7,7 @@ const fs = require('fs')
 const path = require('path')
 
 const BASE_URL = 'https://seller.shopee.com.br'
-const CHAT_URL = `${BASE_URL}/chat/`
+const CHAT_URL = `${BASE_URL}/new-webchat/conversations`
 const PRODUTOS_LIST_URL = `${BASE_URL}/portal/product/list/all`
 const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
@@ -401,17 +401,27 @@ async function coletarStatusPedidos() {
 
 // ───────────────────────────── Chat de clientes ─────────────────────────────
 
-// Abre a aba de Chat do Seller Center
+// Abre a aba de Chat do Seller Center e aguarda a lista de conversas carregar de fato
+// (a SPA do new-webchat continua buscando dados após o "networkidle" do goto)
 async function abrirChat(page) {
     await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-    await new Promise(r => setTimeout(r, 8000))
+    await new Promise(r => setTimeout(r, 5000))
 
     if (page.url().includes('/account/login')) {
         throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
     }
 
+    const seletorLista = '[class*="conversation"], [class*="chat-list"], [class*="session-list"], [class*="webchat"]'
+    try {
+        await page.waitForSelector(seletorLista, { timeout: 25000 })
+        await page.waitForNetworkIdle({ idleTime: 1500, timeout: 20000 })
+    } catch (_) {
+        console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu dentro do tempo esperado — screenshot ainda será salvo para diagnóstico')
+    }
+    await new Promise(r => setTimeout(r, 3000))
+
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_lista.png') })
-    console.log('📸 [Zyon/chat] Screenshot: debug_shopee/chat_lista.png')
+    console.log(`📸 [Zyon/chat] Screenshot: debug_shopee/chat_lista.png (URL atual: ${page.url()})`)
 }
 
 // Procura na lista o próximo item com indicador visual de "não lida" (badge/contador/ponto)
