@@ -506,11 +506,18 @@ async function lerConversaCompleta(page) {
             const remetente = el.getAttribute('data-cy') === 'webchat-message-send' ? 'loja' : 'cliente'
             // O texto vem com o horário colado (ex: "Boa noite21:47") porque o timestamp fica
             // num <div> aninhado dentro do próprio texto — removemos o sufixo "HH:MM" do final.
-            const texto = (el.innerText || '')
+            let texto = (el.innerText || '')
                 .replace(/\s+/g, ' ')
                 .trim()
                 .replace(/\s*\d{1,2}:\d{2}\s*$/, '')
                 .trim()
+
+            // Mensagens de imagem/arquivo não têm texto (ou só o nome do arquivo) — sem isso
+            // elas seriam descartadas silenciosamente e a IA nunca saberia que algo foi enviado.
+            // Marcamos explicitamente para que o prompt possa orientar a não pedir a arte de novo.
+            const temAnexo = !!el.querySelector('img, [class*="image" i], [class*="photo" i], [class*="attachment" i], [class*="thumbnail" i], [class*="file-message" i]')
+            if (temAnexo) texto = texto ? `${texto} [imagem/arquivo enviado]` : '[imagem/arquivo enviado]'
+
             if (!texto) return
             mensagens.push({ remetente, texto: texto.substring(0, 1000) })
         })
