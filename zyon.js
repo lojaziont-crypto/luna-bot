@@ -16,7 +16,7 @@ const {
     verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos,
     launchBrowser, resolverChrome,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
-    listarPedidosPersonalizacaoSemArte, abrirConversaPorNome,
+    listarPedidosEmAberto, abrirConversaPorNome,
 } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
@@ -500,21 +500,29 @@ async function processarConversaAberta(page, nomeCliente) {
 
 const MENSAGEM_SOLICITAR_ARTE = 'Olá! Notamos que seu pedido de personalização ainda não possui a arte enviada. Para prosseguirmos com a produção, por favor envie a arte final pronta aqui no chat, preferencialmente em PNG com fundo transparente e boa resolução. 😊'
 
-// Verifica os pedidos de personalização em "A Enviar — Em aberto" e, para os que ainda
-// não enviaram a arte no chat, solicita educadamente. Roda só quando não há conversas
-// pendentes no chat (chamada a partir de verificarChatClientes), reaproveitando a mesma
-// página/sessão do browser. Registra cada pedido verificado em arte_solicitada.json para
-// nunca solicitar duas vezes ao mesmo pedido.
+// Verdadeiro quando o registro de arteSolicitada para o pedido já é de hoje — usado para
+// nunca solicitar a arte duas vezes no mesmo dia, mas permitir nova checagem em dias seguintes
+// (o cliente pode ter enviado a arte depois, ou ainda não ter enviado e merecer um lembrete).
+function verificadoHoje(registro) {
+    if (!registro?.verificadoEm) return false
+    return new Date(registro.verificadoEm).toDateString() === new Date().toDateString()
+}
+
+// Verifica TODOS os pedidos em "A Enviar — Em aberto" (independente do nome do produto) e,
+// para os que ainda não enviaram nenhuma imagem/arquivo no chat, solicita a arte educadamente.
+// Roda só quando não há conversas pendentes no chat (chamada a partir de verificarChatClientes),
+// reaproveitando a mesma página/sessão do browser. Registra cada pedido verificado em
+// arte_solicitada.json para nunca solicitar duas vezes no mesmo dia.
 async function verificarPedidosSemArte(page) {
-    console.log(`\n🎨 [Zyon] Verificando pedidos de personalização sem arte enviada...`)
-    const pedidos = await listarPedidosPersonalizacaoSemArte(page)
-    const pendentes = pedidos.filter(p => !arteSolicitada[p.orderId])
+    console.log(`\n🎨 [Zyon] Verificando pedidos em aberto sem arte enviada...`)
+    const pedidos = await listarPedidosEmAberto(page)
+    const pendentes = pedidos.filter(p => !verificadoHoje(arteSolicitada[p.orderId]))
 
     if (pendentes.length === 0) {
-        console.log('🎨 [Zyon] Nenhum pedido de personalização novo para verificar')
+        console.log('🎨 [Zyon] Nenhum pedido novo para verificar hoje')
         return
     }
-    console.log(`🎨 [Zyon] ${pendentes.length} pedido(s) de personalização a verificar`)
+    console.log(`🎨 [Zyon] ${pendentes.length} pedido(s) a verificar`)
 
     for (const pedido of pendentes) {
         if (!pedido.comprador) {

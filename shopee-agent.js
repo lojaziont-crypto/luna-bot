@@ -10,7 +10,6 @@ const BASE_URL = 'https://seller.shopee.com.br'
 const CHAT_URL = `${BASE_URL}/new-webchat/conversations`
 const PRODUTOS_LIST_URL = `${BASE_URL}/portal/product/list/all`
 const ORDERS_TOSHIP_URL = `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`
-const PALAVRAS_PERSONALIZACAO = ['personalizada', 'personalizado', 'arte', 'logo']
 const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
@@ -763,16 +762,17 @@ async function extrairInfoProduto(page, nomeProduto) {
     }
 }
 
-// ───────────────────── Pedidos de personalização sem arte ─────────────────────
+// ───────────────────────── Pedidos em aberto sem arte ─────────────────────────
 
-// Acessa "A Enviar — Em aberto" e retorna os pedidos cujo nome do produto sugere
-// personalização (contém "personalizada", "personalizado", "arte" ou "logo"). A extração
+// Acessa "A Enviar — Em aberto" e retorna TODOS os pedidos da seção, independente do
+// nome do produto — não há como saber pela listagem se o cliente precisa enviar arte,
+// então essa decisão é feita depois, lendo a conversa de cada um no chat. A extração
 // usa o texto "ID do Pedido <ID>" como âncora (igual a verificarNovosPedidos) e sobe pelo
 // DOM em busca, no mesmo cartão, do nome do produto e do nome do comprador.
 // Seletores genéricos/best-effort: se a Shopee mudar o layout e os campos vierem vazios,
 // inspecionar debug_shopee/pedidos_personalizacao.html e ajustar (mesmo processo usado
 // para corrigir os seletores do webchat).
-async function listarPedidosPersonalizacaoSemArte(page) {
+async function listarPedidosEmAberto(page) {
     await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
     await new Promise(r => setTimeout(r, 15000))
 
@@ -819,11 +819,8 @@ async function listarPedidosPersonalizacaoSemArte(page) {
         return resultado
     })
 
-    const personalizacao = pedidos.filter(p =>
-        PALAVRAS_PERSONALIZACAO.some(palavra => p.produtoNome.toLowerCase().includes(palavra))
-    )
-    console.log(`🎨 [Zyon/arte] ${pedidos.length} pedido(s) lido(s) em "A Enviar" — ${personalizacao.length} de personalização`)
-    return personalizacao
+    console.log(`🎨 [Zyon/arte] ${pedidos.length} pedido(s) lido(s) em "A Enviar — Em aberto"`)
+    return pedidos
 }
 
 // Busca uma conversa pelo nome do comprador usando o campo "Buscar Tudo" do chat
@@ -859,5 +856,5 @@ module.exports = {
     coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
     launchBrowser, resolverChrome,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
-    listarPedidosPersonalizacaoSemArte, abrirConversaPorNome,
+    listarPedidosEmAberto, abrirConversaPorNome,
 }
