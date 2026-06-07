@@ -327,17 +327,13 @@ async function connectToWhatsApp() {
                 continue
             }
 
-            // Mensagens do dono nunca vão para a IA
+            // Comando exclusivo do dono
             const isOwner = from === ownerJid || from === process.env.OWNER_JID ||
                 normalizePhone(from) === normalizePhone(process.env.OWNER_PHONE || '')
 
-            if (isOwner) {
-                if (text.trim() === '!shopee') {
-                    console.log('📲 Comando !shopee recebido — gerando relatório...')
-                    gerarResumoShopee()
-                } else {
-                    console.log(`👤 skip: mensagem do dono (from=${from})`)
-                }
+            if (isOwner && text.trim() === '!shopee') {
+                console.log('📲 Comando !shopee recebido — gerando relatório...')
+                gerarResumoShopee()
                 continue
             }
 
