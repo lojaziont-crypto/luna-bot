@@ -539,13 +539,15 @@ async function lerConversaCompleta(page) {
 }
 
 // Digita e envia uma mensagem no campo de texto da conversa atualmente aberta.
-// O HTML estático mostra o campo em [data-cy="webchat-conversation-detail-input"] > #inputField > textarea
-// (placeholder "Insira uma mensagem aqui", Enter envia / Shift+Enter quebra linha), mas em tempo real
-// esse seletor às vezes não é encontrado — provavelmente o campo ainda não montou/ficou visível no
-// momento da checagem, ou a conversa aberta está num estado diferente (ex: banner de "não é possível
-// responder"). Por isso tentamos várias variantes do seletor com checagem manual de visibilidade
-// (bounding box > 0) e tentativas espaçadas, e — se nada funcionar — salvamos HTML + screenshot
-// frescos para inspecionar o estado real da página no próximo ciclo.
+// O campo real é [data-cy="webchat-conversation-detail-input"] > #inputField > textarea
+// (placeholder "Insira uma mensagem aqui", Enter envia / Shift+Enter quebra linha) — confirmado
+// no HTML estático. A causa raiz do "campo não encontrado" não era o seletor, e sim a página
+// estar na URL errada: extrairInfoProduto navegava a MESMA aba do chat para a lista de produtos
+// e, se falhasse no meio do caminho, nunca voltava — então enviarMensagemNoChat procurava o
+// campo do chat numa página de cadastro de produtos. Isso foi corrigido fazendo extrairInfoProduto
+// rodar numa aba separada (browser.newPage), então a aba do chat nunca sai da conversa aberta.
+// Mantemos aqui várias variantes de seletor + checagem de visibilidade real e tentativas
+// espaçadas como segurança extra contra timing, e salvamos HTML/screenshot se mesmo assim falhar.
 async function localizarCampoMensagem(page, tentativas = 6, intervaloMs = 1500) {
     const candidatos = [
         '[data-cy="webchat-conversation-detail-input"] textarea',
@@ -590,92 +592,117 @@ async function enviarMensagemNoChat(page, texto) {
     console.log(`📤 [Zyon/chat] Mensagem enviada via "${seletorCampo}" (${texto.length} chars)`)
 }
 
+// Retorna o primeiro elemento de uma lista de ElementHandles que esteja realmente visível
+// (bounding box > 0). Evita o erro do Puppeteer "Node is either not clickable or not an
+// Element", que ocorre ao chamar .click() num handle escondido/sem layout (offsetParent null).
+async function primeiroVisivel(handles) {
+    for (const handle of handles) {
+        const visivel = await handle.evaluate((el) => {
+            const r = el.getBoundingClientRect()
+            return r.width > 0 && r.height > 0
+        }).catch(() => false)
+        if (visivel) return handle
+        await handle.dispose().catch(() => {})
+    }
+    return null
+}
+
 // Localiza o produto pelo nome na aba de Cadastro de Produtos, abre o menu de "3 pontinhos"
 // da linha correspondente e clica em "Visualizar página do produto" (sem editar o anúncio),
 // extraindo título, preço e descrição da página pública.
+//
+// Roda numa ABA SEPARADA (browser.newPage), nunca na `page` do chat: assim, mesmo que essa
+// extração falhe no meio do caminho (ex: menu "3 pontinhos" não abre), a aba do chat continua
+// intacta na conversa aberta e enviarMensagemNoChat não corre o risco de rodar na página errada.
 async function extrairInfoProduto(page, nomeProduto) {
-    await page.goto(PRODUTOS_LIST_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-    await new Promise(r => setTimeout(r, 6000))
+    const paginaLista = await page.browser().newPage()
+    try {
+        await paginaLista.goto(PRODUTOS_LIST_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 6000))
 
-    if (page.url().includes('/account/login')) {
-        throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
-    }
+        if (paginaLista.url().includes('/account/login')) {
+            throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+        }
 
-    const termoBusca = (nomeProduto || '').substring(0, 60).trim()
-    const campoBusca = await page.$('input[placeholder*="roduto"], input[placeholder*="esquisar"], input[type="search"]')
-    if (campoBusca && termoBusca) {
-        await campoBusca.click({ clickCount: 3 })
-        await campoBusca.type(termoBusca, { delay: 40 })
-        await page.keyboard.press('Enter')
-        await new Promise(r => setTimeout(r, 4000))
-    }
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'produto_busca.png') })
-    console.log(`📸 [Zyon/produto] Screenshot: debug_shopee/produto_busca.png (busca: "${termoBusca}")`)
+        const termoBusca = (nomeProduto || '').substring(0, 60).trim()
+        const camposBusca = await paginaLista.$$('input[placeholder*="roduto"], input[placeholder*="esquisar"], input[type="search"]')
+        const campoBusca = await primeiroVisivel(camposBusca)
+        if (campoBusca && termoBusca) {
+            await campoBusca.click({ clickCount: 3 })
+            await campoBusca.type(termoBusca, { delay: 40 })
+            await paginaLista.keyboard.press('Enter')
+            await new Promise(r => setTimeout(r, 4000))
+        }
+        await paginaLista.screenshot({ path: path.join(DEBUG_DIR, 'produto_busca.png') })
+        console.log(`📸 [Zyon/produto] Screenshot: debug_shopee/produto_busca.png (busca: "${termoBusca}")`)
 
-    const menuAberto = await page.evaluate(() => {
-        const botoes = Array.from(document.querySelectorAll('[class*="more"], [class*="ellipsis"], [class*="dropdown-trigger"], button[class*="action"], [class*="operation"] button'))
-        const btn = botoes.find(b => b.offsetParent !== null)
-        if (btn) { btn.click(); return true }
-        return false
-    })
-    if (!menuAberto) {
-        console.log('⚠️  [Zyon/produto] Menu de "3 pontinhos" não encontrado na lista de produtos')
-        return null
-    }
-    await new Promise(r => setTimeout(r, 1500))
-
-    const novaAbaPromise = new Promise((resolve) => {
-        const timer = setTimeout(() => resolve(null), 7000)
-        page.browser().once('targetcreated', async (target) => {
-            clearTimeout(timer)
-            try { resolve(await target.page()) } catch { resolve(null) }
+        const menuAberto = await paginaLista.evaluate(() => {
+            const botoes = Array.from(document.querySelectorAll('[class*="more"], [class*="ellipsis"], [class*="dropdown-trigger"], button[class*="action"], [class*="operation"] button'))
+            const btn = botoes.find(b => b.offsetParent !== null)
+            if (btn) { btn.click(); return true }
+            return false
         })
-    })
+        if (!menuAberto) {
+            console.log('⚠️  [Zyon/produto] Menu de "3 pontinhos" não encontrado na lista de produtos')
+            return null
+        }
+        await new Promise(r => setTimeout(r, 1500))
 
-    const clicado = await page.evaluate(() => {
-        const opcoes = Array.from(document.querySelectorAll('li, a, span, div'))
-        const alvo = opcoes.find(el =>
-            /visualizar p[áa]gina do produto|ver p[áa]gina do produto|view product page/i.test((el.textContent || '').trim())
-            && el.offsetParent !== null
-        )
-        if (alvo) { alvo.click(); return true }
-        return false
-    })
-    if (!clicado) {
-        console.log('⚠️  [Zyon/produto] Opção "Visualizar página do produto" não encontrada no menu')
-        return null
-    }
+        const novaAbaPromise = new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), 7000)
+            page.browser().once('targetcreated', async (target) => {
+                clearTimeout(timer)
+                try { resolve(await target.page()) } catch { resolve(null) }
+            })
+        })
 
-    let paginaProduto = await novaAbaPromise
-    const abriuNovaAba = !!paginaProduto
-    if (!paginaProduto) paginaProduto = page
-    await new Promise(r => setTimeout(r, 5000))
-    await paginaProduto.screenshot({ path: path.join(DEBUG_DIR, 'produto_pagina.png') })
-    console.log('📸 [Zyon/produto] Screenshot: debug_shopee/produto_pagina.png')
+        const clicado = await paginaLista.evaluate(() => {
+            const opcoes = Array.from(document.querySelectorAll('li, a, span, div'))
+            const alvo = opcoes.find(el =>
+                /visualizar p[áa]gina do produto|ver p[áa]gina do produto|view product page/i.test((el.textContent || '').trim())
+                && el.offsetParent !== null
+            )
+            if (alvo) { alvo.click(); return true }
+            return false
+        })
+        if (!clicado) {
+            console.log('⚠️  [Zyon/produto] Opção "Visualizar página do produto" não encontrada no menu')
+            return null
+        }
 
-    const info = await paginaProduto.evaluate(() => {
-        document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
-        const titulo = document.querySelector('h1, [class*="product-title"], [class*="item-name"], [class*="product-name"]')?.innerText?.trim() || null
-        const preco = document.querySelector('[class*="price"]')?.innerText?.replace(/\s+/g, ' ').trim() || null
-        const descricao = document.querySelector('[class*="description"], [class*="detail"]')?.innerText?.replace(/\s+/g, ' ').trim().substring(0, 4000) || null
-        const corpo = document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 6000)
-        return { titulo, preco, descricao, corpo }
-    })
+        let paginaProduto = await novaAbaPromise
+        const abriuNovaAba = !!paginaProduto
+        if (!paginaProduto) paginaProduto = paginaLista
+        await new Promise(r => setTimeout(r, 5000))
+        await paginaProduto.screenshot({ path: path.join(DEBUG_DIR, 'produto_pagina.png') })
+        console.log('📸 [Zyon/produto] Screenshot: debug_shopee/produto_pagina.png')
 
-    const urlProduto = paginaProduto.url()
-    const matchId = urlProduto.match(/i\.\d+\.(\d+)/) || urlProduto.match(/product\/\d+\/(\d+)/)
-    const produtoId = matchId ? matchId[1] : null
+        const info = await paginaProduto.evaluate(() => {
+            document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
+            const titulo = document.querySelector('h1, [class*="product-title"], [class*="item-name"], [class*="product-name"]')?.innerText?.trim() || null
+            const preco = document.querySelector('[class*="price"]')?.innerText?.replace(/\s+/g, ' ').trim() || null
+            const descricao = document.querySelector('[class*="description"], [class*="detail"]')?.innerText?.replace(/\s+/g, ' ').trim().substring(0, 4000) || null
+            const corpo = document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 6000)
+            return { titulo, preco, descricao, corpo }
+        })
 
-    if (abriuNovaAba) await paginaProduto.close()
-    if (!produtoId) console.log(`⚠️  [Zyon/produto] Não foi possível extrair o ID do produto da URL: ${urlProduto}`)
+        const urlProduto = paginaProduto.url()
+        const matchId = urlProduto.match(/i\.\d+\.(\d+)/) || urlProduto.match(/product\/\d+\/(\d+)/)
+        const produtoId = matchId ? matchId[1] : null
 
-    return {
-        produtoId,
-        titulo: info.titulo,
-        preco: info.preco,
-        descricao: info.descricao || info.corpo,
-        url: urlProduto,
-        atualizadoEm: new Date().toISOString(),
+        if (abriuNovaAba) await paginaProduto.close().catch(() => {})
+        if (!produtoId) console.log(`⚠️  [Zyon/produto] Não foi possível extrair o ID do produto da URL: ${urlProduto}`)
+
+        return {
+            produtoId,
+            titulo: info.titulo,
+            preco: info.preco,
+            descricao: info.descricao || info.corpo,
+            url: urlProduto,
+            atualizadoEm: new Date().toISOString(),
+        }
+    } finally {
+        await paginaLista.close().catch(() => {})
     }
 }
 
