@@ -256,6 +256,10 @@ PERSONALIZAÇÃO DOS DEMAIS PRODUTOS: O cliente deve enviar a arte final pronta 
 CRIAÇÃO DE ARTE: A loja NÃO cria arte. O cliente deve enviar a arte final pronta. Nunca confirme, prometa ou sugira que a loja cria, desenha ou desenvolve artes — em nenhuma hipótese. Se ao ler o histórico você perceber que uma mensagem anterior da própria loja deu a entender que a arte seria criada pela loja, corrija educadamente nesta resposta com: "Pedimos desculpas pela confusão! Trabalhamos com personalização a partir da arte enviada pelo cliente — não criamos a arte do zero. Você precisaria enviar o arquivo da estampa pronto para prosseguirmos. 😊"
 PEDIDOS GRANDES / FARDAMENTO / ATACADO: Quando o cliente mencionar fardamento, pedido em quantidade (acima de 5 unidades), compra no atacado ou pedido corporativo, encaminhe IMEDIATAMENTE para atendimento humano (precisaHumano = true) — não tente negociar, orçar ou resolver por conta própria. Responda: "Para pedidos em maior quantidade ou fardamentos, vou encaminhar para um de nossos atendentes que poderá te ajudar melhor! 😊"
 CLIENTE INSATISFEITO OU RECLAMANDO: Quando o cliente demonstrar insatisfação, raiva ou reclamação — inclusive sobre uma informação recebida anteriormente na própria conversa — encaminhe para atendimento humano (precisaHumano = true) com o resumo completo da situação no campo "resumoParaDono", explicando o que gerou a insatisfação.
+ARTE JÁ ENVIADA PELA LOJA: Quando o histórico mostrar que a LOJA (não o cliente) já enviou uma imagem na conversa (mensagem marcada "[imagem/arquivo enviado]" com remetente "Loja"), isso significa que a arte já foi para produção. Nesse caso NÃO pergunte sobre personalização nem trate como um novo pedido de arte. Em vez disso:
+1. Responda ao cliente: "Olá! Sua arte já foi encaminhada para produção. Vi sua mensagem sobre [resumo do que o cliente disse] — vou informar nossa equipe para verificar. Em breve retornaremos! 😊"
+2. Defina precisaHumano = true
+3. No campo "resumoParaDono", inclua claramente: que a imagem foi enviada pela LOJA (não pelo cliente), que o cliente está pedindo alteração/correção, e qual foi exatamente a solicitação do cliente
 PEDIDOS A ENVIAR OU CLIENTES COBRANDO POSICIONAMENTO: Responder "No momento estamos com uma alta demanda de pedidos e nossa equipe está trabalhando para liberar todos os pedidos o mais rápido possível."
 PRAZO DE POSTAGEM / ENTREGA: Verifique o prazo de envio informado no cabeçalho da conversa. Se disponível, informe ao cliente: "O prazo de envio do seu pedido é até [prazoEnvio]. Após a postagem, o prazo de entrega é gerenciado pela Shopee. Para mais detalhes sobre rastreamento ou atrasos, você pode falar diretamente com a Shopee pelo chat deles. 😊"
 CONFIRMAÇÃO DE ÁREA DE PERSONALIZAÇÃO: Sempre que o cliente enviar a arte para personalização, após confirmar o recebimento e a qualidade, pergunte em qual área deseja a personalização. Resposta sugerida: "A personalização será só no peito, nas costas, ou frente e costas? 😊"
@@ -450,7 +454,18 @@ async function processarConversaAberta(page, nomeCliente) {
 
     if (resultado.precisaHumano) {
         console.log(`🙋 [Zyon/chat] ${nomeCliente}: encaminhado para atendimento humano`)
-        notificarAtendimentoHumano(nomeCliente, ultimaMsgCliente.texto, resultado.resumoParaDono || resultado.resposta)
+
+        // Quando a LOJA (não o cliente) já enviou uma imagem na conversa, a arte já foi
+        // para produção — destacamos isso no início do resumo enviado ao dono para que
+        // ele perceba de cara que se trata de uma solicitação de alteração, não de um
+        // pedido de personalização novo
+        const arteEnviadaPelaLoja = mensagens.some(m => m.remetente === 'loja' && m.texto.includes('[imagem/arquivo enviado]'))
+        let resumo = resultado.resumoParaDono || resultado.resposta
+        if (arteEnviadaPelaLoja) {
+            resumo = `⚠️ Arte já enviada para produção — cliente solicitou alteração: ${ultimaMsgCliente.texto}\n\n${resumo}`
+        }
+
+        notificarAtendimentoHumano(nomeCliente, ultimaMsgCliente.texto, resumo)
     }
 
     if (resultado.informacaoImportante) {
