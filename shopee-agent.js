@@ -147,6 +147,48 @@ async function verificarNovosPedidos() {
     }
 }
 
+// Formata número como moeda BR — sem assumir centavos vs real
+function formatarBRL(valor) {
+    return valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+// Busca recursiva em JSON por campos com nomes de receita (revenue, gmv, etc.)
+// Detecta contexto "hoje/today" vs "mês/month" pelo caminho completo do campo
+function buscarReceitaRecursivo(obj, caminho, profundidade) {
+    if (profundidade === undefined) profundidade = 0
+    if (caminho === undefined) caminho = ''
+    const resultado = { dia: null, mes: null, campos: [] }
+    if (!obj || typeof obj !== 'object' || profundidade > 8) return resultado
+
+    const entradas = Array.isArray(obj)
+        ? obj.map(function(v, i) { return [String(i), v] })
+        : Object.entries(obj)
+
+    for (const par of entradas) {
+        const chave = par[0], valor = par[1]
+        const path = caminho ? caminho + '.' + chave : chave
+        const pl = path.toLowerCase()
+
+        if (typeof valor === 'number' && valor >= 0) {
+            const eReceita = /revenue|gmv|income|earning|sales_amount|total_sales|sale_amount|receita|faturamento/.test(pl)
+            if (eReceita) {
+                const fmt = formatarBRL(valor)
+                resultado.campos.push({ campo: path, valor: valor, formatado: fmt })
+                const eHoje = /today|_dia|dia_|diario|daily/.test(pl)
+                const eMes  = /month|_mes|mes_|mensal|monthly/.test(pl)
+                if (eHoje && !resultado.dia) resultado.dia = fmt
+                if (eMes  && !resultado.mes) resultado.mes = fmt
+            }
+        } else if (typeof valor === 'object') {
+            const sub = buscarReceitaRecursivo(valor, path, profundidade + 1)
+            resultado.campos = resultado.campos.concat(sub.campos)
+            if (!resultado.dia && sub.dia) resultado.dia = sub.dia
+            if (!resultado.mes && sub.mes) resultado.mes = sub.mes
+        }
+    }
+    return resultado
+}
+
 async function coletarStatusPedidos() {
     const browser = await launchBrowser(resolverChrome())
     try {
@@ -154,8 +196,25 @@ async function coletarStatusPedidos() {
         await page.setViewport({ width: 1366, height: 768 })
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
 
+        // Intercepta respostas JSON da API Shopee antes de navegar
+        // A Shopee usa obfuscação de fonte no DOM — os valores reais estão nas chamadas à API
+        const respostasApi = []
+        page.on('response', function(response) {
+            const url = response.url()
+            if (!url.includes('shopee.com')) return
+            const ct = response.headers()['content-type'] || ''
+            if (!ct.includes('json')) return
+            response.text().then(function(text) {
+                if (!text || text.length < 10) return
+                try {
+                    const json = JSON.parse(text)
+                    const shortUrl = url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, '')
+                    respostasApi.push({ url: shortUrl, json: json })
+                } catch (_) {}
+            }).catch(function() {})
+        })
+
         // 1. Overview — faturamento do dia e do mês
-        // O dashboard principal (/portal/) contém os cards de KPI com faturamento
         await page.goto(`${BASE_URL}/portal/`, { waitUntil: 'networkidle2', timeout: 30000 })
         await new Promise(r => setTimeout(r, 8000))
 
@@ -166,66 +225,60 @@ async function coletarStatusPedidos() {
             throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
         }
 
-        // Se redirecionou para página de pedidos, tenta a rota alternativa de overview
-        if (urlOverview.includes('/order') || urlOverview.includes('/sale/order')) {
-            console.log('⚠️  [Zyon] Redirecionado para pedidos — tentando /portal/sale/overview ...')
-            await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
-            await new Promise(r => setTimeout(r, 8000))
-            console.log(`🌐 [Zyon/overview] URL fallback: ${page.url()}`)
-        }
+        // Aguarda mais 3s para que chamadas de API assíncronas completem
+        await new Promise(r => setTimeout(r, 3000))
 
         await page.screenshot({ path: path.join(DEBUG_DIR, 'overview.png') })
         console.log('📸 [Zyon] Screenshot: debug_shopee/overview.png')
+        console.log(`📡 [Zyon] APIs JSON capturadas: ${respostasApi.length}`)
+        respostasApi.forEach(function(r) { console.log('  → ' + r.url) })
 
-        const dadosOverview = await page.evaluate(() => {
-            const text = document.body.innerText.replace(/\s+/g, ' ').trim()
+        // Salva todas as respostas para debug
+        try {
+            fs.writeFileSync(
+                path.join(DEBUG_DIR, 'api_responses.json'),
+                JSON.stringify(respostasApi, null, 2).substring(0, 500000)
+            )
+            console.log('💾 [Zyon] APIs salvas em debug_shopee/api_responses.json')
+        } catch (_) {}
 
-            // Extrai nós folha com valores no formato monetário BR (com ou sem R$)
-            const valores = []
-            for (const el of document.querySelectorAll('span, div, p, td, strong, b, h1, h2, h3')) {
-                if (el.children.length > 0) continue
-                const t = (el.innerText || el.textContent || '').trim()
-                if (!/^(?:R\$\s*)?[\d.]*\d,\d{2}$/.test(t)) continue
-                const bloco = el.closest('[class]') || el.parentElement
-                const ctx = bloco ? (bloco.innerText || '').replace(/\s+/g, ' ').trim() : ''
-                valores.push({ v: t, ctx: ctx.substring(0, 300) })
-            }
-
-            return { text, valores: valores.slice(0, 20) }
-        })
-
-        const overviewText = dadosOverview.text
-        console.log(`📊 [Zyon/overview] ${overviewText.substring(0, 2000)}`)
-        if (dadosOverview.valores.length) {
-            console.log(`💰 [Zyon/overview] Valores DOM: ${JSON.stringify(dadosOverview.valores.slice(0, 6))}`)
-        } else {
-            console.log('⚠️  [Zyon/overview] Nenhum valor monetário encontrado na página')
-        }
-
+        // Procura receita nas respostas de API
         let fatDia = null, fatMes = null
-        for (const { v, ctx } of dadosOverview.valores) {
-            const num = v.replace(/^R\$\s*/, '').trim()
-            const c = ctx.toLowerCase()
-            if (!fatDia && c.includes('hoje')) fatDia = num
-            if (!fatMes && (c.includes('este mês') || c.includes('este mes') ||
-                (c.includes('mês') && !c.includes('hoje')) ||
-                (c.includes('mes') && !c.includes('hoje')))) fatMes = num
-        }
-        console.log(`💰 [Zyon] Extração DOM — Dia: ${fatDia ?? 'não encontrado'}, Mês: ${fatMes ?? 'não encontrado'}`)
+        for (const resp of respostasApi) {
+            if (fatDia && fatMes) break
+            const urlL = resp.url.toLowerCase()
+            const snippet = JSON.stringify(resp.json).substring(0, 1000).toLowerCase()
+            const relevante = /revenue|gmv|income|earning|sales|overview|dashboard|performance|finance/.test(urlL + snippet)
+            if (!relevante) continue
 
-        // 2. Pedidos — A Enviar, Enviados, Concluídos, Alertas
+            const encontrado = buscarReceitaRecursivo(resp.json, '', 0)
+            if (encontrado.campos.length) {
+                console.log('📡 [Zyon/api] ' + resp.url + ': ' + JSON.stringify(encontrado.campos).substring(0, 300))
+            }
+            if (!fatDia && encontrado.dia) fatDia = encontrado.dia
+            if (!fatMes && encontrado.mes) fatMes = encontrado.mes
+        }
+
+        console.log('💰 [Zyon] API — Dia: ' + (fatDia || 'não encontrado') + ', Mês: ' + (fatMes || 'não encontrado'))
+
+        const overviewText = await page.evaluate(function() {
+            return document.body.innerText.replace(/\s+/g, ' ').trim()
+        })
+        console.log('📊 [Zyon/overview] ' + overviewText.substring(0, 500))
+
+        // 2. Pedidos — A Enviar
         await page.goto(
             `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`,
             { waitUntil: 'networkidle2', timeout: 30000 }
         )
         await new Promise(r => setTimeout(r, 15000))
 
-        const orderText = await page.evaluate(() =>
-            document.body.innerText.replace(/\s+/g, ' ').trim()
-        )
-        console.log(`📊 [Zyon/orders] ${orderText.substring(0, 600)}`)
+        const orderText = await page.evaluate(function() {
+            return document.body.innerText.replace(/\s+/g, ' ').trim()
+        })
+        console.log('📊 [Zyon/orders] ' + orderText.substring(0, 600))
 
-        return { overviewText, orderText, fatDia, fatMes }
+        return { overviewText: overviewText, orderText: orderText, fatDia: fatDia, fatMes: fatMes }
     } finally {
         await browser.close()
     }
