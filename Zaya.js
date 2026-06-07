@@ -7,30 +7,17 @@ const pino = require('pino')
 const cron = require('node-cron')
 const fs = require('fs')
 const path = require('path')
-const { coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos } = require('./shopee-agent')
+const http = require('http')
+const { coletarStatusPedidos } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const conversations = new Map()
-const humanAttending = new Map() // JID -> timestamp da última mensagem manual do dono
-const lastActivity = new Map()   // JID -> timestamp da última mensagem do cliente
-const botSentJids = new Set()    // JIDs onde a Zaya acabou de responder (evita falso "humano")
+const humanAttending = new Map()   // JID -> timestamp da última mensagem manual do dono
+const lastActivity = new Map()     // JID -> timestamp da última mensagem do cliente
+const botSentAt = new Map()        // JID -> timestamp do último envio da Zaya (evita falso humanAttending em echoes)
 let activeSock = null
 let ownerJid = null
-let monitoringStarted = false
 let reconnectTimer = null
-
-const PEDIDOS_FILE = path.join(__dirname, 'pedidos_vistos.json')
-let ultimoPedidoVisto = null
-
-try {
-    if (fs.existsSync(PEDIDOS_FILE)) {
-        ultimoPedidoVisto = JSON.parse(fs.readFileSync(PEDIDOS_FILE, 'utf8')).ultimoId || null
-    }
-} catch {}
-
-function salvarUltimoPedido(id) {
-    fs.writeFileSync(PEDIDOS_FILE, JSON.stringify({ ultimoId: id }))
-}
 
 const OWNER_JID_FILE = path.join(__dirname, 'owner_jid.json')
 try {
@@ -46,12 +33,13 @@ function salvarOwnerJid(jid) {
     console.log(`👤 JID do dono salvo: ${ownerJid}`)
 }
 
-// Remove código do país e domínio para comparar apenas os dígitos do número
 function normalizePhone(jid) {
     return jid.replace(/@.*$/, '').replace(/^55/, '')
 }
-const HUMAN_TIMEOUT_MS = 30 * 60 * 1000    // 30 minutos sem resposta do dono reativa Zaya
-const INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000 // 1 hora sem mensagem reinicia a conversa
+
+const HUMAN_TIMEOUT_MS = 30 * 60 * 1000
+const INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000
+const BOT_ECHO_WINDOW_MS = 30 * 1000  // echoes dentro de 30s de um envio da Zaya são ignorados
 
 const SYSTEM_PROMPT = `Você é Zaya, assistente virtual de atendimento. Conversa de forma natural e humana no WhatsApp — nunca parece robô.
 
@@ -118,6 +106,51 @@ async function getAIResponse(from, userMessage, isFirstMessage) {
     return reply
 }
 
+async function notifyNewOrder(orderId) {
+    if (!activeSock) {
+        console.log('⚠️ notifyNewOrder: WhatsApp não conectado')
+        return
+    }
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        botSentAt.set(ownerJidToSend, Date.now())
+        await activeSock.sendMessage(ownerJidToSend, {
+            text: `🛍 *Nova Venda!*\n\nPedido *#${orderId}* confirmado! 🎉\n\nAcesse a Shopee para preparar o envio.`
+        })
+        console.log(`🛍️ [Zyon→Zaya] Notificação enviada: pedido #${orderId}`)
+    } catch (err) {
+        console.error('❌ Erro ao enviar notificação de novo pedido:', err.message)
+    }
+}
+
+// HTTP server — Zyon envia POST /notify-order para notificar nova venda
+const PORT = process.env.PORT || 3000
+const server = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/notify-order') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { orderId } = JSON.parse(body)
+                await notifyNewOrder(orderId)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /notify-order error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+    } else if (req.url === '/health') {
+        res.writeHead(200)
+        res.end('ok')
+    } else {
+        res.writeHead(404)
+        res.end()
+    }
+})
+server.listen(PORT, () => console.log(`🌐 Zaya HTTP server na porta ${PORT}`))
+
 async function connectToWhatsApp() {
     const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, Browsers } = await import('@whiskeysockets/baileys')
 
@@ -162,13 +195,6 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             console.log('✅ Zaya está online e pronta!')
             activeSock = sock
-            if (!monitoringStarted) {
-                monitoringStarted = true
-                checarNovosPedidos()
-                setInterval(checarNovosPedidos, 10 * 60 * 1000)
-                console.log('🛍️ Monitoramento de vendas ativo (verificação a cada 10 min)')
-            }
-            // Auto-detecta JID real do dono — garante prefixo 55 antes de consultar
             ;(async () => {
                 try {
                     const phone = process.env.OWNER_PHONE || ''
@@ -186,15 +212,15 @@ async function connectToWhatsApp() {
     })
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        // Registra respostas manuais do dono antes de qualquer filtro de tipo
+        // Detecta mensagens enviadas manualmente pelo dono (fromMe = true)
+        // Usa janela de tempo para não confundir echoes da própria Zaya com respostas humanas
         for (const msg of messages) {
             if (msg.key.fromMe && msg.key.remoteJid) {
                 const jid = msg.key.remoteJid
                 const isOwnerJid = jid === ownerJid || jid === process.env.OWNER_JID ||
                     normalizePhone(jid) === normalizePhone(process.env.OWNER_PHONE || '')
-                if (botSentJids.has(jid) || isOwnerJid) {
-                    botSentJids.delete(jid)
-                } else {
+                const recentBotSend = (botSentAt.get(jid) || 0) > Date.now() - BOT_ECHO_WINDOW_MS
+                if (!recentBotSend && !isOwnerJid) {
                     humanAttending.set(jid, Date.now())
                 }
             }
@@ -243,7 +269,7 @@ async function connectToWhatsApp() {
             // Registro manual do dono (caso auto-detecção falhe)
             if (text.trim() === `!registrar ${process.env.OWNER_PHONE}`) {
                 salvarOwnerJid(from)
-                botSentJids.add(from)
+                botSentAt.set(from, Date.now())
                 await sock.sendMessage(from, { text: '✅ Você foi registrado como dono! Agora use *!shopee* para gerar o relatório.' })
                 continue
             }
@@ -260,7 +286,6 @@ async function connectToWhatsApp() {
             const sender = from.replace('@s.whatsapp.net', '')
             console.log(`\n💬 [${sender}]: ${text}`)
 
-            // Typing indicator — falha aqui não deve abortar a resposta
             try { await sock.sendPresenceUpdate('composing', from) } catch {}
 
             try {
@@ -282,15 +307,15 @@ async function connectToWhatsApp() {
                     const resumo = resumoMatch[1].trim()
 
                     if (mensagemCliente) {
-                        botSentJids.add(from)
+                        botSentAt.set(from, Date.now())
                         await sock.sendMessage(from, { text: mensagemCliente })
                     }
-                    botSentJids.add(from)
+                    botSentAt.set(from, Date.now())
                     await sock.sendMessage(from, { text: `📋 *Resumo para atendimento:*\n\n${resumo}` })
                     console.log(`🤖 Zaya: ${mensagemCliente}`)
                     console.log(`📋 Resumo enviado`)
                 } else {
-                    botSentJids.add(from)
+                    botSentAt.set(from, Date.now())
                     await sock.sendMessage(from, { text: reply })
                     console.log(`🤖 Zaya: ${reply}`)
                 }
@@ -305,47 +330,6 @@ async function connectToWhatsApp() {
     })
 }
 
-async function checarNovosPedidos() {
-    if (!activeSock) return
-    try {
-        console.log('🔍 [Zyon] Verificando novos pedidos...')
-        const primeiroId = await verificarNovosPedidos()
-
-        if (!primeiroId) {
-            console.log('📦 [Zyon] Nenhum pedido encontrado na página')
-            return
-        }
-
-        console.log(`🔢 [Zyon] Primeiro pedido da lista: ${primeiroId}`)
-
-        if (!ultimoPedidoVisto) {
-            // Primeira execução: salva sem notificar
-            ultimoPedidoVisto = primeiroId
-            salvarUltimoPedido(primeiroId)
-            console.log(`✅ [Zyon] Monitoramento inicializado — último pedido: ${primeiroId}`)
-            return
-        }
-
-        if (primeiroId === ultimoPedidoVisto) {
-            console.log('📦 [Zyon] Nenhum pedido novo')
-            return
-        }
-
-        // Primeiro ID mudou — chegou pedido novo
-        const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
-        botSentJids.add(ownerJidToSend)
-        await activeSock.sendMessage(ownerJidToSend, {
-            text: `🛍 *Nova Venda!*\n\nPedido *#${primeiroId}* confirmado! 🎉\n\nAcesse a Shopee para preparar o envio.`
-        })
-        console.log(`🛍️ [Zyon] Nova venda notificada: pedido #${primeiroId}`)
-
-        ultimoPedidoVisto = primeiroId
-        salvarUltimoPedido(primeiroId)
-    } catch (err) {
-        console.error('❌ Erro ao verificar novos pedidos:', err.message)
-    }
-}
-
 async function gerarResumoShopee() {
     if (!activeSock) {
         console.log('❌ Resumo Shopee: WhatsApp não conectado')
@@ -356,18 +340,15 @@ async function gerarResumoShopee() {
     console.log(`\n🛍️  Iniciando coleta de dados Shopee... (envio para: ${ownerJidToSend})`)
 
     try {
-        botSentJids.add(ownerJidToSend)
+        botSentAt.set(ownerJidToSend, Date.now())
         await activeSock.sendMessage(ownerJidToSend, { text: '⏳ Coletando dados da sua loja Shopee, aguarde...' })
 
         const { overviewText, orderText } = await coletarStatusPedidos()
 
         const extrair = (texto, regex) => { const m = texto.match(regex); return m ? m[1] : '?' }
 
-        // A Enviar — aba de pedidos
         const aEnviar = extrair(orderText, /A Enviar\s*\((\d+)\)/i)
 
-        // Faturamento — tenta encontrar "Faturamento R$ X R$ Y" (dia e mês na mesma linha)
-        // Se não achar, usa os dois primeiros valores R$ do overview
         let fatDia = '?', fatMes = '?'
         const fatPair = overviewText.match(/[Ff]aturamento[^R$]{0,40}R\$\s*([\d.]+,\d{2})[^R$]{0,60}R\$\s*([\d.]+,\d{2})/)
         if (fatPair) {
@@ -379,7 +360,6 @@ async function gerarResumoShopee() {
             fatMes = moedas[1] ?? moedas[0] ?? '?'
         }
 
-        // Alertas — palavras-chave de desempenho/urgência
         const allText = overviewText + ' ' + orderText
         const alertas = /atraso|cancelamento|reclamação|disputa|penalidade|violação|aviso|atenção/i.test(allText)
             ? 'Há itens que precisam de atenção — verifique o painel Shopee'
@@ -396,14 +376,14 @@ async function gerarResumoShopee() {
             `⚠️ *Alertas:* ${alertas}`,
         ].join('\n')
 
-        botSentJids.add(ownerJidToSend)
+        botSentAt.set(ownerJidToSend, Date.now())
         await activeSock.sendMessage(ownerJidToSend, { text: mensagemFinal })
         console.log('📨 Resumo Shopee enviado via WhatsApp')
 
     } catch (err) {
         console.error('❌ Erro no resumo Shopee:', err.message)
         try {
-            botSentJids.add(ownerJidToSend)
+            botSentAt.set(ownerJidToSend, Date.now())
             await activeSock.sendMessage(ownerJidToSend, {
                 text: `❌ Erro ao coletar dados da Shopee:\n${err.message}`
             })
@@ -418,5 +398,4 @@ cron.schedule('0 21 * * *', () => {
 
 console.log('⚡ Iniciando Zaya...')
 console.log('📅 Resumo diário Shopee agendado para 21h (Brasília)')
-console.log('🛍️ Monitoramento de novas vendas: a cada 10 min (inicia na conexão)')
 connectToWhatsApp()
