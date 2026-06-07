@@ -539,12 +539,46 @@ async function lerConversaCompleta(page) {
 }
 
 // Digita e envia uma mensagem no campo de texto da conversa atualmente aberta.
-// Campo real: [data-cy="webchat-conversation-detail-input"] > #inputField > textarea
-// (placeholder "Insira uma mensagem aqui"); o texto de ajuda confirma "Shift+Enter = nova linha",
-// ou seja, Enter sozinho envia — não existe botão de enviar separado.
+// O HTML estático mostra o campo em [data-cy="webchat-conversation-detail-input"] > #inputField > textarea
+// (placeholder "Insira uma mensagem aqui", Enter envia / Shift+Enter quebra linha), mas em tempo real
+// esse seletor às vezes não é encontrado — provavelmente o campo ainda não montou/ficou visível no
+// momento da checagem, ou a conversa aberta está num estado diferente (ex: banner de "não é possível
+// responder"). Por isso tentamos várias variantes do seletor com checagem manual de visibilidade
+// (bounding box > 0) e tentativas espaçadas, e — se nada funcionar — salvamos HTML + screenshot
+// frescos para inspecionar o estado real da página no próximo ciclo.
+async function localizarCampoMensagem(page, tentativas = 6, intervaloMs = 1500) {
+    const candidatos = [
+        '[data-cy="webchat-conversation-detail-input"] textarea',
+        '#inputField textarea',
+        'textarea[placeholder="Insira uma mensagem aqui"]',
+        '[data-cy="webchat-conversation-detail-input"] [contenteditable="true"]',
+        '#inputField [contenteditable="true"]',
+        '[data-cy="webchat-conversation-detail-input"] [contenteditable]',
+    ]
+    for (let tentativa = 0; tentativa < tentativas; tentativa++) {
+        for (const seletor of candidatos) {
+            const visivel = await page.evaluate((sel) => {
+                const el = document.querySelector(sel)
+                if (!el) return false
+                const rect = el.getBoundingClientRect()
+                return rect.width > 0 && rect.height > 0
+            }, seletor)
+            if (visivel) return seletor
+        }
+        await new Promise(r => setTimeout(r, intervaloMs))
+    }
+    return null
+}
+
 async function enviarMensagemNoChat(page, texto) {
-    const seletorCampo = '[data-cy="webchat-conversation-detail-input"] textarea'
-    await page.waitForSelector(seletorCampo, { timeout: 10000, visible: true })
+    const seletorCampo = await localizarCampoMensagem(page)
+    if (!seletorCampo) {
+        console.error('❌ [Zyon/chat] Campo de digitação da conversa não encontrado — salvando HTML/screenshot para inspeção')
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_campo_nao_encontrado.png') })
+        await salvarHtmlDebug(page, 'chat_campo_nao_encontrado')
+        throw new Error('campo de digitação da conversa não encontrado')
+    }
+
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_antes_enviar.png') })
     await page.click(seletorCampo)
     await page.type(seletorCampo, texto, { delay: 25 })
@@ -553,7 +587,7 @@ async function enviarMensagemNoChat(page, texto) {
     await page.keyboard.press('Enter')
     await new Promise(r => setTimeout(r, 2500))
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_enviado.png') })
-    console.log(`📤 [Zyon/chat] Mensagem enviada (${texto.length} chars)`)
+    console.log(`📤 [Zyon/chat] Mensagem enviada via "${seletorCampo}" (${texto.length} chars)`)
 }
 
 // Localiza o produto pelo nome na aba de Cadastro de Produtos, abre o menu de "3 pontinhos"
