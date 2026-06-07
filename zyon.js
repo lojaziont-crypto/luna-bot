@@ -220,10 +220,11 @@ async function coletarEEnviarDados() {
 
 const CHAT_SYSTEM_PROMPT = `Você é Zyon, assistente virtual de atendimento ao cliente da loja.
 
-Na primeira mensagem de cada conversa, apresente-se: "Olá! Sou o Zyon, assistente virtual da loja. Estou aqui para te ajudar! 😊"
+Na PRIMEIRA mensagem de cada conversa — e SOMENTE nela —, apresente-se: "Olá! Sou o Zyon, assistente virtual da loja. Estou aqui para te ajudar! 😊". A partir da segunda mensagem em diante, NUNCA repita essa apresentação nem qualquer variação dela — vá direto ao ponto, como quem está dando continuidade a um papo que já está rolando.
 
 INSTRUÇÕES GERAIS
 - LEIA A CONVERSA INTEIRA antes de responder, do início ao fim — não responda apenas isolando a última mensagem do cliente. Várias vezes o cliente pergunta algo no começo e a dúvida já foi esclarecida mais adiante na própria conversa (pelo cliente ou pela loja); nesses casos NÃO repita uma resposta para algo que já foi resolvido — identifique qual é o ponto mais atual e ainda em aberto e responda a ele. Se útil, baseie sua resposta num resumo mental de tudo que já foi tratado, para não se perder no histórico.
+- TOM NATURAL E CONTÍNUO: responda como a continuação natural de uma conversa em andamento, não como se estivesse recomeçando — não repita saudações, apresentações, perguntas ou informações que já foram dadas antes nesta mesma conversa.
 - Preste atenção a imagens/arquivos enviados pelo cliente (marcados na conversa como "[imagem/arquivo enviado]" em mensagens com remetente "Cliente") — eles fazem parte do contexto: podem ser a arte para personalização, comprovante, foto do produto recebido, foto da estampa, etc. Leve isso em conta ao decidir o que já foi resolvido e o que ainda precisa de resposta.
 - ATENÇÃO — NÃO CONFUNDIR IMAGEM DO CLIENTE COM CARD DO PRODUTO: o card/resumo do produto que aparece no início da conversa (com foto, título e preço do anúncio) é informação do PEDIDO, gerada automaticamente pela plataforma — NUNCA é uma imagem ou arte enviada pelo cliente. Considere como "imagem enviada pelo cliente" SOMENTE os itens marcados "[imagem/arquivo enviado]" dentro de mensagens cujo remetente seja "Cliente" na transcrição da conversa. Se o cliente não enviou nenhuma mensagem com esse marcador, ele NÃO enviou imagem — responda normalmente ao texto dele, sem mencionar ou agradecer por uma imagem que não existe.
 - Responda apenas utilizando informações presentes na Base de Conhecimento e no anúncio do produto.
@@ -326,6 +327,8 @@ async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMe
     const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + contextoPrazo + contextoCatalogo + formatoSaida }]
     if (primeiraMensagem) {
         messages.push({ role: 'system', content: 'Esta é a primeira mensagem desta conversa — comece com a apresentação indicada nas instruções.' })
+    } else {
+        messages.push({ role: 'system', content: 'Esta conversa já tem mensagens anteriores da loja — NÃO se apresente novamente. Responda direto, como continuação natural do que já foi conversado.' })
     }
     messages.push({ role: 'user', content: `Cliente: ${nomeCliente}\n\nConversa completa até agora:\n${transcricao}\n\nGere a próxima resposta da loja.` })
 
@@ -450,9 +453,13 @@ async function processarConversaAberta(page, nomeCliente) {
     const ultimaMsgCliente = [...mensagens].reverse().find(m => m.remetente === 'cliente')
     if (!ultimaMsgCliente) return
 
-    // A interface web do Shopee não expõe IDs estáveis de mensagem — usamos um identificador
-    // baseado no conteúdo (cliente + última mensagem) para saber se já respondemos a ela
-    const idMensagem = `${nomeCliente}::${ultimaMsgCliente.texto}`.substring(0, 200)
+    // A interface web do Shopee não expõe IDs nem timestamps estáveis de mensagem — então usamos
+    // a POSIÇÃO da última mensagem do cliente na conversa (quantas mensagens dele já existem)
+    // combinada com o texto como identificador. Isso evita o bug de pular uma mensagem nova só
+    // porque o texto coincide com uma anterior (ex: cliente manda "Ok" de novo, ou reenvia uma
+    // imagem) — a posição muda a cada nova mensagem, então o ID muda e o Zyon responde de novo.
+    const posicaoUltimaCliente = mensagens.filter(m => m.remetente === 'cliente').length
+    const idMensagem = `${posicaoUltimaCliente}::${ultimaMsgCliente.texto}`.substring(0, 200)
     if (mensagensRespondidas[nomeCliente] === idMensagem) {
         console.log(`⏭️  [Zyon/chat] ${nomeCliente}: última mensagem já respondida, pulando`)
         return
