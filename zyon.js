@@ -199,6 +199,13 @@ INSTRUÇÕES GERAIS
 - Nunca invente informações.
 - Seja cordial, objetivo e profissional.
 - Sempre que o cliente digitar "falar com atendente", responda: "Certo! Vou chamar um atendente para você. Antes, aqui está um resumo da nossa conversa: [resumo]. Em breve alguém entrará em contato. 😊"
+- RESUMO FINAL PARA HUMANO: sempre que a conversa for encaminhada para atendimento humano (precisaHumano = true), o campo "resumoParaDono" deve ser preenchido OBRIGATORIAMENTE neste formato exato:
+"📋 *Resumo para atendimento:*
+- Cliente: [nome]
+- Pedido: [id do pedido se disponível, ou "não informado"]
+- Assunto: [motivo do contato]
+- O que foi tratado: [resumo do que foi discutido]
+- O que precisa ser feito: [ação necessária]"
 
 BASE DE CONHECIMENTO
 ATRASO NA ENTREGA: Orientar o cliente a entrar em contato com a plataforma, pois não há acesso às informações logísticas.
@@ -209,6 +216,8 @@ CAMISETA DO BRASIL: Solicitar nome e número do cliente.
 PERSONALIZAÇÃO DOS DEMAIS PRODUTOS: O cliente deve enviar a arte final pronta pelo chat. Não criamos arte. Solicitar que o cliente confira se a imagem está em boa resolução antes do envio. Não nos responsabilizamos por imagens enviadas com baixa qualidade. Áreas máximas de personalização: Frente A3, Costas A3, Frente e costas: Frente 9x9cm / Costas 28x28cm. Essas regras não se aplicam à Camiseta do Brasil. Quando o cliente enviar uma foto do produto vestido ou uma foto tirada com celular da estampa, oriente que isso não é a arte adequada para personalização — a arte precisa ser o ARQUIVO da estampa (PNG com fundo transparente, preferencialmente). Exemplo de resposta: "Para personalização, precisamos do arquivo da arte em si, preferencialmente em PNG com fundo transparente — não uma foto da camiseta ou imagem tirada com celular. Você tem o arquivo da estampa? Pode ser enviado aqui no chat mesmo."
 PEDIDOS A ENVIAR OU CLIENTES COBRANDO POSICIONAMENTO: Responder "No momento estamos com uma alta demanda de pedidos e nossa equipe está trabalhando para liberar todos os pedidos o mais rápido possível."
 PRAZO DE POSTAGEM / ENTREGA: Verifique o prazo de envio informado no cabeçalho da conversa. Se disponível, informe ao cliente: "O prazo de envio do seu pedido é até [prazoEnvio]. Após a postagem, o prazo de entrega é gerenciado pela Shopee. Para mais detalhes sobre rastreamento ou atrasos, você pode falar diretamente com a Shopee pelo chat deles. 😊"
+CONFIRMAÇÃO DE ÁREA DE PERSONALIZAÇÃO: Sempre que o cliente enviar a arte para personalização, após confirmar o recebimento e a qualidade, pergunte em qual área deseja a personalização. Resposta sugerida: "A personalização será só no peito, nas costas, ou frente e costas? 😊"
+SUGESTÃO DE PRODUTOS: Quando o contexto da conversa permitir (cliente perguntando sobre outros produtos, cliente que fez um pedido pequeno, cliente satisfeito, etc), você pode sugerir outros produtos da loja com o link direto, usando a lista de OUTROS PRODUTOS DA LOJA fornecida no contexto (use o link exatamente como informado). Se não houver outros produtos disponíveis no contexto, não sugira nenhum. Exemplo de resposta: "Aproveite e conheça também nossos outros modelos! 😊 [link do produto]"
 
 QUANDO NÃO RESPONDER E ENCAMINHAR PARA ANÁLISE HUMANA:
 - Cliente solicitar "falar com atendente"
@@ -238,10 +247,19 @@ async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMe
         ? `\n\nPRAZO DE ENVIO DESTE PEDIDO (extraído do cabeçalho da conversa): ${prazoEnvio}`
         : '\n\nNenhum prazo de envio identificado no cabeçalho desta conversa — se o cliente perguntar sobre prazo, responda "No momento não temos essa informação."'
 
-    const formatoSaida = `\n\nResponda EXCLUSIVAMENTE em JSON, neste formato exato (sem texto fora do JSON):
-{"precisaHumano": true ou false, "resposta": "mensagem a enviar ao cliente agora no chat — a resposta normal de atendimento, ou, quando precisaHumano for true, a mensagem de encaminhamento com o resumo já embutido conforme instruído", "resumoParaDono": "resumo completo da conversa (nome do cliente, produto, motivo do contato, o que já foi tentado e por que precisa de humano) — use null quando precisaHumano for false"}`
+    // Catálogo de outros produtos já conhecidos (cache local) para a instrução SUGESTÃO DE
+    // PRODUTOS — sem isso a IA não teria links reais para oferecer. Exclui o produto em discussão.
+    const outrosProdutos = Object.values(produtos)
+        .filter(p => p.titulo && p.url && p.produtoId !== infoProduto?.produtoId)
+        .map(p => `- ${p.titulo}: ${p.url}`)
+    const contextoCatalogo = outrosProdutos.length
+        ? `\n\nOUTROS PRODUTOS DA LOJA DISPONÍVEIS PARA SUGESTÃO (use o link exatamente como informado):\n${outrosProdutos.join('\n').substring(0, 2000)}`
+        : '\n\nNenhum outro produto disponível no catálogo local para sugestão no momento — não sugira produtos nesta conversa.'
 
-    const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + contextoPrazo + formatoSaida }]
+    const formatoSaida = `\n\nResponda EXCLUSIVAMENTE em JSON, neste formato exato (sem texto fora do JSON):
+{"precisaHumano": true ou false, "resposta": "mensagem a enviar ao cliente agora no chat — a resposta normal de atendimento, ou, quando precisaHumano for true, a mensagem de encaminhamento com o resumo já embutido conforme instruído", "resumoParaDono": "resumo completo da conversa no formato indicado em RESUMO FINAL PARA HUMANO — use null quando precisaHumano for false"}`
+
+    const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + contextoPrazo + contextoCatalogo + formatoSaida }]
     if (primeiraMensagem) {
         messages.push({ role: 'system', content: 'Esta é a primeira mensagem desta conversa — comece com a apresentação indicada nas instruções.' })
     }
