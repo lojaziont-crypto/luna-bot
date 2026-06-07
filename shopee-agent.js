@@ -9,6 +9,8 @@ const path = require('path')
 const BASE_URL = 'https://seller.shopee.com.br'
 const CHAT_URL = `${BASE_URL}/new-webchat/conversations`
 const PRODUTOS_LIST_URL = `${BASE_URL}/portal/product/list/all`
+const ORDERS_TOSHIP_URL = `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`
+const PALAVRAS_PERSONALIZACAO = ['personalizada', 'personalizado', 'arte', 'logo']
 const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
@@ -734,8 +736,101 @@ async function extrairInfoProduto(page, nomeProduto) {
     }
 }
 
+// ───────────────────── Pedidos de personalização sem arte ─────────────────────
+
+// Acessa "A Enviar — Em aberto" e retorna os pedidos cujo nome do produto sugere
+// personalização (contém "personalizada", "personalizado", "arte" ou "logo"). A extração
+// usa o texto "ID do Pedido <ID>" como âncora (igual a verificarNovosPedidos) e sobe pelo
+// DOM em busca, no mesmo cartão, do nome do produto e do nome do comprador.
+// Seletores genéricos/best-effort: se a Shopee mudar o layout e os campos vierem vazios,
+// inspecionar debug_shopee/pedidos_personalizacao.html e ajustar (mesmo processo usado
+// para corrigir os seletores do webchat).
+async function listarPedidosPersonalizacaoSemArte(page) {
+    await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+    await new Promise(r => setTimeout(r, 15000))
+
+    if (page.url().includes('/account/login')) {
+        throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+    }
+
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'pedidos_personalizacao.png') })
+    await salvarHtmlDebug(page, 'pedidos_personalizacao')
+
+    const pedidos = await page.evaluate(() => {
+        const resultado = []
+        const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
+        const marcadores = folhas.filter(el => /ID do Pedido\s+[A-Z0-9]{6,20}/i.test(el.textContent || ''))
+
+        for (const marcador of marcadores) {
+            const idMatch = (marcador.textContent || '').match(/ID do Pedido\s+([A-Z0-9]{6,20})/i)
+            if (!idMatch) continue
+            const orderId = idMatch[1]
+            if (resultado.some(p => p.orderId === orderId)) continue
+
+            // Sobe pelos containers até achar um "cartão" que tenha tanto o nome do
+            // produto quanto o nome do comprador — ambos costumam estar no mesmo bloco
+            let produtoNome = null
+            let comprador = null
+            let container = marcador
+            for (let i = 0; i < 10 && container; i++) {
+                if (!produtoNome) {
+                    const produtoEl = container.querySelector('a[href*="/product/"], [title]')
+                    const txt = (produtoEl?.getAttribute('title') || produtoEl?.textContent || '').trim()
+                    if (txt.length > 3) produtoNome = txt.substring(0, 200)
+                }
+                if (!comprador) {
+                    const compradorEl = container.querySelector('a[href*="/buyer/"], a[href*="/user/"], a[href*="/usercenter/"]')
+                    const txt = (compradorEl?.textContent || '').trim()
+                    if (txt.length > 1 && txt.length < 60) comprador = txt
+                }
+                if (produtoNome && comprador) break
+                container = container.parentElement
+            }
+            if (!produtoNome) continue
+            resultado.push({ orderId, produtoNome, comprador })
+        }
+        return resultado
+    })
+
+    const personalizacao = pedidos.filter(p =>
+        PALAVRAS_PERSONALIZACAO.some(palavra => p.produtoNome.toLowerCase().includes(palavra))
+    )
+    console.log(`🎨 [Zyon/arte] ${pedidos.length} pedido(s) lido(s) em "A Enviar" — ${personalizacao.length} de personalização`)
+    return personalizacao
+}
+
+// Busca uma conversa pelo nome do comprador usando o campo "Buscar Tudo" do chat
+// (input[placeholder="Buscar Tudo"], confirmado em debug_shopee/chat_lista.html) e abre
+// o primeiro resultado da lista. Retorna true se uma conversa foi aberta.
+async function abrirConversaPorNome(page, nome) {
+    const seletorBusca = 'input[placeholder="Buscar Tudo"]'
+    try {
+        await page.waitForSelector(seletorBusca, { timeout: 15000 })
+        await page.click(seletorBusca, { clickCount: 3 })
+        await page.keyboard.press('Backspace')
+        await page.type(seletorBusca, nome, { delay: 30 })
+        await new Promise(r => setTimeout(r, 3000))
+
+        const encontrou = await page.evaluate(() => {
+            const cell = document.querySelector('[data-cy="webchat-conversation-cell-root"]')
+            if (!cell) return false
+            cell.click()
+            return true
+        })
+        if (!encontrou) return false
+
+        await new Promise(r => setTimeout(r, 4000))
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'arte_conversa.png') })
+        return true
+    } catch (err) {
+        console.error(`❌ [Zyon/arte] Erro ao buscar conversa de "${nome}": ${err.message}`)
+        return false
+    }
+}
+
 module.exports = {
     coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
     launchBrowser, resolverChrome,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
+    listarPedidosPersonalizacaoSemArte, abrirConversaPorNome,
 }

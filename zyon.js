@@ -16,6 +16,7 @@ const {
     verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos,
     launchBrowser, resolverChrome,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
+    listarPedidosPersonalizacaoSemArte, abrirConversaPorNome,
 } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
@@ -23,6 +24,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const PEDIDOS_FILE = path.join(__dirname, 'pedidos_vistos.json')
 const PRODUTOS_FILE = path.join(__dirname, 'produtos.json')
 const RESPONDIDAS_FILE = path.join(__dirname, 'mensagens_respondidas.json')
+const ARTE_SOLICITADA_FILE = path.join(__dirname, 'arte_solicitada.json')
 let ultimoPedidoVisto = null
 let emColeta = false  // mutex: nunca abre dois browsers ao mesmo tempo
 
@@ -66,6 +68,7 @@ function salvarJSON(arquivo, dados) {
 
 let produtos = carregarJSON(PRODUTOS_FILE, {})
 let mensagensRespondidas = carregarJSON(RESPONDIDAS_FILE, {})
+let arteSolicitada = carregarJSON(ARTE_SOLICITADA_FILE, {})
 
 // Notifica Zaya (Railway) via HTTP POST /notify-order
 // Configure ZAYA_URL no .env: ex. ZAYA_URL=https://luna-bot-xxxx.up.railway.app
@@ -488,6 +491,60 @@ async function processarConversaAberta(page, nomeCliente) {
     salvarJSON(RESPONDIDAS_FILE, mensagensRespondidas)
 }
 
+const MENSAGEM_SOLICITAR_ARTE = 'Olá! Notamos que seu pedido de personalização ainda não possui a arte enviada. Para prosseguirmos com a produção, por favor envie a arte final pronta aqui no chat, preferencialmente em PNG com fundo transparente e boa resolução. 😊'
+
+// Verifica os pedidos de personalização em "A Enviar — Em aberto" e, para os que ainda
+// não enviaram a arte no chat, solicita educadamente. Roda só quando não há conversas
+// pendentes no chat (chamada a partir de verificarChatClientes), reaproveitando a mesma
+// página/sessão do browser. Registra cada pedido verificado em arte_solicitada.json para
+// nunca solicitar duas vezes ao mesmo pedido.
+async function verificarPedidosSemArte(page) {
+    console.log(`\n🎨 [Zyon] Verificando pedidos de personalização sem arte enviada...`)
+    const pedidos = await listarPedidosPersonalizacaoSemArte(page)
+    const pendentes = pedidos.filter(p => !arteSolicitada[p.orderId])
+
+    if (pendentes.length === 0) {
+        console.log('🎨 [Zyon] Nenhum pedido de personalização novo para verificar')
+        return
+    }
+    console.log(`🎨 [Zyon] ${pendentes.length} pedido(s) de personalização a verificar`)
+
+    for (const pedido of pendentes) {
+        if (!pedido.comprador) {
+            console.log(`⚠️  [Zyon/arte] Pedido #${pedido.orderId} (${pedido.produtoNome}) — não foi possível identificar o comprador, pulando`)
+            continue
+        }
+        try {
+            await abrirChat(page)
+            const aberto = await abrirConversaPorNome(page, pedido.comprador)
+            if (!aberto) {
+                console.log(`⚠️  [Zyon/arte] Pedido #${pedido.orderId} — conversa de "${pedido.comprador}" não encontrada no chat, pulando`)
+                continue
+            }
+
+            const { mensagens } = await lerConversaCompleta(page)
+            const arteEnviada = mensagens.some(m => m.remetente === 'cliente' && m.texto.includes('[imagem/arquivo enviado]'))
+
+            if (arteEnviada) {
+                console.log(`✅ [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador} já enviou a arte`)
+            } else {
+                console.log(`📨 [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador} ainda não enviou a arte, solicitando...`)
+                await enviarMensagemNoChat(page, MENSAGEM_SOLICITAR_ARTE)
+            }
+
+            arteSolicitada[pedido.orderId] = {
+                comprador: pedido.comprador,
+                produtoNome: pedido.produtoNome,
+                arteEnviada,
+                verificadoEm: new Date().toISOString(),
+            }
+            salvarJSON(ARTE_SOLICITADA_FILE, arteSolicitada)
+        } catch (err) {
+            console.error(`❌ [Zyon/arte] Erro ao verificar pedido #${pedido.orderId}: ${err.message}`)
+        }
+    }
+}
+
 // A cada 5 min: abre o chat e processa as conversas com mensagens não respondidas
 // Roda `tarefa(browser, page)` num browser novo. Se o browser do Puppeteer fechar
 // inesperadamente (crash do Chrome, processo morto, etc.) durante a execução, a Promise
@@ -541,11 +598,15 @@ async function verificarChatClientes() {
             // Conversas já abertas neste ciclo — passadas como filtro para abrirProximaConversaNaoRespondida
             // para nunca reabrir a mesma conversa duas vezes na mesma rodada (evita loop)
             const conversasVisitadas = []
+            let semConversasPendentes = false
 
             // Limite por ciclo evita ficar preso processando uma fila grande de uma só vez
             for (let i = 0; i < 5; i++) {
                 const cliente = await abrirProximaConversaNaoRespondida(page, conversasVisitadas)
-                if (!cliente) break
+                if (!cliente) {
+                    semConversasPendentes = true
+                    break
+                }
                 conversasVisitadas.push(cliente)
                 try {
                     await processarConversaAberta(page, cliente)
@@ -553,6 +614,16 @@ async function verificarChatClientes() {
                     console.error(`❌ [Zyon/chat] Erro ao processar conversa de ${cliente}: ${err.message}`)
                 }
                 await abrirChat(page) // volta à lista antes de procurar a próxima conversa pendente
+            }
+
+            // Verificação de pedidos sem arte só roda quando o chat está em dia — não
+            // queremos atrasar o atendimento normal por causa dela
+            if (semConversasPendentes) {
+                try {
+                    await verificarPedidosSemArte(page)
+                } catch (err) {
+                    console.error('❌ [Zyon/arte] Erro ao verificar pedidos sem arte:', err.message)
+                }
             }
         })
     } catch (err) {
@@ -595,7 +666,7 @@ async function atualizarProdutosSalvos() {
     }
 }
 
-const INTERVALO_MS = 10 * 60 * 1000
+const INTERVALO_MS = 30 * 60 * 1000
 const INTERVALO_DADOS_MS = 60 * 60 * 1000
 const INTERVALO_CHAT_MS = 5 * 60 * 1000
 const INTERVALO_PRODUTOS_MS = 24 * 60 * 60 * 1000
