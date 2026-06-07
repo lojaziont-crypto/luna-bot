@@ -266,7 +266,7 @@ ARTE JÁ ENVIADA PELA LOJA: Quando o histórico mostrar que a LOJA (não o clien
 2. Defina precisaHumano = true
 3. No campo "resumoParaDono", inclua claramente: que a imagem foi enviada pela LOJA (não pelo cliente), que o cliente está pedindo alteração/correção, e qual foi exatamente a solicitação do cliente
 PEDIDOS A ENVIAR OU CLIENTES COBRANDO POSICIONAMENTO: Responder "No momento estamos com uma alta demanda de pedidos e nossa equipe está trabalhando para liberar todos os pedidos o mais rápido possível."
-PRAZO DE POSTAGEM / ENTREGA: Verifique o prazo de envio informado no cabeçalho da conversa. Se disponível, informe ao cliente: "O prazo de envio do seu pedido é até [prazoEnvio]. Após a postagem, o prazo de entrega é gerenciado pela Shopee. Para mais detalhes sobre rastreamento ou atrasos, você pode falar diretamente com a Shopee pelo chat deles. 😊"
+PRAZO DE ENVIO: O prazo de envio SEMPRE está disponível no card de resumo do pedido, no campo "Enviar até: DD/MM/AAAA" (fornecido no contexto desta conversa como PRAZO DE ENVIO DESTE PEDIDO). Sempre que o cliente perguntar quando o pedido vai ser enviado, qual o prazo, "quando chega" ou similar, verifique esse campo e responda: "Olá! O prazo de envio do seu pedido é até [data do prazo informado no contexto]. Após a postagem, a entrega é gerenciada pela Shopee. 😊". NUNCA responda "No momento não temos essa informação" para perguntas sobre prazo de envio — essa informação está sempre disponível no card do pedido.
 CONFIRMAÇÃO DE ÁREA DE PERSONALIZAÇÃO: Sempre que o cliente enviar a arte para personalização, após confirmar o recebimento e a qualidade, pergunte em qual área deseja a personalização. Resposta sugerida: "A personalização será só no peito, nas costas, ou frente e costas? 😊"
 ARTE JÁ ENVIADA: Antes de pedir a arte de personalização, verifique no histórico se há alguma mensagem do CLIENTE marcada como "[imagem/arquivo enviado]" (ignore o card do produto no início da conversa — isso é informação do pedido, não uma arte enviada pelo cliente). Se o cliente já enviou, NÃO peça a arte novamente — reconheça que ela foi recebida e avance para a próxima etapa (confirmar qualidade, área de personalização, etc). Se o cliente NÃO enviou nenhuma imagem/arquivo, não diga que recebeu nada — siga normalmente a orientação de PERSONALIZAÇÃO DOS DEMAIS PRODUTOS.
 LOCALIZAÇÃO DA ARTE: Quando o cliente informar onde quer a personalização (ex: "lado direito do peito", "costas", "frente"), confirme a informação e registre. Resposta sugerida: "Perfeito! Arte no [local informado]. Vou registrar isso para a produção. ✅"
@@ -310,8 +310,8 @@ async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMe
         : '\n\nNenhuma informação de produto disponível para esta conversa — se a dúvida depender do anúncio, responda "No momento não temos essa informação."'
 
     const contextoPrazo = prazoEnvio
-        ? `\n\nPRAZO DE ENVIO DESTE PEDIDO (extraído do cabeçalho da conversa): ${prazoEnvio}`
-        : '\n\nNenhum prazo de envio identificado no cabeçalho desta conversa — se o cliente perguntar sobre prazo, responda "No momento não temos essa informação."'
+        ? `\n\nPRAZO DE ENVIO DESTE PEDIDO (campo "Enviar até" do card de resumo do pedido): ${prazoEnvio}`
+        : '\n\nNenhum prazo de envio foi identificado no card do pedido desta conversa (situação rara — só ocorre quando a conversa não está associada a um pedido). Se o cliente perguntar sobre prazo, NÃO diga que não temos essa informação — oriente-o a conferir o prazo de envio diretamente nos detalhes do pedido no app/site da Shopee.'
 
     // Catálogo de outros produtos já conhecidos (cache local) para a instrução SUGESTÃO DE
     // PRODUTOS — sem isso a IA não teria links reais para oferecer. Exclui o produto em discussão.
