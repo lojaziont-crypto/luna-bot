@@ -441,51 +441,49 @@ async function abrirChat(page) {
     await salvarHtmlDebug(page, 'chat_lista')
 }
 
-// Procura, dentro da seção/aba "Sem resposta (N)", o próximo item de conversa com badge
-// vermelho de não lidas, e clica para abri-lo. Retorna o nome do cliente ou null se acabou.
+// A lista de conversas é virtualizada (ReactVirtualized) e organizada em seções marcadas
+// por linhas separadoras com id="tab_unreplied" ("Sem resposta (N)") e id="tab_manually_replied"
+// ("Replied (N)"), irmãs diretas das células de conversa ([data-cy="webchat-conversation-cell-root"]).
+// Pega a primeira célula entre essas duas marcações — a Shopee já filtra "sem resposta" para nós.
 async function abrirProximaConversaNaoRespondida(page) {
-    const cliente = await page.evaluate(() => {
-        // Localiza o rótulo "Sem resposta" e sobe até um container que pareça uma lista
-        const rotulo = Array.from(document.querySelectorAll('*')).find(el =>
-            el.children.length === 0 && /sem resposta/i.test((el.textContent || '').trim())
-        )
-        let escopo = document.body
-        if (rotulo) {
-            let container = rotulo
-            for (let i = 0; i < 8 && container.parentElement; i++) {
-                container = container.parentElement
-                if (container.querySelectorAll('li, [class*="item"], [class*="conversation"], [class*="session"]').length >= 2) {
-                    escopo = container
-                    break
-                }
-            }
+    const resultado = await page.evaluate(() => {
+        const container = document.querySelector('[data-cy="webchat-conversation-list"] .ReactVirtualized__Grid__innerScrollContainer')
+        if (!container) return { erro: 'lista de conversas não encontrada (container ReactVirtualized ausente)' }
+
+        const filhos = Array.from(container.children)
+        const inicio = filhos.findIndex(el => el.id === 'tab_unreplied')
+        if (inicio === -1) return { erro: 'seção "Sem resposta" (#tab_unreplied) não encontrada' }
+        let fim = filhos.findIndex((el, i) => i > inicio && el.id === 'tab_manually_replied')
+        if (fim === -1) fim = filhos.length
+
+        for (let i = inicio + 1; i < fim; i++) {
+            const cell = filhos[i].querySelector('[data-cy="webchat-conversation-cell-root"]')
+            if (!cell) continue
+
+            const nomeEl = cell.querySelector('[data-cy="webchat-conversation-cell-name"]')
+            const nome = (nomeEl?.getAttribute('title') || nomeEl?.textContent || '').trim()
+            if (!nome) continue
+
+            const badgeEl = cell.querySelector('[data-cy="webchat-conversation-cell-message"]')?.nextElementSibling
+            const badge = (badgeEl?.textContent || '').trim() || null
+
+            cell.click()
+            return { nome, badge }
         }
-
-        const candidatos = escopo.querySelectorAll('li, [class*="item"], [class*="conversation"], [class*="session"]')
-        for (const item of candidatos) {
-            if (item.offsetParent === null) continue
-            // ignora containers que só agrupam outros itens — queremos as "folhas" clicáveis
-            if (item.querySelectorAll('li, [class*="item"]').length > 0) continue
-
-            const badge = item.querySelector('[class*="unread"], [class*="badge"], [class*="dot"], [class*="red"], [class*="notif"]')
-            if (!badge) continue
-
-            const texto = (item.innerText || '').replace(/\s+/g, ' ').trim()
-            if (!texto) continue
-            const nome = texto.split(/\s{2,}|\d{1,2}:\d{2}|·|\|/)[0].trim().substring(0, 60)
-            item.click()
-            return nome || texto.substring(0, 60)
-        }
-        return null
+        return { nome: null }
     })
 
-    if (cliente) {
-        await new Promise(r => setTimeout(r, 4000))
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
-        console.log(`💬 [Zyon/chat] Conversa aberta: ${cliente}`)
-        await salvarHtmlDebug(page, 'chat_conversa')
+    if (resultado.erro) {
+        console.log(`⚠️  [Zyon/chat] ${resultado.erro}`)
+        return null
     }
-    return cliente
+    if (!resultado.nome) return null
+
+    console.log(`💬 [Zyon/chat] Abrindo conversa: ${resultado.nome} (badge: ${resultado.badge || 'sem indicador'})`)
+    await new Promise(r => setTimeout(r, 4000))
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
+    await salvarHtmlDebug(page, 'chat_conversa')
+    return resultado.nome
 }
 
 // Rola para o topo do histórico (carrega mensagens antigas) e extrai toda a conversa visível,
