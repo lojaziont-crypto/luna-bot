@@ -14,7 +14,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const conversations = new Map()
 const humanAttending = new Map()   // JID -> timestamp da última mensagem manual do dono
 const lastActivity = new Map()     // JID -> timestamp da última mensagem do cliente
-const botSentAt = new Map()        // JID -> timestamp do último envio da Zaya (evita falso humanAttending em echoes)
+const botSentMessages = new Set()  // IDs de mensagens enviadas pela Zaya (evita falso humanAttending em echoes)
 let activeSock = null
 let ownerJid = null
 let reconnectTimer = null
@@ -79,9 +79,16 @@ function normalizePhone(jid) {
     return jid.replace(/@.*$/, '').replace(/^55/, '')
 }
 
+// Rastreia mensagens enviadas pela Zaya para não confundir echoes com respostas humanas
+function trackSend(sent) {
+    if (sent?.key?.id) {
+        botSentMessages.add(sent.key.id)
+        if (botSentMessages.size > 200) botSentMessages.clear()
+    }
+}
+
 const HUMAN_TIMEOUT_MS = 30 * 60 * 1000
 const INACTIVITY_TIMEOUT_MS = 60 * 60 * 1000
-const BOT_ECHO_WINDOW_MS = 30 * 1000  // echoes dentro de 30s de um envio da Zaya são ignorados
 
 const SYSTEM_PROMPT = `Você é Zaya, assistente virtual de atendimento. Conversa de forma natural e humana no WhatsApp — nunca parece robô.
 
@@ -155,10 +162,9 @@ async function notifyNewOrder(orderId) {
     }
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
     try {
-        botSentAt.set(ownerJidToSend, Date.now())
-        await activeSock.sendMessage(ownerJidToSend, {
+        trackSend(await activeSock.sendMessage(ownerJidToSend, {
             text: `🛍 *Nova Venda!*\n\nPedido *#${orderId}* confirmado! 🎉\n\nAcesse a Shopee para preparar o envio.`
-        })
+        }))
         console.log(`🛍️ [Zyon→Zaya] Notificação enviada: pedido #${orderId}`)
     } catch (err) {
         console.error('❌ Erro ao enviar notificação de novo pedido:', err.message)
@@ -254,22 +260,27 @@ async function connectToWhatsApp() {
     })
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        // Detecta mensagens enviadas manualmente pelo dono (fromMe = true)
-        // Usa janela de tempo para não confundir echoes da própria Zaya com respostas humanas
+        // Processa apenas mensagens novas — ignora histórico/sincronização
+        if (type !== 'notify') return
+
+        // Detecta mensagens enviadas manualmente pelo dono (fromMe = true, mas não enviadas pela Zaya)
         for (const msg of messages) {
             if (msg.key.fromMe && msg.key.remoteJid) {
+                // Echo de mensagem enviada pela própria Zaya — ignorar
+                if (botSentMessages.has(msg.key.id)) {
+                    botSentMessages.delete(msg.key.id)
+                    continue
+                }
                 const jid = msg.key.remoteJid
                 const isOwnerJid = jid === ownerJid || jid === process.env.OWNER_JID ||
                     normalizePhone(jid) === normalizePhone(process.env.OWNER_PHONE || '')
-                const recentBotSend = (botSentAt.get(jid) || 0) > Date.now() - BOT_ECHO_WINDOW_MS
-                if (!recentBotSend && !isOwnerJid) {
+                // Mensagem fromMe para um cliente (não o próprio dono) = dono respondeu manualmente
+                if (!isOwnerJid) {
                     humanAttending.set(jid, Date.now())
                     saveState()
                 }
             }
         }
-
-        if (type !== 'notify') return
 
         for (const msg of messages) {
             const from = msg.key.remoteJid
@@ -312,8 +323,7 @@ async function connectToWhatsApp() {
             // Registro manual do dono (caso auto-detecção falhe)
             if (text.trim() === `!registrar ${process.env.OWNER_PHONE}`) {
                 salvarOwnerJid(from)
-                botSentAt.set(from, Date.now())
-                await sock.sendMessage(from, { text: '✅ Você foi registrado como dono! Agora use *!shopee* para gerar o relatório.' })
+                trackSend(await sock.sendMessage(from, { text: '✅ Você foi registrado como dono! Agora use *!shopee* para gerar o relatório.' }))
                 continue
             }
 
@@ -351,17 +361,14 @@ async function connectToWhatsApp() {
                     const resumo = resumoMatch[1].trim()
 
                     if (mensagemCliente) {
-                        botSentAt.set(from, Date.now())
-                        await sock.sendMessage(from, { text: mensagemCliente })
+                        trackSend(await sock.sendMessage(from, { text: mensagemCliente }))
                     }
-                    botSentAt.set(from, Date.now())
-                    await sock.sendMessage(from, { text: `📋 *Resumo para atendimento:*\n\n${resumo}` })
+                    trackSend(await sock.sendMessage(from, { text: `📋 *Resumo para atendimento:*\n\n${resumo}` }))
                     saveConversations()
                     console.log(`🤖 Zaya: ${mensagemCliente}`)
                     console.log(`📋 Resumo enviado`)
                 } else {
-                    botSentAt.set(from, Date.now())
-                    await sock.sendMessage(from, { text: reply })
+                    trackSend(await sock.sendMessage(from, { text: reply }))
                     saveConversations()
                     console.log(`🤖 Zaya: ${reply}`)
                 }
@@ -369,7 +376,7 @@ async function connectToWhatsApp() {
                 console.error('❌ Erro ao responder:', err.message)
                 console.error(err.stack?.split('\n').slice(0, 3).join('\n'))
                 try {
-                    await sock.sendMessage(from, { text: 'Desculpe, tive um problema técnico. Tente novamente em instantes! 🙏' })
+                    trackSend(await sock.sendMessage(from, { text: 'Desculpe, tive um problema técnico. Tente novamente em instantes! 🙏' }))
                 } catch {}
             }
         }
@@ -386,8 +393,7 @@ async function gerarResumoShopee() {
     console.log(`\n🛍️  Iniciando coleta de dados Shopee... (envio para: ${ownerJidToSend})`)
 
     try {
-        botSentAt.set(ownerJidToSend, Date.now())
-        await activeSock.sendMessage(ownerJidToSend, { text: '⏳ Coletando dados da sua loja Shopee, aguarde...' })
+        trackSend(await activeSock.sendMessage(ownerJidToSend, { text: '⏳ Coletando dados da sua loja Shopee, aguarde...' }))
 
         const { overviewText, orderText } = await coletarStatusPedidos()
 
@@ -422,17 +428,15 @@ async function gerarResumoShopee() {
             `⚠️ *Alertas:* ${alertas}`,
         ].join('\n')
 
-        botSentAt.set(ownerJidToSend, Date.now())
-        await activeSock.sendMessage(ownerJidToSend, { text: mensagemFinal })
+        trackSend(await activeSock.sendMessage(ownerJidToSend, { text: mensagemFinal }))
         console.log('📨 Resumo Shopee enviado via WhatsApp')
 
     } catch (err) {
         console.error('❌ Erro no resumo Shopee:', err.message)
         try {
-            botSentAt.set(ownerJidToSend, Date.now())
-            await activeSock.sendMessage(ownerJidToSend, {
+            trackSend(await activeSock.sendMessage(ownerJidToSend, {
                 text: `❌ Erro ao coletar dados da Shopee:\n${err.message}`
-            })
+            }))
         } catch {}
     }
 }
