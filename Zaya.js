@@ -272,10 +272,14 @@ async function connectToWhatsApp() {
         if (type === 'notify') {
             for (const msg of messages) {
                 if (msg.key.fromMe && msg.key.remoteJid) {
+                    // Echo da própria Zaya — ignorar
                     if (botSentMessages.has(msg.key.id)) {
                         botSentMessages.delete(msg.key.id)
                         continue
                     }
+                    // Echo de sessão anterior (entregue no reconnect) — não ativar humanAttending
+                    const echoTs = Number(msg.messageTimestamp)
+                    if (echoTs && echoTs < STARTUP_TS - 30) continue
                     const jid = msg.key.remoteJid
                     const isOwnerJid = jid === ownerJid || jid === process.env.OWNER_JID ||
                         normalizePhone(jid) === normalizePhone(process.env.OWNER_PHONE || '')
