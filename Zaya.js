@@ -1,5 +1,12 @@
 require('dotenv').config()
 
+process.on('uncaughtException', (err) => {
+    console.error('[ERRO FATAL]', err.message)
+})
+process.on('unhandledRejection', (err) => {
+    console.error('[PROMISE REJEITADA]', err?.message || err)
+})
+
 const { Boom } = require('@hapi/boom')
 const Groq = require('groq-sdk')
 const qrcode = require('qrcode-terminal')

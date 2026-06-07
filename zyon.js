@@ -1,5 +1,12 @@
 require('dotenv').config()
 
+process.on('uncaughtException', (err) => {
+    console.error('[ERRO FATAL]', err.message)
+})
+process.on('unhandledRejection', (err) => {
+    console.error('[PROMISE REJEITADA]', err?.message || err)
+})
+
 const fs = require('fs')
 const path = require('path')
 const https = require('https')
@@ -18,6 +25,24 @@ const PRODUTOS_FILE = path.join(__dirname, 'produtos.json')
 const RESPONDIDAS_FILE = path.join(__dirname, 'mensagens_respondidas.json')
 let ultimoPedidoVisto = null
 let emColeta = false  // mutex: nunca abre dois browsers ao mesmo tempo
+
+// Registro do horário da última execução de cada tarefa periódica — usado pelo watchdog
+// para detectar se algum setInterval travou/parou e precisa ser reiniciado
+const ultimaExecucao = {
+    pedidos: Date.now(),
+    dados: Date.now(),
+    chat: Date.now(),
+}
+
+// Executa uma tarefa periódica isolando erros — assim uma falha não derruba o processo
+// nem impede que as demais tarefas continuem rodando nos seus próprios intervalos
+async function executarComSeguranca(nome, tarefa) {
+    try {
+        await tarefa()
+    } catch (err) {
+        console.error(`❌ [Zyon] Erro não tratado em ${nome}:`, err?.message || err)
+    }
+}
 
 try {
     if (fs.existsSync(PEDIDOS_FILE)) {
@@ -88,6 +113,7 @@ function notifyZaya(orderId) {
 }
 
 async function checarNovosPedidos() {
+    ultimaExecucao.pedidos = Date.now()
     if (emColeta) {
         console.log('⏭️  [Zyon] Browser ocupado — verificação de pedidos adiada')
         return
@@ -163,6 +189,7 @@ function enviarDadosParaZaya(fatDia, fatMes, aEnviar) {
 }
 
 async function coletarEEnviarDados() {
+    ultimaExecucao.dados = Date.now()
     if (emColeta) {
         console.log('⏭️  [Zyon] Browser ocupado — coleta de faturamento adiada')
         return
@@ -422,37 +449,70 @@ async function processarConversaAberta(page, nomeCliente) {
 }
 
 // A cada 5 min: abre o chat e processa as conversas com mensagens não respondidas
+// Roda `tarefa(browser, page)` num browser novo. Se o browser do Puppeteer fechar
+// inesperadamente (crash do Chrome, processo morto, etc.) durante a execução, a Promise
+// pendente é rejeitada (em vez de ficar travada para sempre), o browser é relançado
+// automaticamente e a operação é tentada mais uma vez.
+async function executarComBrowser(nomeOperacao, tarefa, tentativas = 2) {
+    for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
+        let browser
+        let fechouInesperadamente = false
+        try {
+            browser = await launchBrowser(resolverChrome())
+            browser.once('disconnected', () => { fechouInesperadamente = true })
+
+            const page = await browser.newPage()
+            await page.setViewport({ width: 1366, height: 768 })
+            await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+
+            const desconexao = new Promise((_, reject) => {
+                browser.once('disconnected', () => reject(new Error(`Browser do Puppeteer fechou inesperadamente durante ${nomeOperacao}`)))
+            })
+
+            await Promise.race([tarefa(browser, page), desconexao])
+            return
+        } catch (err) {
+            console.error(`❌ [Zyon] Erro em ${nomeOperacao} (tentativa ${tentativa}/${tentativas}):`, err.message)
+            if (fechouInesperadamente && tentativa < tentativas) {
+                console.log(`🔁 [Zyon] Reabrindo o browser e tentando "${nomeOperacao}" novamente...`)
+                continue
+            }
+            throw err
+        } finally {
+            if (browser && browser.isConnected()) {
+                try { await browser.close() } catch {}
+            }
+        }
+    }
+}
+
 async function verificarChatClientes() {
+    ultimaExecucao.chat = Date.now()
     if (emColeta) {
         console.log('⏭️  [Zyon] Browser ocupado — verificação de chat adiada')
         return
     }
     emColeta = true
-    let browser
     try {
         console.log(`\n💬 [Zyon] Verificando chat de clientes... ${new Date().toLocaleTimeString('pt-BR')}`)
-        browser = await launchBrowser(resolverChrome())
-        const page = await browser.newPage()
-        await page.setViewport({ width: 1366, height: 768 })
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+        await executarComBrowser('verificação de chat', async (browser, page) => {
+            await abrirChat(page)
 
-        await abrirChat(page)
-
-        // Limite por ciclo evita ficar preso processando uma fila grande de uma só vez
-        for (let i = 0; i < 5; i++) {
-            const cliente = await abrirProximaConversaNaoRespondida(page)
-            if (!cliente) break
-            try {
-                await processarConversaAberta(page, cliente)
-            } catch (err) {
-                console.error(`❌ [Zyon/chat] Erro ao processar conversa de ${cliente}: ${err.message}`)
+            // Limite por ciclo evita ficar preso processando uma fila grande de uma só vez
+            for (let i = 0; i < 5; i++) {
+                const cliente = await abrirProximaConversaNaoRespondida(page)
+                if (!cliente) break
+                try {
+                    await processarConversaAberta(page, cliente)
+                } catch (err) {
+                    console.error(`❌ [Zyon/chat] Erro ao processar conversa de ${cliente}: ${err.message}`)
+                }
+                await abrirChat(page) // volta à lista antes de procurar a próxima conversa pendente
             }
-            await abrirChat(page) // volta à lista antes de procurar a próxima conversa pendente
-        }
+        })
     } catch (err) {
         console.error('❌ [Zyon] Erro ao verificar chat:', err.message)
     } finally {
-        if (browser) await browser.close()
         emColeta = false
     }
 }
@@ -467,30 +527,25 @@ async function atualizarProdutosSalvos() {
     }
 
     emColeta = true
-    let browser
     try {
         console.log(`\n🔄 [Zyon] Atualizando ${ids.length} produto(s) salvos em produtos.json — ${new Date().toLocaleTimeString('pt-BR')}`)
-        browser = await launchBrowser(resolverChrome())
-        const page = await browser.newPage()
-        await page.setViewport({ width: 1366, height: 768 })
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
-
-        for (const id of ids) {
-            try {
-                const info = await extrairInfoProduto(page, produtos[id].titulo)
-                if (info && info.produtoId) {
-                    produtos[info.produtoId] = info
-                    console.log(`🔄 [Zyon/produto] Atualizado: #${info.produtoId} — ${info.titulo}`)
+        await executarComBrowser('atualização diária de produtos', async (browser, page) => {
+            for (const id of ids) {
+                try {
+                    const info = await extrairInfoProduto(page, produtos[id].titulo)
+                    if (info && info.produtoId) {
+                        produtos[info.produtoId] = info
+                        console.log(`🔄 [Zyon/produto] Atualizado: #${info.produtoId} — ${info.titulo}`)
+                    }
+                } catch (err) {
+                    console.error(`❌ [Zyon/produto] Erro ao atualizar produto #${id}: ${err.message}`)
                 }
-            } catch (err) {
-                console.error(`❌ [Zyon/produto] Erro ao atualizar produto #${id}: ${err.message}`)
             }
-        }
-        salvarJSON(PRODUTOS_FILE, produtos)
+            salvarJSON(PRODUTOS_FILE, produtos)
+        })
     } catch (err) {
         console.error('❌ [Zyon] Erro na atualização diária de produtos:', err.message)
     } finally {
-        if (browser) await browser.close()
         emColeta = false
     }
 }
@@ -522,10 +577,35 @@ console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados comp
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
 console.log('─────────────────────────────────────────────────')
 
+// Referências dos setInterval ativos — guardadas para que o watchdog possa derrubar e
+// recriar um intervalo travado sem duplicar execuções
+let intervaloPedidosRef = null
+let intervaloChatRef = null
+let intervaloProdutosRef = null
+let intervaloDadosRef = null
+
+function iniciarMonitoramentoPedidos() {
+    if (intervaloPedidosRef) clearInterval(intervaloPedidosRef)
+    intervaloPedidosRef = setInterval(() => executarComSeguranca('checarNovosPedidos', checarNovosPedidos), INTERVALO_MS)
+}
+function iniciarMonitoramentoChat() {
+    if (intervaloChatRef) clearInterval(intervaloChatRef)
+    intervaloChatRef = setInterval(() => executarComSeguranca('verificarChatClientes', verificarChatClientes), INTERVALO_CHAT_MS)
+}
+function iniciarAtualizacaoProdutos() {
+    if (intervaloProdutosRef) clearInterval(intervaloProdutosRef)
+    intervaloProdutosRef = setInterval(() => executarComSeguranca('atualizarProdutosSalvos', atualizarProdutosSalvos), INTERVALO_PRODUTOS_MS)
+}
+
 // Agenda a coleta de faturamento para disparar exatamente no início de cada hora
 // (1h00, 2h00, ...), aguardando com setTimeout até a próxima hora cheia e então
 // passando a rodar a cada 60 min — assim o relatório sempre bate na hora certa.
 function agendarColetaDeDadosNaHoraCheia() {
+    if (intervaloDadosRef) {
+        clearInterval(intervaloDadosRef)
+        intervaloDadosRef = null
+    }
+
     const agora = new Date()
     const proximaHora = new Date(agora)
     proximaHora.setHours(proximaHora.getHours() + 1, 0, 0, 0)
@@ -534,18 +614,50 @@ function agendarColetaDeDadosNaHoraCheia() {
     console.log(`🕐 [Zyon] Próxima coleta de faturamento agendada para ${proximaHora.toLocaleTimeString('pt-BR')} (em ${Math.round(msAteProximaHora / 60000)} min)`)
 
     setTimeout(() => {
-        coletarEEnviarDados()
-        setInterval(coletarEEnviarDados, INTERVALO_DADOS_MS)
+        executarComSeguranca('coletarEEnviarDados', coletarEEnviarDados)
+        intervaloDadosRef = setInterval(() => executarComSeguranca('coletarEEnviarDados', coletarEEnviarDados), INTERVALO_DADOS_MS)
     }, msAteProximaHora)
 }
 
-// Executa em sequência na inicialização (nunca dois browsers ao mesmo tempo)
+// Watchdog: a cada 5 min verifica se cada tarefa periódica realmente rodou dentro do
+// prazo esperado (com tolerância). Se alguma ficou parada — setInterval perdido,
+// processo travado, etc. — recria o agendamento e dispara uma execução imediata.
+const WATCHDOG_INTERVALO_MS = 5 * 60 * 1000
+const WATCHDOG_TOLERANCIA = 2.5
+
+function verificarEReiniciarIntervalos() {
+    const agora = Date.now()
+
+    if (agora - ultimaExecucao.pedidos > INTERVALO_MS * WATCHDOG_TOLERANCIA) {
+        console.warn('🐶 [Zyon/watchdog] Monitoramento de pedidos parado — reiniciando...')
+        ultimaExecucao.pedidos = agora
+        iniciarMonitoramentoPedidos()
+        executarComSeguranca('checarNovosPedidos', checarNovosPedidos)
+    }
+
+    if (agora - ultimaExecucao.chat > INTERVALO_CHAT_MS * WATCHDOG_TOLERANCIA) {
+        console.warn('🐶 [Zyon/watchdog] Verificação de chat parada — reiniciando...')
+        ultimaExecucao.chat = agora
+        iniciarMonitoramentoChat()
+        executarComSeguranca('verificarChatClientes', verificarChatClientes)
+    }
+
+    if (agora - ultimaExecucao.dados > INTERVALO_DADOS_MS * WATCHDOG_TOLERANCIA) {
+        console.warn('🐶 [Zyon/watchdog] Coleta de faturamento parada — reiniciando...')
+        ultimaExecucao.dados = agora
+        agendarColetaDeDadosNaHoraCheia()
+    }
+}
+
+// Executa em sequência na inicialização (nunca dois browsers ao mesmo tempo) — cada
+// etapa isolada com executarComSeguranca para que uma falha não impeça as seguintes
 ;(async () => {
-    await checarNovosPedidos()
-    await coletarEEnviarDados()
-    await verificarChatClientes()
+    await executarComSeguranca('checarNovosPedidos', checarNovosPedidos)
+    await executarComSeguranca('coletarEEnviarDados', coletarEEnviarDados)
+    await executarComSeguranca('verificarChatClientes', verificarChatClientes)
 })()
-setInterval(checarNovosPedidos, INTERVALO_MS)
+iniciarMonitoramentoPedidos()
 agendarColetaDeDadosNaHoraCheia()
-setInterval(verificarChatClientes, INTERVALO_CHAT_MS)
-setInterval(atualizarProdutosSalvos, INTERVALO_PRODUTOS_MS)
+iniciarMonitoramentoChat()
+iniciarAtualizacaoProdutos()
+setInterval(verificarEReiniciarIntervalos, WATCHDOG_INTERVALO_MS)
