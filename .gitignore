@@ -10,3 +10,7 @@ pedidos_vistos.json
 produtos.json
 mensagens_respondidas.json
 arte_solicitada.json
+debug_finn/
+finn_profile/
+finn_profile_inspecao/
+finn_limites.json

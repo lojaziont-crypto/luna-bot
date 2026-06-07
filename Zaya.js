@@ -88,6 +88,116 @@ async function notifyChatUpdate(nomeCliente, informacao) {
     }
 }
 
+async function notifyFinn(mensagem) {
+    if (!activeSock) {
+        console.log('⚠️ notifyFinn: WhatsApp não conectado')
+        return
+    }
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        await activeSock.sendMessage(ownerJidToSend, { text: mensagem })
+        console.log('💰 [Finn→Zaya] Notificação enviada ao dono')
+    } catch (err) {
+        console.error('❌ Erro ao enviar notificação do Finn:', err.message)
+    }
+}
+
+// ───────────────────────── Finn (agente financeiro) ─────────────────────────
+
+const FINN_URL = process.env.FINN_URL || 'http://localhost:3002'
+
+function finnRequest(method, urlPath, dadosEnvio) {
+    return new Promise((resolve, reject) => {
+        let parsedUrl
+        try { parsedUrl = new URL(`${FINN_URL}${urlPath}`) } catch {
+            return reject(new Error(`FINN_URL inválida: ${FINN_URL}`))
+        }
+        const lib = parsedUrl.protocol === 'https:' ? https : http
+        const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+        const data = dadosEnvio ? JSON.stringify(dadosEnvio) : null
+
+        const req = lib.request({
+            hostname: parsedUrl.hostname,
+            port,
+            path: parsedUrl.pathname,
+            method,
+            headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {},
+        }, res => {
+            let corpo = ''
+            res.on('data', chunk => { corpo += chunk })
+            res.on('end', () => {
+                try { resolve(JSON.parse(corpo)) } catch { resolve({ ok: res.statusCode < 400, raw: corpo }) }
+            })
+        })
+        req.on('error', reject)
+        req.setTimeout(120000, () => req.destroy(new Error('Timeout ao falar com o Finn')))
+        if (data) req.write(data)
+        req.end()
+    })
+}
+
+const PALAVRAS_LANCAMENTO = ['gastei', 'paguei', 'recebi', 'comprei', 'lancei', 'lancei', 'pagar', 'recebimento', 'gasto', 'compra', 'conta de', 'boleto']
+function contemPalavraDeLancamento(textoLower) {
+    return PALAVRAS_LANCAMENTO.some(p => textoLower.includes(p))
+}
+
+async function responderLimites(sock, from) {
+    try {
+        const resposta = await finnRequest('GET', '/limites')
+        const limitesObtidos = resposta?.limites || {}
+        const categorias = Object.keys(limitesObtidos)
+        if (categorias.length === 0) {
+            await sock.sendMessage(from, { text: '📋 Nenhum limite definido ainda.\n\nPara definir, envie: *limite [categoria] [valor]*' })
+            return
+        }
+        const linhas = categorias.map(cat => `• ${cat}: R$ ${Number(limitesObtidos[cat]).toFixed(2)}`)
+        await sock.sendMessage(from, { text: `📋 *Limites mensais definidos:*\n\n${linhas.join('\n')}` })
+    } catch (err) {
+        console.error('❌ [Zaya/Finn] Erro ao buscar limites:', err.message)
+        await sock.sendMessage(from, { text: '❌ Não consegui consultar os limites agora. O Finn está rodando?' })
+    }
+}
+
+async function definirLimite(sock, from, categoria, valorTexto) {
+    const valor = Number(valorTexto.replace(/\./g, '').replace(',', '.'))
+    if (!Number.isFinite(valor)) {
+        await sock.sendMessage(from, { text: '❌ Valor inválido. Use o formato: *limite [categoria] [valor]* — ex: limite Alimentação 800' })
+        return
+    }
+    try {
+        await finnRequest('POST', '/definir-limite', { categoria, valor })
+        await sock.sendMessage(from, { text: `✅ Limite definido: *${categoria}* → R$ ${valor.toFixed(2)} por mês` })
+    } catch (err) {
+        console.error('❌ [Zaya/Finn] Erro ao definir limite:', err.message)
+        await sock.sendMessage(from, { text: '❌ Não consegui definir o limite agora. O Finn está rodando?' })
+    }
+}
+
+async function processarLancamentoTexto(sock, from, texto) {
+    try {
+        await finnRequest('POST', '/lancar', { texto })
+        await sock.sendMessage(from, { text: '🧾 Recebi! Estou registrando esse lançamento, aviso quando concluir. ⏳' })
+    } catch (err) {
+        console.error('❌ [Zaya/Finn] Erro ao enviar lançamento por texto:', err.message)
+        await sock.sendMessage(from, { text: '❌ Não consegui enviar o lançamento ao Finn agora. Ele está rodando?' })
+    }
+}
+
+async function processarComprovanteImagem(sock, msg, from, legenda) {
+    try {
+        const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+        const buffer = await downloadMediaMessage(msg, 'buffer', {})
+        const imagemBase64 = buffer.toString('base64')
+        const mimeType = msg.message.imageMessage?.mimetype || 'image/jpeg'
+
+        await finnRequest('POST', '/lancar', { imagemBase64, mimeType, texto: legenda || '' })
+        await sock.sendMessage(from, { text: '🧾 Comprovante recebido! Estou extraindo os dados e registrando, aviso quando concluir. ⏳' })
+    } catch (err) {
+        console.error('❌ [Zaya/Finn] Erro ao processar comprovante de imagem:', err.message)
+        await sock.sendMessage(from, { text: '❌ Não consegui processar o comprovante agora. O Finn está rodando?' })
+    }
+}
+
 // HTTP server — Zyon envia POST /notify-order para notificar nova venda
 const PORT = process.env.PORT || 3000
 const server = http.createServer((req, res) => {
@@ -132,6 +242,21 @@ const server = http.createServer((req, res) => {
                 res.end(JSON.stringify({ ok: true }))
             } catch (err) {
                 console.error('❌ /notify-chat-update error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+    } else if (req.method === 'POST' && req.url === '/finn-notificacao') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { mensagem } = JSON.parse(body)
+                await notifyFinn(mensagem)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /finn-notificacao error:', err.message)
                 res.writeHead(400, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err.message }))
             }
@@ -251,15 +376,42 @@ async function connectToWhatsApp() {
                 msg.message.extendedTextMessage?.text ||
                 null
 
+            // Comando exclusivo do dono
+            const isOwner = from === ownerJid || from === process.env.OWNER_JID ||
+                normalizePhone(from) === normalizePhone(process.env.OWNER_PHONE || '')
+
+            // ─── Comandos do Finn (agente financeiro) — só para o dono, antes da IA normal ───
+            if (isOwner) {
+                const textoLower = (text || '').toLowerCase().trim()
+                const imageMsg = msg.message.imageMessage
+
+                if (imageMsg) {
+                    await processarComprovanteImagem(sock, msg, from, text)
+                    continue
+                }
+
+                if (textoLower.includes('meus limites') || textoLower.includes('listar limites')) {
+                    await responderLimites(sock, from)
+                    continue
+                }
+
+                const matchLimite = textoLower.match(/^limite\s+(.+?)\s+([\d.,]+)\s*$/)
+                if (matchLimite) {
+                    await definirLimite(sock, from, matchLimite[1].trim(), matchLimite[2])
+                    continue
+                }
+
+                if (text && contemPalavraDeLancamento(textoLower)) {
+                    await processarLancamentoTexto(sock, from, text)
+                    continue
+                }
+            }
+
             if (!text) {
                 const keys = Object.keys(msg.message).join(',')
                 console.log(`⏭️ skip: sem texto (campos: ${keys})`)
                 continue
             }
-
-            // Comando exclusivo do dono
-            const isOwner = from === ownerJid || from === process.env.OWNER_JID ||
-                normalizePhone(from) === normalizePhone(process.env.OWNER_PHONE || '')
 
             if (isOwner && text.trim() === '!shopee') {
                 console.log('📲 Comando !shopee recebido — gerando relatório...')
