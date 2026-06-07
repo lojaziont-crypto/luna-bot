@@ -216,9 +216,8 @@ async function coletarFaturamentoGerencial() {
             }).catch(function() {})
         })
 
-        // URL da página de Informações Gerenciais — ajuste se necessário
-        // (verifique debug_shopee/gerencial.png após a primeira execução)
-        await page.goto(`${BASE_URL}/portal/finance/`, { waitUntil: 'networkidle2', timeout: 30000 })
+        // Informações Gerenciais (Data Center)
+        await page.goto(`${BASE_URL}/datacenter/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
         await new Promise(r => setTimeout(r, 5000))
 
         const urlAtual = page.url()
