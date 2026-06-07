@@ -366,11 +366,13 @@ async function connectToWhatsApp() {
                 const ownerCheck = humanAttending.get(from)
                 if (ownerCheck && (Date.now() - ownerCheck) < HUMAN_TIMEOUT_MS) {
                     try { await sock.sendPresenceUpdate('paused', from) } catch {}
-                    console.log(`⏸️  [${sender}]: Dono respondeu durante a espera, Zaya cancelou.`)
+                    console.log(`⏸️  [${sender}]: cancelado (humanAttending ativo após delay)`)
                     continue
                 }
 
+                console.log(`🤖 [${sender}]: chamando Groq...`)
                 const reply = await getAIResponse(from, text, isFirstMessage)
+                console.log(`🤖 [${sender}]: Groq respondeu (${reply.length} chars), enviando...`)
 
                 const resumoMatch = reply.match(/---RESUMO---([\s\S]*?)---FIM---/)
                 if (resumoMatch) {
@@ -382,19 +384,20 @@ async function connectToWhatsApp() {
                     }
                     trackSend(await sock.sendMessage(from, { text: `📋 *Resumo para atendimento:*\n\n${resumo}` }))
                     saveConversations()
-                    console.log(`🤖 Zaya: ${mensagemCliente}`)
-                    console.log(`📋 Resumo enviado`)
+                    console.log(`✅ [${sender}]: resumo enviado`)
                 } else {
                     trackSend(await sock.sendMessage(from, { text: reply }))
                     saveConversations()
-                    console.log(`🤖 Zaya: ${reply}`)
+                    console.log(`✅ [${sender}]: resposta enviada`)
                 }
             } catch (err) {
-                console.error('❌ Erro ao responder:', err.message)
-                console.error(err.stack?.split('\n').slice(0, 3).join('\n'))
+                console.error(`❌ [${sender}] Erro ao responder: ${err.message}`)
+                console.error(err.stack?.split('\n').slice(0, 4).join('\n'))
                 try {
                     trackSend(await sock.sendMessage(from, { text: 'Desculpe, tive um problema técnico. Tente novamente em instantes! 🙏' }))
-                } catch {}
+                } catch (sendErr) {
+                    console.error(`❌ [${sender}] Falha também ao enviar erro: ${sendErr.message}`)
+                }
             }
         }
     })
