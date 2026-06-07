@@ -401,6 +401,22 @@ async function coletarStatusPedidos() {
 
 // ───────────────────────────── Chat de clientes ─────────────────────────────
 
+// Salva uma versão simplificada do HTML (sem scripts/estilos/imagens) em debug_shopee/
+// para permitir localizar os seletores exatos da interface do chat
+async function salvarHtmlDebug(page, nome) {
+    try {
+        const html = await page.evaluate(() => {
+            const clone = document.body.cloneNode(true)
+            clone.querySelectorAll('script, style, svg, noscript, iframe, link, img').forEach(el => el.remove())
+            return clone.outerHTML.replace(/\s{2,}/g, ' ')
+        })
+        fs.writeFileSync(path.join(DEBUG_DIR, `${nome}.html`), html.substring(0, 400000))
+        console.log(`💾 [Zyon/chat] HTML salvo p/ inspeção: debug_shopee/${nome}.html (${html.length} chars)`)
+    } catch (err) {
+        console.error(`❌ [Zyon/chat] Erro ao salvar HTML (${nome}): ${err.message}`)
+    }
+}
+
 // Abre a aba de Chat do Seller Center e aguarda a lista de conversas carregar de fato
 // (a SPA do new-webchat continua buscando dados após o "networkidle" do goto)
 async function abrirChat(page) {
@@ -422,19 +438,38 @@ async function abrirChat(page) {
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_lista.png') })
     console.log(`📸 [Zyon/chat] Screenshot: debug_shopee/chat_lista.png (URL atual: ${page.url()})`)
+    await salvarHtmlDebug(page, 'chat_lista')
 }
 
-// Procura na lista o próximo item com indicador visual de "não lida" (badge/contador/ponto)
-// e clica para abri-lo. Retorna o nome do cliente ou null se não houver pendências.
+// Procura, dentro da seção/aba "Sem resposta (N)", o próximo item de conversa com badge
+// vermelho de não lidas, e clica para abri-lo. Retorna o nome do cliente ou null se acabou.
 async function abrirProximaConversaNaoRespondida(page) {
     const cliente = await page.evaluate(() => {
-        const itens = document.querySelectorAll(
-            '[class*="conversation"], [class*="chat-list"] [class*="item"], [class*="session-item"], [class*="ChatList"] li, aside li, [role="listitem"]'
+        // Localiza o rótulo "Sem resposta" e sobe até um container que pareça uma lista
+        const rotulo = Array.from(document.querySelectorAll('*')).find(el =>
+            el.children.length === 0 && /sem resposta/i.test((el.textContent || '').trim())
         )
-        for (const item of itens) {
+        let escopo = document.body
+        if (rotulo) {
+            let container = rotulo
+            for (let i = 0; i < 8 && container.parentElement; i++) {
+                container = container.parentElement
+                if (container.querySelectorAll('li, [class*="item"], [class*="conversation"], [class*="session"]').length >= 2) {
+                    escopo = container
+                    break
+                }
+            }
+        }
+
+        const candidatos = escopo.querySelectorAll('li, [class*="item"], [class*="conversation"], [class*="session"]')
+        for (const item of candidatos) {
             if (item.offsetParent === null) continue
-            const indicador = item.querySelector('[class*="unread"], [class*="badge"], [class*="dot"], [class*="red-dot"], [class*="notif"]')
-            if (!indicador) continue
+            // ignora containers que só agrupam outros itens — queremos as "folhas" clicáveis
+            if (item.querySelectorAll('li, [class*="item"]').length > 0) continue
+
+            const badge = item.querySelector('[class*="unread"], [class*="badge"], [class*="dot"], [class*="red"], [class*="notif"]')
+            if (!badge) continue
+
             const texto = (item.innerText || '').replace(/\s+/g, ' ').trim()
             if (!texto) continue
             const nome = texto.split(/\s{2,}|\d{1,2}:\d{2}|·|\|/)[0].trim().substring(0, 60)
@@ -448,6 +483,7 @@ async function abrirProximaConversaNaoRespondida(page) {
         await new Promise(r => setTimeout(r, 4000))
         await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
         console.log(`💬 [Zyon/chat] Conversa aberta: ${cliente}`)
+        await salvarHtmlDebug(page, 'chat_conversa')
     }
     return cliente
 }
