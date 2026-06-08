@@ -14,6 +14,19 @@ const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
 
+function randomDelay(min = 2000, max = 3500) {
+    return new Promise(r => setTimeout(r, Math.floor(min + Math.random() * (max - min))))
+}
+
+async function humanMouseMove(page, x, y) {
+    const fromX = Math.floor(200 + Math.random() * 600)
+    const fromY = Math.floor(100 + Math.random() * 400)
+    await page.mouse.move(fromX, fromY, { steps: 4 })
+    await new Promise(r => setTimeout(r, 80 + Math.random() * 120))
+    await page.mouse.move(x, y, { steps: 8 + Math.floor(Math.random() * 8) })
+    await new Promise(r => setTimeout(r, 50 + Math.random() * 100))
+}
+
 function launchBrowser(executablePath) {
     return puppeteer.launch({
         headless: 'new',
@@ -236,7 +249,7 @@ async function coletarFaturamentoGerencial() {
         try {
             await page.waitForSelector('input[type="password"]', { timeout: 6000, visible: true })
             console.log('🔐 [Zyon] Diálogo de senha detectado — inserindo...')
-            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 80 })
+            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 + Math.floor(Math.random() * 60) })
             await page.keyboard.press('Enter')
             await new Promise(r => setTimeout(r, 5000))
             console.log('🔐 [Zyon] Senha inserida')
@@ -462,6 +475,7 @@ async function abrirChat(page) {
 // conversa em loop quando a Shopee não a remove imediatamente da seção "Sem resposta"
 // após o envio da resposta (ex: indicador de não lida com atraso para atualizar)
 async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
+    await humanMouseMove(page, 200 + Math.floor(Math.random() * 150), 250 + Math.floor(Math.random() * 200))
     const resultado = await page.evaluate((ignorar) => {
         const container = document.querySelector('[data-cy="webchat-conversation-list"] .ReactVirtualized__Grid__innerScrollContainer')
         if (!container) return { erro: 'lista de conversas não encontrada (container ReactVirtualized ausente)' }
@@ -496,7 +510,7 @@ async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
     if (!resultado.nome) return null
 
     console.log(`💬 [Zyon/chat] Abrindo conversa: ${resultado.nome} (badge: ${resultado.badge || 'sem indicador'})`)
-    await new Promise(r => setTimeout(r, 4000))
+    await randomDelay(2500, 4000)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
     await salvarHtmlDebug(page, 'chat_conversa')
     return resultado.nome
@@ -687,12 +701,20 @@ async function enviarMensagemNoChat(page, texto) {
     }
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_antes_enviar.png') })
+    const caixaTexto = await page.evaluate((sel) => {
+        const el = document.querySelector(sel)
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        return { x: Math.floor(r.left + r.width / 2), y: Math.floor(r.top + r.height / 2) }
+    }, seletorCampo)
+    if (caixaTexto) await humanMouseMove(page, caixaTexto.x, caixaTexto.y)
     await page.click(seletorCampo)
-    await page.type(seletorCampo, texto, { delay: 25 })
-    await new Promise(r => setTimeout(r, 500))
+    await randomDelay(600, 1200)
+    await page.type(seletorCampo, texto, { delay: 70 + Math.floor(Math.random() * 60) })
+    await randomDelay(1500, 2500)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_digitado.png') })
     await page.keyboard.press('Enter')
-    await new Promise(r => setTimeout(r, 2500))
+    await randomDelay(3000, 4500)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_enviado.png') })
     console.log(`📤 [Zyon/chat] Mensagem enviada via "${seletorCampo}" (${texto.length} chars)`)
 }
@@ -733,10 +755,13 @@ async function extrairInfoProduto(page, nomeProduto) {
         const camposBusca = await paginaLista.$$('input[placeholder*="roduto"], input[placeholder*="esquisar"], input[type="search"]')
         const campoBusca = await primeiroVisivel(camposBusca)
         if (campoBusca && termoBusca) {
+            const boxBusca = await campoBusca.boundingBox()
+            if (boxBusca) await humanMouseMove(paginaLista, Math.floor(boxBusca.x + boxBusca.width / 2), Math.floor(boxBusca.y + boxBusca.height / 2))
             await campoBusca.click({ clickCount: 3 })
-            await campoBusca.type(termoBusca, { delay: 40 })
+            await randomDelay(500, 1000)
+            await campoBusca.type(termoBusca, { delay: 60 + Math.floor(Math.random() * 50) })
             await paginaLista.keyboard.press('Enter')
-            await new Promise(r => setTimeout(r, 4000))
+            await randomDelay(3500, 5500)
         }
         await paginaLista.screenshot({ path: path.join(DEBUG_DIR, 'produto_busca.png') })
         console.log(`📸 [Zyon/produto] Screenshot: debug_shopee/produto_busca.png (busca: "${termoBusca}")`)
@@ -751,7 +776,7 @@ async function extrairInfoProduto(page, nomeProduto) {
             console.log('⚠️  [Zyon/produto] Menu de "3 pontinhos" não encontrado na lista de produtos')
             return null
         }
-        await new Promise(r => setTimeout(r, 1500))
+        await randomDelay(1500, 3000)
 
         const novaAbaPromise = new Promise((resolve) => {
             const timer = setTimeout(() => resolve(null), 7000)
@@ -778,7 +803,7 @@ async function extrairInfoProduto(page, nomeProduto) {
         let paginaProduto = await novaAbaPromise
         const abriuNovaAba = !!paginaProduto
         if (!paginaProduto) paginaProduto = paginaLista
-        await new Promise(r => setTimeout(r, 5000))
+        await randomDelay(3500, 5500)
         await paginaProduto.screenshot({ path: path.join(DEBUG_DIR, 'produto_pagina.png') })
         console.log('📸 [Zyon/produto] Screenshot: debug_shopee/produto_pagina.png')
 

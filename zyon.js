@@ -694,7 +694,7 @@ async function atualizarProdutosSalvos() {
 
 const INTERVALO_MS = 30 * 60 * 1000
 const INTERVALO_DADOS_MS = 60 * 60 * 1000
-const INTERVALO_CHAT_MS = 5 * 60 * 1000
+const INTERVALO_CHAT_MS = 10 * 60 * 1000
 const INTERVALO_PRODUTOS_MS = 24 * 60 * 60 * 1000
 const ZYON_PORT = Number(process.env.ZYON_PORT) || 3001
 
