@@ -14,7 +14,7 @@ const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
 
-function randomDelay(min = 2000, max = 3500) {
+function randomDelay(min = 3000, max = 8000) {
     return new Promise(r => setTimeout(r, Math.floor(min + Math.random() * (max - min))))
 }
 
@@ -25,6 +25,14 @@ async function humanMouseMove(page, x, y) {
     await new Promise(r => setTimeout(r, 80 + Math.random() * 120))
     await page.mouse.move(x, y, { steps: 8 + Math.floor(Math.random() * 8) })
     await new Promise(r => setTimeout(r, 50 + Math.random() * 100))
+}
+
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+async function configurarPagina(page) {
+    await page.setViewport({ width: 1366, height: 768 })
+    await page.setUserAgent(USER_AGENT)
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8' })
 }
 
 function launchBrowser(executablePath) {
@@ -98,8 +106,7 @@ async function coletarDadosShopee() {
 
     try {
         const page = await browser.newPage()
-        await page.setViewport({ width: 1366, height: 768 })
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+        await configurarPagina(page)
 
         await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'domcontentloaded', timeout: 30000 })
         await new Promise(r => setTimeout(r, 4000))
@@ -136,13 +143,12 @@ async function verificarNovosPedidos() {
 
     try {
         const page = await browser.newPage()
-        await page.setViewport({ width: 1366, height: 768 })
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+        await configurarPagina(page)
 
         await page.goto(`${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`, { waitUntil: 'networkidle2', timeout: 30000 })
         await new Promise(r => setTimeout(r, 15000))
         await page.evaluate(() => window.scrollTo(0, 400))
-        await new Promise(r => setTimeout(r, 2000))
+        await randomDelay()
 
         const urlAtual = page.url()
         const bodyText = await page.evaluate(() =>
@@ -212,8 +218,7 @@ async function coletarFaturamentoGerencial() {
     const browser = await launchBrowser(resolverChrome())
     try {
         const page = await browser.newPage()
-        await page.setViewport({ width: 1366, height: 768 })
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+        await configurarPagina(page)
 
         // Intercepta respostas JSON da API antes de navegar
         // fullPath inclui query string para diagnóstico; url é só o path (sem query)
@@ -236,7 +241,7 @@ async function coletarFaturamentoGerencial() {
 
         // Informações Gerenciais (Data Center)
         await page.goto(`${BASE_URL}/datacenter/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
-        await new Promise(r => setTimeout(r, 5000))
+        await randomDelay()
 
         const urlAtual = page.url()
         console.log(`🌐 [Zyon/gerencial] URL: ${urlAtual}`)
@@ -251,14 +256,14 @@ async function coletarFaturamentoGerencial() {
             console.log('🔐 [Zyon] Diálogo de senha detectado — inserindo...')
             await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 + Math.floor(Math.random() * 60) })
             await page.keyboard.press('Enter')
-            await new Promise(r => setTimeout(r, 5000))
+            await randomDelay()
             console.log('🔐 [Zyon] Senha inserida')
         } catch (_) {
             console.log('🔓 [Zyon] Sem diálogo de senha (ou já autenticado)')
         }
 
         // Aguarda APIs assíncronas após possível autenticação
-        await new Promise(r => setTimeout(r, 5000))
+        await randomDelay()
 
         await page.screenshot({ path: path.join(DEBUG_DIR, 'gerencial.png') })
         console.log('📸 [Zyon] Screenshot inicial: debug_shopee/gerencial.png')
@@ -345,7 +350,7 @@ async function coletarFaturamentoGerencial() {
 
             if (filtroClicado) {
                 console.log('🖱️  [Zyon] Clicado: "' + filtroClicado + '" — aguardando API mensal...')
-                await new Promise(r => setTimeout(r, 5000))
+                await randomDelay()
                 var novasRespostas = respostasApi.slice(preClickCount)
                 for (var i = 0; i < novasRespostas.length; i++) {
                     var r = novasRespostas[i]
@@ -389,8 +394,7 @@ async function coletarStatusPedidos() {
     const browser = await launchBrowser(resolverChrome())
     try {
         const page = await browser.newPage()
-        await page.setViewport({ width: 1366, height: 768 })
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+        await configurarPagina(page)
 
         await page.goto(
             `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`,
@@ -435,7 +439,7 @@ async function salvarHtmlDebug(page, nome) {
 // (a SPA do new-webchat continua buscando dados após o "networkidle" do goto)
 async function abrirChat(page) {
     await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-    await new Promise(r => setTimeout(r, 5000))
+    await randomDelay()
 
     if (page.url().includes('/account/login')) {
         throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
@@ -454,13 +458,13 @@ async function abrirChat(page) {
                 // inicial — recarregar a página costuma resolver antes de desistir de vez.
                 console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu — recarregando a página e tentando novamente')
                 await page.reload({ waitUntil: 'networkidle2', timeout: 30000 })
-                await new Promise(r => setTimeout(r, 5000))
+                await randomDelay()
             } else {
                 console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu dentro do tempo esperado — screenshot ainda será salvo para diagnóstico')
             }
         }
     }
-    await new Promise(r => setTimeout(r, 3000))
+    await randomDelay()
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_lista.png') })
     console.log(`📸 [Zyon/chat] Screenshot: debug_shopee/chat_lista.png (URL atual: ${page.url()})`)
@@ -510,7 +514,7 @@ async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
     if (!resultado.nome) return null
 
     console.log(`💬 [Zyon/chat] Abrindo conversa: ${resultado.nome} (badge: ${resultado.badge || 'sem indicador'})`)
-    await randomDelay(2500, 4000)
+    await randomDelay()
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
     await salvarHtmlDebug(page, 'chat_conversa')
     return resultado.nome
@@ -709,12 +713,12 @@ async function enviarMensagemNoChat(page, texto) {
     }, seletorCampo)
     if (caixaTexto) await humanMouseMove(page, caixaTexto.x, caixaTexto.y)
     await page.click(seletorCampo)
-    await randomDelay(600, 1200)
+    await randomDelay(1000, 2500)
     await page.type(seletorCampo, texto, { delay: 70 + Math.floor(Math.random() * 60) })
-    await randomDelay(1500, 2500)
+    await randomDelay()
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_digitado.png') })
     await page.keyboard.press('Enter')
-    await randomDelay(3000, 4500)
+    await randomDelay()
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_enviado.png') })
     console.log(`📤 [Zyon/chat] Mensagem enviada via "${seletorCampo}" (${texto.length} chars)`)
 }
@@ -744,8 +748,9 @@ async function primeiroVisivel(handles) {
 async function extrairInfoProduto(page, nomeProduto) {
     const paginaLista = await page.browser().newPage()
     try {
+        await configurarPagina(paginaLista)
         await paginaLista.goto(PRODUTOS_LIST_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-        await new Promise(r => setTimeout(r, 6000))
+        await randomDelay()
 
         if (paginaLista.url().includes('/account/login')) {
             throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
@@ -761,7 +766,7 @@ async function extrairInfoProduto(page, nomeProduto) {
             await randomDelay(500, 1000)
             await campoBusca.type(termoBusca, { delay: 60 + Math.floor(Math.random() * 50) })
             await paginaLista.keyboard.press('Enter')
-            await randomDelay(3500, 5500)
+            await randomDelay()
         }
         await paginaLista.screenshot({ path: path.join(DEBUG_DIR, 'produto_busca.png') })
         console.log(`📸 [Zyon/produto] Screenshot: debug_shopee/produto_busca.png (busca: "${termoBusca}")`)
@@ -803,7 +808,7 @@ async function extrairInfoProduto(page, nomeProduto) {
         let paginaProduto = await novaAbaPromise
         const abriuNovaAba = !!paginaProduto
         if (!paginaProduto) paginaProduto = paginaLista
-        await randomDelay(3500, 5500)
+        await randomDelay()
         await paginaProduto.screenshot({ path: path.join(DEBUG_DIR, 'produto_pagina.png') })
         console.log('📸 [Zyon/produto] Screenshot: debug_shopee/produto_pagina.png')
 
@@ -912,6 +917,8 @@ async function listarPedidosEmAberto(page) {
 // new-webchat — os dois casos são tratados, e o retorno indica qual aba usar e se ela
 // precisa ser fechada depois (aba nova) ou não (mesma aba, basta navegar de volta).
 async function abrirChatDoPedido(page, browser, orderId) {
+    await humanMouseMove(page, 400 + Math.floor(Math.random() * 300), 200 + Math.floor(Math.random() * 300))
+    await randomDelay(3000, 5000)
     const clicou = await page.evaluate((orderId) => {
         const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
         const marcador = folhas.find(el => (el.textContent || '').includes(`ID do Pedido ${orderId}`))
@@ -945,7 +952,7 @@ async function abrirChatDoPedido(page, browser, orderId) {
     const paginaChat = novaPagina || page
     if (novaPagina) {
         await novaPagina.bringToFront()
-        await novaPagina.setViewport({ width: 1366, height: 768 })
+        await configurarPagina(novaPagina)
     }
 
     try {
@@ -958,14 +965,14 @@ async function abrirChatDoPedido(page, browser, orderId) {
         return null
     }
 
-    await new Promise(r => setTimeout(r, 3000))
+    await randomDelay()
     await paginaChat.screenshot({ path: path.join(DEBUG_DIR, 'arte_conversa.png') })
     return { pagina: paginaChat, abaNova: !!novaPagina }
 }
 
 module.exports = {
     coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
-    launchBrowser, resolverChrome,
+    launchBrowser, resolverChrome, configurarPagina,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
     listarPedidosEmAberto, abrirChatDoPedido, ORDERS_TOSHIP_URL,
 }

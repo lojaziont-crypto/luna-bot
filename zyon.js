@@ -14,7 +14,7 @@ const http = require('http')
 const Groq = require('groq-sdk')
 const {
     verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos,
-    launchBrowser, resolverChrome,
+    launchBrowser, resolverChrome, configurarPagina,
     abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
     listarPedidosEmAberto, abrirChatDoPedido, ORDERS_TOSHIP_URL,
 } = require('./shopee-agent')
@@ -585,8 +585,7 @@ async function executarComBrowser(nomeOperacao, tarefa, tentativas = 2) {
             browser.once('disconnected', () => { fechouInesperadamente = true })
 
             const page = await browser.newPage()
-            await page.setViewport({ width: 1366, height: 768 })
-            await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9' })
+            await configurarPagina(page)
 
             const desconexao = new Promise((_, reject) => {
                 browser.once('disconnected', () => reject(new Error(`Browser do Puppeteer fechou inesperadamente durante ${nomeOperacao}`)))
@@ -626,8 +625,8 @@ async function verificarChatClientes() {
             const conversasVisitadas = []
             let semConversasPendentes = false
 
-            // Limite por ciclo evita ficar preso processando uma fila grande de uma só vez
-            for (let i = 0; i < 5; i++) {
+            // Máximo 3 conversas por ciclo — evita ficar preso processando uma fila grande
+            for (let i = 0; i < 3; i++) {
                 const cliente = await abrirProximaConversaNaoRespondida(page, conversasVisitadas)
                 if (!cliente) {
                     semConversasPendentes = true
@@ -640,6 +639,9 @@ async function verificarChatClientes() {
                     console.error(`❌ [Zyon/chat] Erro ao processar conversa de ${cliente}: ${err.message}`)
                 }
                 await abrirChat(page) // volta à lista antes de procurar a próxima conversa pendente
+                // Intervalo mínimo de 30 s entre conversas para simular comportamento humano
+                console.log(`⏳ [Zyon/chat] Aguardando antes da próxima conversa...`)
+                await new Promise(r => setTimeout(r, 30000 + Math.floor(Math.random() * 10000)))
             }
 
             // Verificação de pedidos sem arte só roda quando o chat está em dia — não
