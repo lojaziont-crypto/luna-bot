@@ -37,7 +37,7 @@ async function configurarPagina(page) {
 
 function launchBrowser(executablePath) {
     return puppeteer.launch({
-        headless: 'new',
+        headless: false,
         executablePath,
         userDataDir: PROFILE_DIR,
         args: [
@@ -147,6 +147,7 @@ async function verificarNovosPedidos() {
 
         await page.goto(`${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`, { waitUntil: 'networkidle2', timeout: 30000 })
         await new Promise(r => setTimeout(r, 15000))
+        await verificarAutenticacaoPendente(page, `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`)
         await page.evaluate(() => window.scrollTo(0, 400))
         await randomDelay()
 
@@ -156,10 +157,6 @@ async function verificarNovosPedidos() {
         )
         console.log(`🌐 [Zyon] URL: ${urlAtual}`)
         console.log(`📋 [Zyon] Body preview: ${bodyText.substring(0, 1000)}`)
-
-        if (urlAtual.includes('/account/login')) {
-            throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
-        }
 
         // Captura o primeiro "ID do Pedido XXXXXX" — o mais recente da lista ordenada
         const match = bodyText.match(/ID do Pedido\s+([A-Z0-9]{6,20})/i)
@@ -242,13 +239,10 @@ async function coletarFaturamentoGerencial() {
         // Informações Gerenciais (Data Center)
         await page.goto(`${BASE_URL}/datacenter/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
         await randomDelay()
+        await verificarAutenticacaoPendente(page, `${BASE_URL}/datacenter/overview`)
 
         const urlAtual = page.url()
         console.log(`🌐 [Zyon/gerencial] URL: ${urlAtual}`)
-
-        if (urlAtual.includes('/account/login')) {
-            throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
-        }
 
         // Shopee exige confirmação de senha em páginas financeiras — preenche automaticamente
         try {
@@ -401,10 +395,7 @@ async function coletarStatusPedidos() {
             { waitUntil: 'networkidle2', timeout: 30000 }
         )
         await new Promise(r => setTimeout(r, 15000))
-
-        if (page.url().includes('/account/login')) {
-            throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
-        }
+        await verificarAutenticacaoPendente(page, `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`)
 
         const orderText = await page.evaluate(function() {
             return document.body.innerText.replace(/\s+/g, ' ').trim()
@@ -440,10 +431,7 @@ async function salvarHtmlDebug(page, nome) {
 async function abrirChat(page) {
     await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
     await randomDelay()
-
-    if (page.url().includes('/account/login')) {
-        throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
-    }
+    await verificarAutenticacaoPendente(page, CHAT_URL)
 
     const seletorLista = '[class*="conversation"], [class*="chat-list"], [class*="session-list"], [class*="webchat"]'
     let listaCarregou = false
@@ -459,6 +447,7 @@ async function abrirChat(page) {
                 console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu — recarregando a página e tentando novamente')
                 await page.reload({ waitUntil: 'networkidle2', timeout: 30000 })
                 await randomDelay()
+                await verificarAutenticacaoPendente(page, CHAT_URL)
             } else {
                 console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu dentro do tempo esperado — screenshot ainda será salvo para diagnóstico')
             }
@@ -501,8 +490,8 @@ async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
             const badgeEl = cell.querySelector('[data-cy="webchat-conversation-cell-message"]')?.nextElementSibling
             const badge = (badgeEl?.textContent || '').trim() || null
 
-            cell.click()
-            return { nome, badge }
+            const rect = cell.getBoundingClientRect()
+            return { nome, badge, x: Math.floor(rect.left + rect.width / 2), y: Math.floor(rect.top + rect.height / 2) }
         }
         return { nome: null }
     }, ignorar)
@@ -514,49 +503,110 @@ async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
     if (!resultado.nome) return null
 
     console.log(`💬 [Zyon/chat] Abrindo conversa: ${resultado.nome} (badge: ${resultado.badge || 'sem indicador'})`)
-    await randomDelay()
+
+    await new Promise(r => setTimeout(r, 800 + Math.floor(Math.random() * 1200)))
+    const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {})
+    await page.mouse.move(resultado.x, resultado.y, { steps: 10 + Math.floor(Math.random() * 8) })
+    await new Promise(r => setTimeout(r, 80 + Math.floor(Math.random() * 120)))
+    await page.mouse.click(resultado.x, resultado.y)
+    await navPromise
+
+    const SELETOR_CONTEUDO_CONV = '[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"], [data-cy="webchat-conversation-detail-input"]'
+    for (let tentativa = 1; tentativa <= 3; tentativa++) {
+        let conteudoCarregou = false
+        try {
+            await page.waitForSelector(SELETOR_CONTEUDO_CONV, { timeout: 9000 })
+            conteudoCarregou = true
+        } catch (_) {}
+
+        const paginaErro = !conteudoCarregou && await page.evaluate(() => {
+            const texto = (document.body?.innerText || '').toLowerCase()
+            return /p[áa]gina indispon[íi]vel|desculpe.*algo deu errado|something went wrong|page not available/.test(texto)
+        })
+
+        if (!paginaErro) break
+
+        if (tentativa < 3) {
+            console.log(`⚠️  [Zyon/chat] Página de erro ao abrir "${resultado.nome}" (tentativa ${tentativa}/3) — aguardando 15-20s antes de tentar novamente...`)
+            await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+            await randomDelay(15000, 20000)
+            const cellPos = await page.evaluate((nomeAlvo) => {
+                const cells = document.querySelectorAll('[data-cy="webchat-conversation-cell-root"]')
+                for (const cell of cells) {
+                    const nomeEl = cell.querySelector('[data-cy="webchat-conversation-cell-name"]')
+                    const nome = (nomeEl?.getAttribute('title') || nomeEl?.textContent || '').trim()
+                    if (nome === nomeAlvo) {
+                        const rect = cell.getBoundingClientRect()
+                        return { x: Math.floor(rect.left + rect.width / 2), y: Math.floor(rect.top + rect.height / 2) }
+                    }
+                }
+                return null
+            }, resultado.nome)
+            if (!cellPos) {
+                console.log(`⚠️  [Zyon/chat] Conversa "${resultado.nome}" não encontrada na lista após recarregamento — pulando`)
+                return null
+            }
+            const retryNavPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {})
+            await new Promise(r => setTimeout(r, 800 + Math.floor(Math.random() * 1200)))
+            await page.mouse.move(cellPos.x, cellPos.y, { steps: 10 + Math.floor(Math.random() * 8) })
+            await new Promise(r => setTimeout(r, 80 + Math.floor(Math.random() * 120)))
+            await page.mouse.click(cellPos.x, cellPos.y)
+            await retryNavPromise
+        } else {
+            console.log(`❌ [Zyon/chat] Conversa "${resultado.nome}" continua com erro após 3 tentativas — pulando`)
+            await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+            await randomDelay()
+            return null
+        }
+    }
+
     await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
     await salvarHtmlDebug(page, 'chat_conversa')
     return resultado.nome
 }
 
-// Carrega o histórico antigo (rolando ao topo) e então percorre TODA a rolagem da lista
-// virtualizada de mensagens — do início ao fim — coletando e deduplicando cada uma, já que
-// o ReactVirtualized mantém só as linhas visíveis no DOM (ler de uma vez pegaria só um trecho
-// da conversa). Cada mensagem é classificada por data-cy ("webchat-message-receive" = cliente,
-// "webchat-message-send" = loja).
-// Identifica o produto em discussão pelo card "Interesse do comprador" no painel da estação (data-cy="webchat-station-root"),
-// que expõe o ID real do produto no atributo value do checkbox — muito mais confiável que adivinhar pelo texto da conversa.
+// Percorre a lista virtualizada de mensagens do topo ao fim, coletando e deduplicando
+// cada mensagem visível a cada passo. Todo o scroll é feito via page.mouse.wheel() —
+// eventos de wheel nativos do Chrome, indistinguíveis de scroll real de usuário — nunca
+// via scrollTop direto (sintético), que sistemas anti-bot conseguem detectar.
+// Deduplicação pela posição CSS "top" de cada linha (estável entre re-renderizações do
+// ReactVirtualized). Extração de produtoId, prazoEnvio e dados do anúncio inalterada.
 async function lerConversaCompleta(page) {
-    // A lista de mensagens é virtualizada (ReactVirtualized) — primeiro forçamos o carregamento
-    // do histórico mais antigo rolando ao topo repetidas vezes (a Shopee busca mais mensagens
-    // via API a cada rolagem, e isso leva um tempo para responder).
-    for (let i = 0; i < 3; i++) {
-        await page.evaluate(() => {
-            const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
-            if (grid) grid.scrollTop = 0
-        })
-        await new Promise(r => setTimeout(r, 2000))
+    // Localiza o grid e posiciona o mouse sobre ele antes de qualquer interação
+    const gridPos = await page.evaluate(() => {
+        const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
+        if (!grid) return null
+        const rect = grid.getBoundingClientRect()
+        return { x: Math.floor(rect.left + rect.width / 2), y: Math.floor(rect.top + rect.height / 2) }
+    }).catch(() => null)
+
+    if (gridPos) {
+        await page.mouse.move(gridPos.x, gridPos.y, { steps: 5 + Math.floor(Math.random() * 4) })
+        await new Promise(r => setTimeout(r, 150 + Math.floor(Math.random() * 150)))
     }
 
-    // O painel "Interesse do comprador" carrega o card do produto via requisição assíncrona
-    // separada — em conversas mais lentas o evaluate() abaixo rodava antes do card aparecer
-    // e o nome saía como null. Espera o elemento existir (com timeout curto, pois nem toda
-    // conversa tem produto associado) antes de tentar ler os dados.
+    // Rola ao topo com wheel real (2 passagens) para forçar carregamento do histórico antigo.
+    // ~40 eventos × ~120px = ~4800px de scroll para cima por passagem.
+    for (let i = 0; i < 2; i++) {
+        const numScrollsSubida = 35 + Math.floor(Math.random() * 10)
+        for (let j = 0; j < numScrollsSubida; j++) {
+            await page.mouse.wheel({ deltaY: -(100 + Math.floor(Math.random() * 60)) }).catch(() => {})
+            await new Promise(r => setTimeout(r, 18 + Math.floor(Math.random() * 25)))
+        }
+        await new Promise(r => setTimeout(r, 3000 + Math.floor(Math.random() * 2000)))
+    }
+
+    // Aguarda o card do produto (assíncrono — pode aparecer depois do scroll inicial)
     await page.waitForSelector('[data-cy="webchat-station-root"] [title][style*="word-break"]', { timeout: 8000 }).catch(() => {})
 
-    const dados = await page.evaluate(async () => {
-        // CRÍTICO: a lista é virtualizada — o DOM só contém as linhas visíveis no momento
-        // (o ReactVirtualized desmonta as demais para economizar memória). Ler o DOM uma
-        // única vez captura só um trecho da conversa (geralmente o mais recente), fazendo
-        // a IA "esquecer" a apresentação inicial, dados que o cliente já informou etc.
-        // Por isso percorremos TODA a rolagem da lista — do topo ao fim — coletando as
-        // mensagens visíveis a cada passo e deduplicando pela posição "top" de cada linha
-        // (estável entre re-renderizações, pois o ReactVirtualized posiciona cada linha de
-        // forma absoluta conforme o índice dela na lista).
-        const coletadas = new Map()
+    // Coleta mensagens visíveis no DOM e retorna array serializável para o Node.js.
+    // A deduplicação é feita no Map do Node (não dentro do evaluate) para poder acumular
+    // entre múltiplas chamadas conforme o scroll avança.
+    const coletadas = new Map()
 
-        const coletarVisiveis = () => {
+    const coletarVisiveis = async () => {
+        const msgs = await page.evaluate(() => {
+            const resultado = []
             const itens = document.querySelectorAll('[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"]')
             itens.forEach((el) => {
                 const remetente = el.getAttribute('data-cy') === 'webchat-message-send' ? 'loja' : 'cliente'
@@ -578,36 +628,55 @@ async function lerConversaCompleta(page) {
                 const linha = el.closest('[style*="position: absolute"]')
                 const topMatch = linha?.getAttribute('style')?.match(/top:\s*([\d.]+)px/)
                 const chave = topMatch ? `${topMatch[1]}::${remetente}` : `${remetente}::${texto.substring(0, 80)}`
-                if (!coletadas.has(chave)) {
-                    coletadas.set(chave, { remetente, texto: texto.substring(0, 1000), ordem: topMatch ? parseFloat(topMatch[1]) : coletadas.size })
-                }
+                resultado.push({ chave, remetente, texto: texto.substring(0, 1000), ordem: topMatch ? parseFloat(topMatch[1]) : resultado.length })
             })
+            return resultado
+        }).catch(() => [])
+        msgs.forEach(m => {
+            if (!coletadas.has(m.chave)) coletadas.set(m.chave, { remetente: m.remetente, texto: m.texto, ordem: m.ordem })
+        })
+    }
+
+    // Coleta inicial no topo, depois percorre para baixo em passos com wheel real
+    await coletarVisiveis()
+
+    let passosFeitos = 0
+    const MAX_PASSOS = 15
+
+    while (passosFeitos < MAX_PASSOS) {
+        const gridAinda = await page.evaluate(() => !!document.querySelector('#messageSection .ReactVirtualized__Grid')).catch(() => false)
+        if (!gridAinda) break
+
+        // Simula uma "rolada" humana: 3-6 eventos de wheel pequenos em sequência
+        const numWheels = 3 + Math.floor(Math.random() * 4)
+        for (let k = 0; k < numWheels; k++) {
+            await page.mouse.wheel({ deltaY: 80 + Math.floor(Math.random() * 70) }).catch(() => {})
+            await new Promise(r => setTimeout(r, 28 + Math.floor(Math.random() * 45)))
+        }
+        passosFeitos++
+
+        await new Promise(r => setTimeout(r, 1200 + Math.floor(Math.random() * 800)))
+        await coletarVisiveis()
+
+        if (passosFeitos % 3 === 0) {
+            await new Promise(r => setTimeout(r, 2000 + Math.floor(Math.random() * 1000)))
         }
 
-        const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
-        if (grid) {
-            const fimRolagem = Math.max(0, grid.scrollHeight - grid.clientHeight)
-            const passo = Math.max(grid.clientHeight * 0.6, 100)
+        // Para quando chegar ao fim da lista
+        const chegouAoFim = await page.evaluate(() => {
+            const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
+            if (!grid) return true
+            return grid.scrollTop >= grid.scrollHeight - grid.clientHeight - 50
+        }).catch(() => true)
+        if (chegouAoFim) break
+    }
 
-            grid.scrollTop = 0
-            await new Promise(r => setTimeout(r, 500))
-            coletarVisiveis()
+    const mensagens = Array.from(coletadas.values())
+        .sort((a, b) => a.ordem - b.ordem)
+        .map(({ remetente, texto }) => ({ remetente, texto }))
 
-            let pos = 0
-            while (pos < fimRolagem) {
-                pos = Math.min(pos + passo, fimRolagem)
-                grid.scrollTop = pos
-                await new Promise(r => setTimeout(r, 500))
-                coletarVisiveis()
-            }
-        } else {
-            coletarVisiveis()
-        }
-
-        const mensagens = Array.from(coletadas.values())
-            .sort((a, b) => a.ordem - b.ordem)
-            .map(({ remetente, texto }) => ({ remetente, texto }))
-
+    // Extração de metadados do produto e prazo de envio — evaluate separado do scroll
+    const metadados = await page.evaluate(() => {
         let produtoId = null
         let produtoNome = null
         let produtoPreco = null
@@ -653,12 +722,12 @@ async function lerConversaCompleta(page) {
             }
         }
 
-        return { mensagens, produtoId, produtoNome, produtoPreco, prazoEnvio }
-    })
+        return { produtoId, produtoNome, produtoPreco, prazoEnvio }
+    }).catch(() => ({ produtoId: null, produtoNome: null, produtoPreco: null, prazoEnvio: null }))
 
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_historico.png') })
-    console.log(`📖 [Zyon/chat] Conversa lida: ${dados.mensagens.length} mensagens | Produto: ${dados.produtoNome || '(não identificado)'}${dados.produtoId ? ` (#${dados.produtoId})` : ''} | Prazo de envio: ${dados.prazoEnvio || '(não encontrado)'}`)
-    return dados
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_historico.png') }).catch(() => {})
+    console.log(`📖 [Zyon/chat] Conversa lida: ${mensagens.length} mensagens | Produto: ${metadados.produtoNome || '(não identificado)'}${metadados.produtoId ? ` (#${metadados.produtoId})` : ''} | Prazo de envio: ${metadados.prazoEnvio || '(não encontrado)'}`)
+    return { mensagens, ...metadados }
 }
 
 // Digita e envia uma mensagem no campo de texto da conversa atualmente aberta.
@@ -854,10 +923,7 @@ async function extrairInfoProduto(page, nomeProduto) {
 async function listarPedidosEmAberto(page) {
     await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
     await new Promise(r => setTimeout(r, 15000))
-
-    if (page.url().includes('/account/login')) {
-        throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
-    }
+    await verificarAutenticacaoPendente(page, ORDERS_TOSHIP_URL)
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'pedidos_personalizacao.png') })
     await salvarHtmlDebug(page, 'pedidos_personalizacao')
@@ -968,6 +1034,46 @@ async function abrirChatDoPedido(page, browser, orderId) {
     await randomDelay()
     await paginaChat.screenshot({ path: path.join(DEBUG_DIR, 'arte_conversa.png') })
     return { pagina: paginaChat, abaNova: !!novaPagina }
+}
+
+// Detecta páginas de autenticação/verificação da Shopee e bloqueia o ciclo até que
+// o usuário complete a ação manual (ex: clicar no link de verificação por e-mail).
+// Não navega durante a espera — só observa page.url() e o texto da página a cada 30s.
+// Quando a sessão se estabiliza, renavega para urlRetomar e retorna ao ciclo normal.
+async function verificarAutenticacaoPendente(page, urlRetomar) {
+    let avisou = false
+    while (true) {
+        let pendente = false
+        try {
+            const url = page.url()
+            if (/\/login|\/verify\/|account\/login/.test(url)) {
+                pendente = true
+            } else {
+                pendente = await page.evaluate(() => {
+                    const t = document.body?.innerText || ''
+                    return /verifique sua identidade|verificar (sua )?identidade|verify (your )?identity/i.test(t)
+                }).catch(() => false)
+            }
+        } catch (_) {}
+
+        if (!pendente) {
+            if (avisou) {
+                console.log('✅ [Zyon] Sessão verificada — retomando ciclos automáticos.')
+                if (urlRetomar) {
+                    try { await page.goto(urlRetomar, { waitUntil: 'domcontentloaded', timeout: 20000 }) } catch (_) {}
+                }
+            }
+            return
+        }
+
+        if (!avisou) {
+            console.log('⏸️  [Zyon] Verificação manual pendente na Shopee (ex: confirmação por e-mail) — aguardando ação manual. Pausando ciclos automáticos até a sessão ficar estável.')
+            avisou = true
+        } else {
+            console.log('⏸️  [Zyon] Ainda aguardando verificação manual...')
+        }
+        await new Promise(r => setTimeout(r, 30000))
+    }
 }
 
 module.exports = {
