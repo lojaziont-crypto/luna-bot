@@ -69,6 +69,7 @@ function salvarJSON(arquivo, dados) {
 let produtos = carregarJSON(PRODUTOS_FILE, {})
 let mensagensRespondidas = carregarJSON(RESPONDIDAS_FILE, {})
 let arteSolicitada = carregarJSON(ARTE_SOLICITADA_FILE, {})
+let ultimosDados = { fatDia: null, fatMes: null, aEnviar: null, atualizadoEm: null }
 
 // Notifica Zaya (Railway) via HTTP POST /notify-order
 // Configure ZAYA_URL no .env: ex. ZAYA_URL=https://luna-bot-xxxx.up.railway.app
@@ -208,6 +209,7 @@ async function coletarEEnviarDados() {
         const aEnviar = m ? m[1] : null
 
         console.log(`💰 [Zyon] Dia: R$ ${fatDia || '?'} | Mês: R$ ${fatMes || '?'} | A Enviar: ${aEnviar || '?'}`)
+        ultimosDados = { fatDia, fatMes, aEnviar, atualizadoEm: new Date().toISOString() }
         enviarDadosParaZaya(fatDia, fatMes, aEnviar)
     } catch (err) {
         console.error('❌ [Zyon] Erro ao coletar dados Shopee:', err.message)
@@ -639,9 +641,8 @@ async function verificarChatClientes() {
                     console.error(`❌ [Zyon/chat] Erro ao processar conversa de ${cliente}: ${err.message}`)
                 }
                 await abrirChat(page) // volta à lista antes de procurar a próxima conversa pendente
-                // Intervalo mínimo de 30 s entre conversas para simular comportamento humano
                 console.log(`⏳ [Zyon/chat] Aguardando antes da próxima conversa...`)
-                await new Promise(r => setTimeout(r, 30000 + Math.floor(Math.random() * 10000)))
+                await new Promise(r => setTimeout(r, 8000 + Math.floor(Math.random() * 7000)))
             }
 
             // Verificação de pedidos sem arte só roda quando o chat está em dia — não
@@ -702,7 +703,11 @@ const ZYON_PORT = Number(process.env.ZYON_PORT) || 3001
 
 // Servidor HTTP: recebe solicitações imediatas da Zaya
 const zyonServer = http.createServer(async (req, res) => {
-    if (req.method === 'POST' && req.url === '/solicitar-faturamento') {
+    if (req.method === 'GET' && req.url === '/dados') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, ...ultimosDados }))
+
+    } else if (req.method === 'POST' && req.url === '/solicitar-faturamento') {
         console.log(`\n📥 [Zyon] Coleta imediata solicitada pela Zaya — ${new Date().toLocaleTimeString('pt-BR')}`)
         await coletarEEnviarDados()
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -719,6 +724,9 @@ zyonServer.listen(ZYON_PORT, () => {
 console.log('⚡ Zyon iniciado — monitoramento de pedidos e atendimento Shopee')
 console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados completos: a cada ${INTERVALO_DADOS_MS / 60000} min | Chat: a cada ${INTERVALO_CHAT_MS / 60000} min`)
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
+console.warn('⚠️  ATENÇÃO: o Zyon vai usar o perfil REAL do Chrome (User Data\\Default).')
+console.warn('   Feche TODOS os processos do Chrome antes de continuar.')
+console.warn('   Dois processos no mesmo perfil corrompem o perfil e perdem a sessão.')
 console.log('─────────────────────────────────────────────────')
 
 // Referências dos setInterval ativos — guardadas para que o watchdog possa derrubar e
