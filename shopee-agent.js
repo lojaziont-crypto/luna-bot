@@ -10,7 +10,7 @@ const BASE_URL = 'https://seller.shopee.com.br'
 const CHAT_URL = `${BASE_URL}/new-webchat/conversations`
 const PRODUTOS_LIST_URL = `${BASE_URL}/portal/product/list/all`
 const ORDERS_TOSHIP_URL = `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`
-const PROFILE_DIR = 'C:\\Users\\Micro\\AppData\\Local\\Google\\Chrome\\User Data'
+const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
 

@@ -724,9 +724,6 @@ zyonServer.listen(ZYON_PORT, () => {
 console.log('⚡ Zyon iniciado — monitoramento de pedidos e atendimento Shopee')
 console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados completos: a cada ${INTERVALO_DADOS_MS / 60000} min | Chat: a cada ${INTERVALO_CHAT_MS / 60000} min`)
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
-console.warn('⚠️  ATENÇÃO: o Zyon vai usar o perfil REAL do Chrome (User Data\\Default).')
-console.warn('   Feche TODOS os processos do Chrome antes de continuar.')
-console.warn('   Dois processos no mesmo perfil corrompem o perfil e perdem a sessão.')
 console.log('─────────────────────────────────────────────────')
 
 // Referências dos setInterval ativos — guardadas para que o watchdog possa derrubar e
