@@ -44,6 +44,48 @@ let ziontGroupJid = process.env.ZIONT_GROUP_JID || null
 // Resposta pendente do Adriano: map de prazoEnvio (YYYY-MM-DD) → timestamp de quando foi perguntado
 const adrianoPendente = new Map()
 
+// JIDs resolvidos por nome de contato — persiste em disco para sobreviver a reinicios
+const CONTATOS_JID_FILE = path.join(__dirname, 'zaya_contatos_jid.json')
+let contatosJid = (() => {
+    try { if (fs.existsSync(CONTATOS_JID_FILE)) return JSON.parse(fs.readFileSync(CONTATOS_JID_FILE, 'utf8')) } catch {}
+    return {}
+})()
+
+function salvarContatosJid() {
+    fs.writeFileSync(CONTATOS_JID_FILE, JSON.stringify(contatosJid, null, 2))
+}
+
+// Varre uma lista de contatos do Baileys procurando nomes exatos conhecidos.
+// Campos testados: name (agenda do telefone) e notify (nome WhatsApp do contato).
+function processarContatos(contatos) {
+    for (const c of contatos) {
+        const nome = c.name || c.notify || ''
+        if (nome === 'Adriano Morais') {
+            if (contatosJid.adriano !== c.id) {
+                contatosJid.adriano = c.id
+                salvarContatosJid()
+                console.log(`✅ [Zaya] Contato 'Adriano Morais' identificado — JID: ${c.id}`)
+            }
+        }
+        // Adicione outros nomes aqui conforme necessário (ex: Lucas)
+    }
+}
+
+// Devolve o JID do Adriano: prioriza o resolvido por nome, cai no ADRIANO_PHONE como fallback.
+async function obterJidAdriano() {
+    if (contatosJid.adriano) {
+        console.log(`✅ [Zaya/Adriano] Usando JID identificado por nome: ${contatosJid.adriano}`)
+        return contatosJid.adriano
+    }
+    const adrianoPhone = process.env.ADRIANO_PHONE || ''
+    if (!adrianoPhone) {
+        console.log('⚠️  [Zaya/Adriano] Contato "Adriano Morais" ainda não sincronizado e ADRIANO_PHONE não definido')
+        return null
+    }
+    console.log('⚠️  [Zaya/Adriano] Contato "Adriano Morais" ainda não sincronizado — usando fallback ADRIANO_PHONE')
+    return resolverJid(activeSock, adrianoPhone)
+}
+
 const OWNER_JID_FILE = path.join(__dirname, 'owner_jid.json')
 try {
     if (fs.existsSync(OWNER_JID_FILE)) {
@@ -478,7 +520,8 @@ const server = http.createServer((req, res) => {
             const adrianoPhone = process.env.ADRIANO_PHONE || ''
             if (!adrianoPhone) { console.log('⚠️  [Zaya/teste] ADRIANO_PHONE não definido'); return }
             if (!activeSock) { console.log('⚠️  [Zaya/teste] WhatsApp não conectado'); return }
-            const adrianoJid = await resolverJid(activeSock, adrianoPhone)
+            const adrianoJid = await obterJidAdriano()
+            if (!adrianoJid) { console.log('⚠️  [Zaya/teste] Não foi possível resolver o JID do Adriano'); return }
             console.log(`📦 [Zaya/teste] Enviando cobrança para JID: ${adrianoJid}`)
             for (const lista of candidatas) {
                 const pedidosTexto = lista.pedidos.length > 0
@@ -537,6 +580,15 @@ async function connectToWhatsApp() {
     })
 
     sock.ev.on('creds.update', saveCreds)
+
+    sock.ev.on('contacts.set', ({ contacts }) => {
+        console.log(`📇 [Zaya] contacts.set — ${contacts.length} contato(s) sincronizados`)
+        processarContatos(contacts)
+    })
+
+    sock.ev.on('contacts.upsert', contacts => {
+        processarContatos(contacts)
+    })
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update
@@ -868,7 +920,8 @@ async function cobrarAdriano() {
         console.log('⚠️  [Zaya/Adriano] ADRIANO_PHONE não definido — cobrança ignorada')
         return
     }
-    const adrianoJid = await resolverJid(activeSock, adrianoPhone)
+    const adrianoJid = await obterJidAdriano()
+    if (!adrianoJid) return
     console.log(`📦 [Zaya/Adriano] Enviando cobrança para JID: ${adrianoJid}`)
 
     const hoje = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
@@ -993,9 +1046,12 @@ function verificarPedidosComZyon(lista) {
 }
 
 async function tratarRespostaAdriano(sock, from, text) {
+    const possiveisJids = new Set()
+    if (contatosJid.adriano) possiveisJids.add(contatosJid.adriano)
     const adrianoPhone = process.env.ADRIANO_PHONE || ''
-    if (!adrianoPhone) return false
-    if (!jidsBrasileiros(adrianoPhone).includes(from)) return false
+    if (adrianoPhone) jidsBrasileiros(adrianoPhone).forEach(j => possiveisJids.add(j))
+    if (possiveisJids.size === 0) return false
+    if (!possiveisJids.has(from)) return false
     if (adrianoPendente.size === 0) return false
 
     const textoLower = text.toLowerCase().trim()
