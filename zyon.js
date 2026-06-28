@@ -34,6 +34,7 @@ const ultimaExecucao = {
     pedidos: Date.now(),
     dados: Date.now(),
     chat: Date.now(),
+    lucas17h: Date.now(),
 }
 
 // Executa uma tarefa periódica isolando erros — assim uma falha não derruba o processo
@@ -188,6 +189,34 @@ function enviarDadosParaZaya(fatDia, fatMes, aEnviar) {
         console.log(`📨 [Zyon] Dados enviados à Zaya (HTTP ${res.statusCode}) — Dia: R$ ${fatDia || '?'}, Mês: R$ ${fatMes || '?'}, A Enviar: ${aEnviar || '?'}`)
     })
     req.on('error', err => console.error(`❌ [Zyon] Erro ao enviar dados: ${err.message}`))
+    req.write(data)
+    req.end()
+}
+
+function notifyZayaProducaoLucas(pedidos) {
+    const url = process.env.ZAYA_URL
+    if (!url) {
+        console.log('⚠️  [Zyon] ZAYA_URL não definida — aviso de produção ao Lucas não enviado')
+        return
+    }
+    const data = JSON.stringify({ pedidos })
+    let parsedUrl
+    try { parsedUrl = new URL(`${url}/notify-producao-lucas`) } catch {
+        console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
+        return
+    }
+    const lib = parsedUrl.protocol === 'https:' ? https : http
+    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+    const req = lib.request({
+        hostname: parsedUrl.hostname,
+        port,
+        path: parsedUrl.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    }, res => {
+        console.log(`📨 [Zyon] Zaya notificada — aviso de produção ao Lucas (HTTP ${res.statusCode}), ${pedidos.length} pedido(s)`)
+    })
+    req.on('error', err => console.error(`❌ [Zyon] Erro ao notificar Zaya (produção Lucas): ${err.message}`))
     req.write(data)
     req.end()
 }
@@ -695,10 +724,36 @@ async function atualizarProdutosSalvos() {
     }
 }
 
+async function avisarLucasProducao() {
+    ultimaExecucao.lucas17h = Date.now()
+    if (emColeta) {
+        console.log('⏭️  [Zyon] Browser ocupado — aviso de produção ao Lucas adiado')
+        return
+    }
+    emColeta = true
+    try {
+        console.log(`\n🎨 [Zyon] Coletando pedidos em aberto para aviso diário ao Lucas — ${new Date().toLocaleTimeString('pt-BR')}`)
+        await executarComBrowser('aviso de produção Lucas', async (browser, page) => {
+            const pedidos = await listarPedidosEmAberto(page)
+            if (pedidos.length === 0) {
+                console.log('🎨 [Zyon] Nenhum pedido em "A Enviar" — aviso ao Lucas não necessário')
+                return
+            }
+            console.log(`🎨 [Zyon] ${pedidos.length} pedido(s) em aberto — notificando Lucas via Zaya`)
+            notifyZayaProducaoLucas(pedidos)
+        })
+    } catch (err) {
+        console.error('❌ [Zyon] Erro ao coletar pedidos para aviso ao Lucas:', err.message)
+    } finally {
+        emColeta = false
+    }
+}
+
 const INTERVALO_MS = 30 * 60 * 1000
 const INTERVALO_DADOS_MS = 60 * 60 * 1000
 const INTERVALO_CHAT_MS = 10 * 60 * 1000
 const INTERVALO_PRODUTOS_MS = 24 * 60 * 60 * 1000
+const INTERVALO_LUCAS_17H_MS = 24 * 60 * 60 * 1000
 const ZYON_PORT = Number(process.env.ZYON_PORT) || 3001
 
 // Servidor HTTP: recebe solicitações imediatas da Zaya
@@ -712,6 +767,52 @@ const zyonServer = http.createServer(async (req, res) => {
         await coletarEEnviarDados()
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
+
+    } else if (req.method === 'POST' && req.url === '/verificar-pedidos-enviados') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { orderIds, listaId } = JSON.parse(body)
+                if (!Array.isArray(orderIds) || orderIds.length === 0) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ ok: false, error: 'orderIds inválido' }))
+                    return
+                }
+                console.log(`\n🔍 [Zyon] Verificando despacho de ${orderIds.length} pedido(s) (lista ${listaId || '?'}) — ${new Date().toLocaleTimeString('pt-BR')}`)
+
+                if (emColeta) {
+                    console.log('⏭️  [Zyon] Browser ocupado — verificação de despacho não pode rodar agora')
+                    res.writeHead(503, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ ok: false, error: 'browser ocupado, tente novamente em alguns minutos' }))
+                    return
+                }
+
+                emColeta = true
+                let enviados = []
+                let pendentes = []
+                try {
+                    await executarComBrowser('verificação de despacho', async (browser, page) => {
+                        const emAberto = await listarPedidosEmAberto(page)
+                        const idsEmAberto = new Set(emAberto.map(p => p.orderId))
+                        enviados = orderIds.filter(id => !idsEmAberto.has(id))
+                        pendentes = orderIds.filter(id => idsEmAberto.has(id))
+                    })
+                } finally {
+                    emColeta = false
+                }
+
+                console.log(`✅ [Zyon] Verificação concluída — enviados: ${enviados.length}, pendentes: ${pendentes.length}`)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, enviados, pendentes }))
+            } catch (err) {
+                emColeta = false
+                console.error('❌ [Zyon] Erro em /verificar-pedidos-enviados:', err.message)
+                res.writeHead(500, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
     } else {
         res.writeHead(404)
         res.end()
@@ -723,6 +824,7 @@ zyonServer.listen(ZYON_PORT, () => {
 
 console.log('⚡ Zyon iniciado — monitoramento de pedidos e atendimento Shopee')
 console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados completos: a cada ${INTERVALO_DADOS_MS / 60000} min | Chat: a cada ${INTERVALO_CHAT_MS / 60000} min`)
+console.log(`🎨 Aviso de produção ao Lucas: todo dia às 17h`)
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
 console.log('─────────────────────────────────────────────────')
 
@@ -732,6 +834,7 @@ let intervaloPedidosRef = null
 let intervaloChatRef = null
 let intervaloProdutosRef = null
 let intervaloDadosRef = null
+let intervaloLucasRef = null
 
 function iniciarMonitoramentoPedidos() {
     if (intervaloPedidosRef) clearInterval(intervaloPedidosRef)
@@ -744,6 +847,26 @@ function iniciarMonitoramentoChat() {
 function iniciarAtualizacaoProdutos() {
     if (intervaloProdutosRef) clearInterval(intervaloProdutosRef)
     intervaloProdutosRef = setInterval(() => executarComSeguranca('atualizarProdutosSalvos', atualizarProdutosSalvos), INTERVALO_PRODUTOS_MS)
+}
+
+// Agenda o aviso diário ao Lucas para as 17h em ponto, depois repete a cada 24h.
+function agendarAvisoLucas17h() {
+    if (intervaloLucasRef) {
+        clearInterval(intervaloLucasRef)
+        intervaloLucasRef = null
+    }
+    const agora = new Date()
+    const proximas17h = new Date(agora)
+    proximas17h.setHours(17, 0, 0, 0)
+    if (proximas17h <= agora) proximas17h.setDate(proximas17h.getDate() + 1)
+    const msAte17h = proximas17h - agora
+
+    console.log(`🎨 [Zyon] Próximo aviso de produção ao Lucas agendado para ${proximas17h.toLocaleTimeString('pt-BR')} (em ${Math.round(msAte17h / 60000)} min)`)
+
+    setTimeout(() => {
+        executarComSeguranca('avisarLucasProducao', avisarLucasProducao)
+        intervaloLucasRef = setInterval(() => executarComSeguranca('avisarLucasProducao', avisarLucasProducao), INTERVALO_LUCAS_17H_MS)
+    }, msAte17h)
 }
 
 // Agenda a coleta de faturamento para disparar exatamente no início de cada hora
@@ -796,6 +919,12 @@ function verificarEReiniciarIntervalos() {
         ultimaExecucao.dados = agora
         agendarColetaDeDadosNaHoraCheia()
     }
+
+    if (agora - ultimaExecucao.lucas17h > INTERVALO_LUCAS_17H_MS * WATCHDOG_TOLERANCIA) {
+        console.warn('🐶 [Zyon/watchdog] Aviso de produção ao Lucas parado — reagendando...')
+        ultimaExecucao.lucas17h = agora
+        agendarAvisoLucas17h()
+    }
 }
 
 // Executa em sequência na inicialização (nunca dois browsers ao mesmo tempo) — cada
@@ -809,4 +938,5 @@ iniciarMonitoramentoPedidos()
 agendarColetaDeDadosNaHoraCheia()
 iniciarMonitoramentoChat()
 iniciarAtualizacaoProdutos()
+agendarAvisoLucas17h()
 setInterval(verificarEReiniciarIntervalos, WATCHDOG_INTERVALO_MS)
