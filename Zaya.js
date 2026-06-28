@@ -424,6 +424,45 @@ const server = http.createServer((req, res) => {
             }
         })
 
+    } else if (req.method === 'POST' && req.url === '/testar-cobranca-adriano') {
+        const hoje = new Date().toISOString().slice(0, 10)
+        const listas = carregarListas()
+        const candidatas = listas.filter(l => l.prazoEnvio <= hoje && !l.processado && !l.aguardandoVerificacao)
+        console.log(`📦 [Zaya/teste] /testar-cobranca-adriano: ${candidatas.length} lista(s) com prazo <= ${hoje}`)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, listasEncontradas: candidatas.length, prazoReferencia: hoje, listas: candidatas.map(l => ({ id: l.id, prazoEnvio: l.prazoEnvio, pedidos: l.pedidos.length })) }))
+        if (candidatas.length === 0) return
+        ;(async () => {
+            const adrianoPhone = process.env.ADRIANO_PHONE || ''
+            if (!adrianoPhone) { console.log('⚠️  [Zaya/teste] ADRIANO_PHONE não definido'); return }
+            if (!activeSock) { console.log('⚠️  [Zaya/teste] WhatsApp não conectado'); return }
+            const adrianoJid = adrianoPhone.startsWith('55') ? `${adrianoPhone}@s.whatsapp.net` : `55${adrianoPhone}@s.whatsapp.net`
+            for (const lista of candidatas) {
+                const pedidosTexto = lista.pedidos.length > 0
+                    ? lista.pedidos.map(id => `• ${id}`).join('\n')
+                    : '(sem IDs identificados)'
+                const mensagem = [
+                    `📦 *Despacho de hoje — ${new Date().toLocaleDateString('pt-BR')}*`,
+                    ``,
+                    `Adriano, os pedidos da lista de separação com prazo *hoje* já foram postados nos Correios/transportadora?`,
+                    ``,
+                    `Pedidos:`,
+                    pedidosTexto,
+                    ``,
+                    `Responda *"sim"* se já despachados, ou descreva o problema se houver algum impedimento.`,
+                    ``,
+                    `_(ref: ${lista.id})_`,
+                ].join('\n')
+                try {
+                    await activeSock.sendMessage(adrianoJid, { text: mensagem })
+                    adrianoPendente.set(lista.id, Date.now())
+                    console.log(`📦 [Zaya/teste] Cobrança enviada ao Adriano — lista ${lista.id}`)
+                } catch (err) {
+                    console.error(`❌ [Zaya/teste] Erro ao enviar cobrança: ${err.message}`)
+                }
+            }
+        })().catch(err => console.error('❌ [Zaya/teste] Erro na cobrança de teste:', err.message))
+
     } else if (req.url === '/health') {
         res.writeHead(200)
         res.end('ok')
