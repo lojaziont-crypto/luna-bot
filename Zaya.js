@@ -62,6 +62,48 @@ function normalizePhone(jid) {
     return jid.replace(/@.*$/, '').replace(/^55/, '')
 }
 
+// Retorna todos os JIDs possíveis para um número brasileiro (com e sem o "9" extra)
+function jidsBrasileiros(phone) {
+    const base = phone.replace(/\D/g, '')
+    const com55 = base.startsWith('55') ? base : `55${base}`
+    const jids = [`${com55}@s.whatsapp.net`]
+    if (com55.length === 13) {
+        // tem o 9 → gera alternativa sem o 9 (formato antigo)
+        jids.push(`${com55.slice(0, 4)}${com55.slice(5)}@s.whatsapp.net`)
+    } else if (com55.length === 12) {
+        // sem o 9 → gera alternativa com o 9 (formato novo)
+        jids.push(`${com55.slice(0, 4)}9${com55.slice(4)}@s.whatsapp.net`)
+    }
+    return jids
+}
+
+// Resolve o JID correto usando sock.onWhatsApp — testa o número original e o formato
+// alternativo (com/sem o "9" do Brasil). Loga o resultado e devolve o JID confirmado.
+// Se a verificação falhar, cai no JID construído diretamente como fallback.
+async function resolverJid(sock, phone) {
+    const base = phone.replace(/\D/g, '')
+    const com55 = base.startsWith('55') ? base : `55${base}`
+    const candidatos = [com55]
+    if (com55.length === 13) candidatos.push(com55.slice(0, 4) + com55.slice(5))
+    else if (com55.length === 12) candidatos.push(com55.slice(0, 4) + '9' + com55.slice(4))
+
+    for (const num of candidatos) {
+        try {
+            const resultado = await sock.onWhatsApp(num)
+            if (resultado?.[0]?.exists) {
+                console.log(`✅ [Zaya] JID confirmado via onWhatsApp: ${resultado[0].jid}`)
+                return resultado[0].jid
+            }
+            console.log(`ℹ️  [Zaya] onWhatsApp: ${num} não encontrado no WhatsApp`)
+        } catch (err) {
+            console.log(`⚠️  [Zaya] onWhatsApp falhou para ${num}: ${err.message}`)
+        }
+    }
+    const fallback = `${com55}@s.whatsapp.net`
+    console.log(`⚠️  [Zaya] Nenhum formato confirmado — usando fallback: ${fallback}`)
+    return fallback
+}
+
 async function notifyNewOrder(orderId) {
     if (!activeSock) return
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
@@ -436,7 +478,8 @@ const server = http.createServer((req, res) => {
             const adrianoPhone = process.env.ADRIANO_PHONE || ''
             if (!adrianoPhone) { console.log('⚠️  [Zaya/teste] ADRIANO_PHONE não definido'); return }
             if (!activeSock) { console.log('⚠️  [Zaya/teste] WhatsApp não conectado'); return }
-            const adrianoJid = adrianoPhone.startsWith('55') ? `${adrianoPhone}@s.whatsapp.net` : `55${adrianoPhone}@s.whatsapp.net`
+            const adrianoJid = await resolverJid(activeSock, adrianoPhone)
+            console.log(`📦 [Zaya/teste] Enviando cobrança para JID: ${adrianoJid}`)
             for (const lista of candidatas) {
                 const pedidosTexto = lista.pedidos.length > 0
                     ? lista.pedidos.map(id => `• ${id}`).join('\n')
@@ -825,7 +868,8 @@ async function cobrarAdriano() {
         console.log('⚠️  [Zaya/Adriano] ADRIANO_PHONE não definido — cobrança ignorada')
         return
     }
-    const adrianoJid = adrianoPhone.startsWith('55') ? `${adrianoPhone}@s.whatsapp.net` : `55${adrianoPhone}@s.whatsapp.net`
+    const adrianoJid = await resolverJid(activeSock, adrianoPhone)
+    console.log(`📦 [Zaya/Adriano] Enviando cobrança para JID: ${adrianoJid}`)
 
     const hoje = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
     const listas = carregarListas()
@@ -951,8 +995,7 @@ function verificarPedidosComZyon(lista) {
 async function tratarRespostaAdriano(sock, from, text) {
     const adrianoPhone = process.env.ADRIANO_PHONE || ''
     if (!adrianoPhone) return false
-    const adrianoJid = adrianoPhone.startsWith('55') ? `${adrianoPhone}@s.whatsapp.net` : `55${adrianoPhone}@s.whatsapp.net`
-    if (from !== adrianoJid) return false
+    if (!jidsBrasileiros(adrianoPhone).includes(from)) return false
     if (adrianoPendente.size === 0) return false
 
     const textoLower = text.toLowerCase().trim()
