@@ -15,7 +15,7 @@ const fs = require('fs')
 const path = require('path')
 const http = require('http')
 const https = require('https')
-const pdfParse = require('pdf-parse')
+const { PDFParse } = require('pdf-parse')
 
 let activeSock = null
 let ownerJid = null
@@ -616,8 +616,11 @@ async function processarListaSeparacaoPDF(sock, msg) {
 
     let texto = ''
     try {
-        const parsed = await pdfParse(buffer)
+        const parser = new PDFParse({ data: buffer })
+        await parser.load()
+        const parsed = await parser.getText()
         texto = parsed.text || ''
+        await parser.destroy().catch(() => {})
     } catch (err) {
         console.error('❌ [Zaya/Ziont] Erro ao parsear PDF — não foi possível extrair o texto:', err.message)
         return
