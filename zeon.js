@@ -456,21 +456,48 @@ function chamarTarefaZyon(descricao) {
         const zyonUrl = process.env.ZYON_URL || 'http://localhost:3001'
         const data = JSON.stringify({ descricao })
         let parsedUrl
-        try { parsedUrl = new URL(`${zyonUrl}/executar-tarefa`) } catch {
-            return resolve(null)
+        try {
+            parsedUrl = new URL(`${zyonUrl}/executar-tarefa`)
+        } catch (err) {
+            console.error(`❌ [Zeon] ZYON_URL inválida (${zyonUrl}): ${err.message}`)
+            return resolve({ ok: false, error: `URL inválida: ${zyonUrl}` })
         }
+
         const lib = parsedUrl.protocol === 'https:' ? https : http
-        const port = parsedUrl.port ? Number(parsedUrl.port) : 80
+        const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+
+        console.log(`📡 [Zeon] Chamando Zyon em POST ${parsedUrl.href} — "${descricao.substring(0, 60)}..."`)
+
         const req = lib.request({
             hostname: parsedUrl.hostname, port, path: parsedUrl.pathname, method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
         }, res => {
             let corpo = ''
             res.on('data', chunk => { corpo += chunk })
-            res.on('end', () => { try { resolve(JSON.parse(corpo)) } catch { resolve(null) } })
+            res.on('end', () => {
+                console.log(`📡 [Zeon] Zyon respondeu HTTP ${res.statusCode} (${corpo.length} bytes)`)
+                try {
+                    const json = JSON.parse(corpo)
+                    console.log(`📡 [Zeon] Zyon resultado — acao: ${json.acao ?? '?'}, ok: ${json.ok}`)
+                    resolve(json)
+                } catch (parseErr) {
+                    console.error(`❌ [Zeon] Erro ao parsear resposta do Zyon: ${parseErr.message} — corpo: ${corpo.substring(0, 200)}`)
+                    resolve({ ok: false, error: 'resposta inválida do Zyon' })
+                }
+            })
         })
-        req.setTimeout(120000, () => { req.destroy(); resolve(null) })
-        req.on('error', () => resolve(null))
+
+        req.setTimeout(180000, () => {
+            req.destroy()
+            console.error(`❌ [Zeon] Timeout (3min) aguardando Zyon — tarefa: "${descricao.substring(0, 60)}"`)
+            resolve({ ok: false, error: 'timeout aguardando Zyon (3 min)' })
+        })
+
+        req.on('error', (err) => {
+            console.error(`❌ [Zeon] Falha na conexão com Zyon (${parsedUrl.href}): ${err.message}`)
+            resolve({ ok: false, error: `conexão recusada: ${err.message}` })
+        })
+
         req.write(data)
         req.end()
     })
@@ -525,17 +552,38 @@ async function processarMensagemMauricio(mensagem) {
         if (ehShopee) {
             console.log(`🛍️ [Zeon] Pedido Shopee identificado — delegando ao Zyon: ${mensagem}`)
             notificarZaya(`*Zeon:* 🛍️ Consultando o Zyon sobre: _${mensagem}_...`)
+
             const respZyon = await chamarTarefaZyon(mensagem)
-            if (respZyon?.ok && respZyon.acao !== 'nao_identificado') {
+
+            // Falha na chamada ao Zyon (conexão recusada, timeout, erro interno)
+            if (!respZyon || !respZyon.ok) {
+                const motivo = respZyon?.error || 'sem resposta'
+                console.error(`❌ [Zeon] Zyon não completou a tarefa: ${motivo}`)
+                notificarZaya(`*Zeon:* ⚠️ Não consegui executar essa tarefa no Zyon agora.\nMotivo: ${motivo}\n\nVerifique se o \`node zyon.js\` está rodando.`)
+                return
+            }
+
+            // Zyon identificou a ação e retornou resultado
+            if (respZyon.acao !== 'nao_identificado') {
+                console.log(`📨 [Zeon] Enviando resposta final ao Maurício via Zaya`)
                 const texto = formatarResultadoZyon(respZyon.acao, respZyon.resultado)
                 notificarZaya(`*Zeon:* ${texto}`)
-            } else {
-                // Não conseguiu mapear para ação específica — responde via Groq com contexto Shopee
-                const dadosZyon = await consultarZyon('/dados')
-                const contextoZyon = dadosZyon ? `Dados Shopee: Dia R$${dadosZyon.fatDia}, Mês R$${dadosZyon.fatMes}, A enviar: ${dadosZyon.aEnviar}.` : ''
-                const resposta = await gerarAnalise(`Maurício perguntou sobre Shopee: "${mensagem}"\n${contextoZyon}`, 'Responda de forma direta. Máximo 6 linhas.')
-                notificarZaya(`*Zeon:* ${resposta}`)
+                return
             }
+
+            // Zyon não conseguiu mapear para nenhuma ação conhecida
+            // Usa Groq como fallback com dados do /dados (sem abrir browser)
+            console.log(`⚠️ [Zeon] Zyon não identificou ação — usando Groq como fallback`)
+            const dadosZyon = await consultarZyon('/dados')
+            const contextoZyon = dadosZyon?.fatDia != null
+                ? `Dados Shopee (cache): Dia R$${dadosZyon.fatDia}, Mês R$${dadosZyon.fatMes}, A enviar: ${dadosZyon.aEnviar}.`
+                : 'Dados Shopee não disponíveis no cache.'
+            const resposta = await gerarAnalise(
+                `Maurício perguntou sobre Shopee: "${mensagem}"\n${contextoZyon}`,
+                'Responda de forma direta com base nos dados disponíveis. Máximo 6 linhas.'
+            )
+            console.log(`📨 [Zeon] Enviando resposta final ao Maurício via Zaya`)
+            notificarZaya(`*Zeon:* ${resposta}`)
             return
         }
 
