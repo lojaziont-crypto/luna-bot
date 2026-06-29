@@ -593,12 +593,15 @@ function formatarResultadoZyon(acao, resultado) {
         case 'metricas':
             return `📊 *Métricas*\nFaturamento dia: ${resultado.fatDia ?? '?'}\nPedidos mês: ${resultado.totalPedidosMes ?? '?'}\nConversão: ${resultado.taxaConversao ?? '?'}%`
         case 'saude_conta': {
+            const doCache = resultado.dadosDoCache
+                ? ` _(verificado ${resultado.idadeCacheMin}min atrás)_`
+                : ''
             if (!resultado.temPenalidade && !resultado.penalidadesAtivas?.length) {
-                return `✅ *Saúde da Conta Shopee*\nNenhuma penalidade ativa detectada.\n${resultado.metricas?.taxaCancelamento != null ? `Cancelamento: ${resultado.metricas.taxaCancelamento}%` : ''}`
+                return `✅ *Saúde da Conta Shopee*${doCache}\nNenhuma penalidade ativa detectada.${resultado.metricas?.taxaCancelamento != null ? `\nCancelamento: ${resultado.metricas.taxaCancelamento}%` : ''}`
             }
             const pena = resultado.penalidadesAtivas?.[0]
             return [
-                `🚨 *Saúde da Conta Shopee — PENALIDADE ATIVA*`,
+                `🚨 *Saúde da Conta Shopee — PENALIDADE ATIVA*${doCache}`,
                 `Tipo: ${pena?.tipo ?? '?'}`,
                 pena?.inicio ? `Início: ${pena.inicio}` : null,
                 pena?.duracaoDias ? `Duração: ${pena.duracaoDias} dias` : null,

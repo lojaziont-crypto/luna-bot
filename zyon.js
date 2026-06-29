@@ -34,6 +34,7 @@ const ultimaExecucao = {
     boost: Date.now(),
     ads: Date.now(),
     gerencial: Date.now(),
+    saude: 0,   // 0 = nunca rodou — não força execução no boot
 }
 
 async function executarComSeguranca(nome, tarefa) {
@@ -291,21 +292,27 @@ async function verificarAdsEFinanceiro() {
 // ────────────── Informações Gerenciais + Resumo IA (~20h-21h) ─────────────────
 
 async function checarSaudeConta() {
+    ultimaExecucao.saude = Date.now()
+    if (emColeta) {
+        console.log('⏭️  [Zyon] Browser ocupado — verificação de saúde da conta adiada')
+        return null
+    }
+    emColeta = true
     console.log(`\n🏥 [Zyon] Verificando saúde/desempenho da conta — ${new Date().toLocaleTimeString('pt-BR')}`)
     try {
-        const saude = await coletarSaudeConta()
         const anterior = carregarJSON(SAUDE_CONTA_FILE, null)
+        const saude = await coletarSaudeConta()
 
         // Detecta penalidade NOVA (não existia antes)
         const penalidadeNova = saude.temPenalidade && (!anterior || !anterior.temPenalidade)
         if (penalidadeNova) {
-            const descPenalidade = saude.penalidadesAtivas[0]?.descricao || 'Detalhes não extraídos automaticamente'
+            const pena = saude.penalidadesAtivas[0]
             const msg = [
                 `🚨 *[Zyon] PENALIDADE NOVA DETECTADA NA CONTA SHOPEE!*`,
                 ``,
-                `Tipo: ${saude.penalidadesAtivas[0]?.tipo || '?'} | Início: ${saude.penalidadesAtivas[0]?.inicio || '?'} | Duração: ${saude.penalidadesAtivas[0]?.duracaoDias ? `${saude.penalidadesAtivas[0].duracaoDias} dias` : '?'}`,
+                `Tipo: ${pena?.tipo || '?'} | Início: ${pena?.inicio || '?'} | Duração: ${pena?.duracaoDias ? `${pena.duracaoDias} dias` : '?'}`,
                 ``,
-                `Descrição: ${descPenalidade.substring(0, 400)}`,
+                `Descrição: ${(pena?.descricao || 'Detalhes não extraídos — veja screenshot debug_shopee/saude_conta.png').substring(0, 400)}`,
                 ``,
                 `Acesse "Desempenho da Conta" no portal Shopee para ver os detalhes completos.`,
             ].join('\n')
@@ -322,6 +329,8 @@ async function checarSaudeConta() {
     } catch (err) {
         console.error('❌ [Zyon] Erro ao verificar saúde da conta:', err.message)
         return null
+    } finally {
+        emColeta = false
     }
 }
 
@@ -336,9 +345,6 @@ async function coletarRelatorioGerencial() {
         console.log(`\n📊 [Zyon] Coletando métricas gerenciais — ${new Date().toLocaleTimeString('pt-BR')}`)
         const metricas = await coletarMetricasCompletas()
         ultimasMetricas = metricas
-
-        // Saúde da conta — roda sequencialmente, dentro do mesmo bloco emColeta
-        await checarSaudeConta()
 
         // Gera resumo via Groq
         const resumo = await groq.chat.completions.create({
@@ -415,7 +421,12 @@ const ZYON_PORT = Number(process.env.ZYON_PORT) || 3001
 
 const zyonServer = http.createServer(async (req, res) => {
 
-    if (req.method === 'GET' && req.url === '/dados') {
+    if (req.method === 'GET' && req.url === '/saude-conta') {
+        const cacheSaude = carregarJSON(SAUDE_CONTA_FILE, null)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, saude: cacheSaude, ultimaVerificacao: cacheSaude?.timestamp || null }))
+
+    } else if (req.method === 'GET' && req.url === '/dados') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true, ...ultimosDados, pedidosAEnviar: ultimosPedidosAEnviar }))
 
@@ -485,27 +496,53 @@ const zyonServer = http.createServer(async (req, res) => {
                 }
                 console.log(`\n⚡ [Zyon] Tarefa sob demanda recebida: ${descricao}`)
 
-                // Interpreta a tarefa com Groq
-                const interpretacao = await groq.chat.completions.create({
-                    model: 'llama-3.3-70b-versatile',
-                    max_tokens: 200,
-                    response_format: { type: 'json_object' },
-                    messages: [{
-                        role: 'user',
-                        content: `Você é um assistente que mapeia pedidos em texto para ações de um agente Shopee.
+                // Pré-check de palavras-chave antes do Groq — mais confiável para saude_conta
+                // (evita Groq mapear "penalidade" para outra ação por engano)
+                const descLower = descricao.toLowerCase()
+                const KEYWORDS_SAUDE = [
+                    'penalidade', 'penalidades', 'desempenho da conta', 'saúde da conta', 'saude da conta',
+                    'restrição da conta', 'restricao da conta', 'conta suspensa', 'suspensão da conta',
+                    'situação da conta', 'performance da conta', 'sanção', 'sancao',
+                ]
+                let interpretacao
+                if (KEYWORDS_SAUDE.some(k => descLower.includes(k))) {
+                    interpretacao = { acao: 'saude_conta', orderId: null }
+                    console.log(`⚡ [Zyon] Ação pré-identificada por keyword: saude_conta`)
+                } else {
+                    // Interpreta a tarefa com Groq
+                    interpretacao = await groq.chat.completions.create({
+                        model: 'llama-3.3-70b-versatile',
+                        max_tokens: 200,
+                        response_format: { type: 'json_object' },
+                        messages: [{
+                            role: 'user',
+                            content: `Você é um assistente que mapeia pedidos em texto para ações de um agente Shopee.
 
 Pedido: "${descricao}"
 
 Mapeie para UMA das ações: pedidos_aenviar, boost_anuncios, verificar_ads, renda, carteira, metricas, saude_conta, verificar_pedido_especifico, nao_identificado
 
-Use saude_conta para: "saúde da conta", "desempenho da conta", "penalidade", "penalidades", "restricao", "restrição", "suspensão", "performance da conta", "situação da conta".
+Use saude_conta para: "saúde da conta", "desempenho da conta", "penalidade", "penalidades", "restricao", "restrição", "suspensão", "performance da conta", "situação da conta", "sanção".
 Se for "verificar_pedido_especifico", extraia o orderId do texto.
 
 Responda SOMENTE em JSON: {"acao": "...", "orderId": null ou "ID_AQUI", "justificativa": "..."}`
-                    }],
-                }).then(r => JSON.parse(r.choices[0].message.content)).catch(() => ({ acao: 'nao_identificado' }))
+                        }],
+                    }).then(r => JSON.parse(r.choices[0].message.content)).catch(() => ({ acao: 'nao_identificado' }))
+                    console.log(`⚡ [Zyon] Ação identificada pelo Groq: ${interpretacao.acao}`)
+                }
 
-                console.log(`⚡ [Zyon] Ação identificada: ${interpretacao.acao}`)
+                // saude_conta: retorna cache (<24h) sem abrir o browser
+                if (interpretacao.acao === 'saude_conta') {
+                    const cacheSaude = carregarJSON(SAUDE_CONTA_FILE, null)
+                    const idadeMs = cacheSaude?.timestamp ? Date.now() - new Date(cacheSaude.timestamp).getTime() : Infinity
+                    if (cacheSaude && idadeMs < 24 * 60 * 60 * 1000) {
+                        console.log(`📋 [Zyon/saude] Dados do cache (${Math.round(idadeMs / 60000)}min atrás) — sem abrir browser`)
+                        res.writeHead(200, { 'Content-Type': 'application/json' })
+                        res.end(JSON.stringify({ ok: true, acao: 'saude_conta', resultado: { ...cacheSaude, dadosDoCache: true, idadeCacheMin: Math.round(idadeMs / 60000) } }))
+                        return
+                    }
+                    console.log(`📋 [Zyon/saude] Cache ausente ou >24h — coletando dados frescos`)
+                }
 
                 if (emColeta) {
                     res.writeHead(503, { 'Content-Type': 'application/json' })
@@ -711,6 +748,10 @@ agendarProxima('verificarAdsEFinanceiro', verificarAdsEFinanceiro, INTERVALO_ADS
 agendarProxima('atualizarPedidosAEnviar', atualizarPedidosAEnviar, INTERVALO_PEDIDOS_BASE, VARIACAO_PEDIDOS)
 
 // Aviso ao Lucas: agora iniciado pela Zaya (~17h) via /pedidos-aenviar — não agendado aqui
+
+// Saúde da conta — ciclo autônomo diário, 9h ±20min
+// Detecta penalidades novas e notifica proativamente; cache salvo em zyon_saude_conta.json
+agendarHorario('checarSaudeConta', checarSaudeConta, 9, 0, 20)
 
 // Métricas gerenciais ~20h30 (±30min) — diário
 agendarHorario('coletarRelatorioGerencial', coletarRelatorioGerencial, 20, 30, 30)

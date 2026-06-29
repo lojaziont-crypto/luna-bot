@@ -47,11 +47,22 @@ async function tentarNavegacaoMenu(page, textosPai, textosFilho) {
         const sidebar = document.querySelector(
             '[class*="sidebar"], [class*="nav-menu"], [class*="left-menu"], [class*="shop-sidebar"], [class*="side-nav"]'
         ) || document.body
+        const allItems = Array.from(sidebar.querySelectorAll('a, li, span, div'))
+
+        // Passo 1: match EXATO em todos os textos — evita clicar em "Desempenho de Produtos"
+        // quando o alvo é "Desempenho da Conta"
         for (const texto of textos) {
-            const items = Array.from(sidebar.querySelectorAll('a, li, span, div'))
-            const item = items.find(el => {
+            const item = allItems.find(el => {
                 const t = (el.childNodes[0]?.textContent || el.textContent || '').trim()
-                return (t === texto || t.startsWith(texto)) && el.offsetParent !== null
+                return t === texto && el.offsetParent !== null
+            })
+            if (item) { item.click(); return texto }
+        }
+        // Passo 2: startsWith como fallback (somente se exato falhou)
+        for (const texto of textos) {
+            const item = allItems.find(el => {
+                const t = (el.childNodes[0]?.textContent || el.textContent || '').trim()
+                return t.startsWith(texto) && el.offsetParent !== null
             })
             if (item) { item.click(); return texto }
         }
@@ -65,11 +76,19 @@ async function tentarNavegacaoMenu(page, textosPai, textosFilho) {
     if (!textosFilho || textosFilho.length === 0) return true
 
     const clicouFilho = await page.evaluate((textos) => {
+        const allItems = Array.from(document.querySelectorAll('a, li, span'))
+        // Exact match primeiro, depois startsWith
         for (const texto of textos) {
-            const items = Array.from(document.querySelectorAll('a, li, span'))
-            const item = items.find(el => {
+            const item = allItems.find(el => {
                 const t = (el.childNodes[0]?.textContent || el.textContent || '').trim()
-                return (t === texto || t.startsWith(texto)) && el.offsetParent !== null
+                return t === texto && el.offsetParent !== null
+            })
+            if (item) { item.click(); return texto }
+        }
+        for (const texto of textos) {
+            const item = allItems.find(el => {
+                const t = (el.childNodes[0]?.textContent || el.textContent || '').trim()
+                return t.startsWith(texto) && el.offsetParent !== null
             })
             if (item) { item.click(); return texto }
         }
@@ -116,9 +135,10 @@ const DESTINOS_MENU = {
         paiTextos: ['Central de Dados', 'Data Center', 'Dados'],
         filhoTextos: [],
     },
+    // Textos do mais específico para o mais genérico — evita clicar em "Desempenho de Produtos"
     saude_conta: {
         url: `${BASE_URL}/portal/performance`,
-        paiTextos: ['Desempenho', 'Desempenho da Conta', 'Account Health', 'Performance'],
+        paiTextos: ['Desempenho da Conta', 'Account Health', 'Saúde da Conta', 'Desempenho', 'Performance'],
         filhoTextos: [],
     },
 }
@@ -1180,22 +1200,27 @@ async function coletarSaudeConta() {
         await configurarPagina(page)
         await iniciarSessaoShopee(page)
 
-        // Tenta via menu; fallback para URL direta e variações conhecidas
-        const navegouPorMenu = await tentarNavegacaoMenu(page,
-            ['Desempenho', 'Desempenho da Conta', 'Account Health', 'Performance'],
-            []
-        )
+        // Tenta via menu (mais específico primeiro para evitar clicar no item errado)
+        const destSaude = DESTINOS_MENU.saude_conta
+        const navegouPorMenu = await tentarNavegacaoMenu(page, destSaude.paiTextos, destSaude.filhoTextos)
         if (!navegouPorMenu) {
-            // Tenta URLs conhecidas até uma funcionar
+            console.log('⚠️  [Zyon/saude] Sidebar não encontrou "Desempenho da Conta" — tentando URLs diretas')
+            // Tenta URLs conhecidas do Shopee BR para Desempenho/Account Health
             for (const tentativaUrl of [
                 `${BASE_URL}/portal/performance`,
                 `${BASE_URL}/portal/account/performance`,
                 `${BASE_URL}/portal/seller/performance`,
+                `${BASE_URL}/portal/business-insights/shop-performance`,
+                `${BASE_URL}/portal/service/performance`,
             ]) {
                 try {
                     await page.goto(tentativaUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
                     await randomDelay(3000, 6000)
-                    if (!page.url().includes('/login') && !page.url().includes('/verify')) break
+                    const urlAtual = page.url()
+                    if (!urlAtual.includes('/login') && !urlAtual.includes('/verify') && !urlAtual.includes('overview')) {
+                        console.log(`✅ [Zyon/saude] URL funcionou: ${urlAtual}`)
+                        break
+                    }
                 } catch {}
             }
         } else {
