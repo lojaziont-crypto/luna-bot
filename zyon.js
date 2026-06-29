@@ -14,31 +14,27 @@ const http = require('http')
 const Groq = require('groq-sdk')
 const {
     verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos,
+    coletarPedidosAEnviar, impulsionarAnuncios, verificarSaldoAds,
+    coletarRenda, coletarSaldoCarteira, coletarMetricasCompletas,
     launchBrowser, resolverChrome, configurarPagina,
-    abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
-    listarPedidosEmAberto, abrirChatDoPedido, ORDERS_TOSHIP_URL,
+    listarPedidosEmAberto, verificarStatusPedidos,
 } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 const PEDIDOS_FILE = path.join(__dirname, 'pedidos_vistos.json')
-const PRODUTOS_FILE = path.join(__dirname, 'produtos.json')
-const RESPONDIDAS_FILE = path.join(__dirname, 'mensagens_respondidas.json')
-const ARTE_SOLICITADA_FILE = path.join(__dirname, 'arte_solicitada.json')
+const BOOST_LOG_FILE = path.join(__dirname, 'zyon_boost_log.json')
 let ultimoPedidoVisto = null
 let emColeta = false  // mutex: nunca abre dois browsers ao mesmo tempo
 
-// Registro do horário da última execução de cada tarefa periódica — usado pelo watchdog
-// para detectar se algum setInterval travou/parou e precisa ser reiniciado
 const ultimaExecucao = {
     pedidos: Date.now(),
     dados: Date.now(),
-    chat: Date.now(),
-    lucas17h: Date.now(),
+    boost: Date.now(),
+    ads: Date.now(),
+    gerencial: Date.now(),
 }
 
-// Executa uma tarefa periódica isolando erros — assim uma falha não derruba o processo
-// nem impede que as demais tarefas continuem rodando nos seus próprios intervalos
 async function executarComSeguranca(nome, tarefa) {
     try {
         await tarefa()
@@ -67,55 +63,55 @@ function salvarJSON(arquivo, dados) {
     fs.writeFileSync(arquivo, JSON.stringify(dados, null, 2))
 }
 
-let produtos = carregarJSON(PRODUTOS_FILE, {})
-let mensagensRespondidas = carregarJSON(RESPONDIDAS_FILE, {})
-let arteSolicitada = carregarJSON(ARTE_SOLICITADA_FILE, {})
 let ultimosDados = { fatDia: null, fatMes: null, aEnviar: null, atualizadoEm: null }
+let ultimosPedidosAEnviar = { hoje: [], amanha: [], outros: [], total: 0, atualizadoEm: null }
+let ultimasMetricas = null
 
-// Notifica Zaya (Railway) via HTTP POST /notify-order
-// Configure ZAYA_URL no .env: ex. ZAYA_URL=https://luna-bot-xxxx.up.railway.app
-function notifyZaya(orderId) {
+// ─────────────────────────── Comunicação com Zaya ────────────────────────────
+
+function postZaya(endpoint, dados) {
     const url = process.env.ZAYA_URL
     if (!url) {
-        console.log(`⚠️  [Zyon] ZAYA_URL não definida — pedido #${orderId} detectado mas Zaya não notificada`)
-        console.log(`   Adicione no .env: ZAYA_URL=https://seu-app.up.railway.app`)
+        console.log(`⚠️  [Zyon] ZAYA_URL não definida — ${endpoint} não enviado`)
         return
     }
-
-    const data = JSON.stringify({ orderId })
+    const data = JSON.stringify(dados)
     let parsedUrl
-    try {
-        parsedUrl = new URL(`${url}/notify-order`)
-    } catch {
+    try { parsedUrl = new URL(`${url}${endpoint}`) } catch {
         console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
         return
     }
-
     const lib = parsedUrl.protocol === 'https:' ? https : http
-    const port = parsedUrl.port
-        ? Number(parsedUrl.port)
-        : parsedUrl.protocol === 'https:' ? 443 : 80
-
+    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
     const req = lib.request({
-        hostname: parsedUrl.hostname,
-        port,
-        path: parsedUrl.pathname,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(data),
-        }
-    }, (res) => {
-        console.log(`📨 [Zyon] Zaya notificada (HTTP ${res.statusCode}): pedido #${orderId}`)
-    })
-
-    req.on('error', (err) => {
-        console.error(`❌ [Zyon] Erro ao notificar Zaya: ${err.message}`)
-    })
-
+        hostname: parsedUrl.hostname, port,
+        path: parsedUrl.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    }, res => { console.log(`📨 [Zyon] POST ${endpoint} → Zaya (HTTP ${res.statusCode})`) })
+    req.on('error', err => console.error(`❌ [Zyon] Erro ao chamar ${endpoint}: ${err.message}`))
     req.write(data)
     req.end()
 }
+
+function notifyZaya(orderId) {
+    postZaya('/notify-order', { orderId })
+}
+
+function enviarDadosParaZaya(fatDia, fatMes, aEnviar) {
+    postZaya('/update-faturamento', { fatDia, fatMes, aEnviar })
+    console.log(`💰 [Zyon] Dia: R$ ${fatDia || '?'} | Mês: R$ ${fatMes || '?'} | A Enviar: ${aEnviar || '?'}`)
+}
+
+function notifyZayaProducaoLucas(pedidosHoje, pedidosAmanha) {
+    postZaya('/notify-producao-lucas', { pedidosHoje, pedidosAmanha })
+}
+
+// Envia mensagem de texto ao dono via canal /zeon-notificacao
+function notifyDono(mensagem) {
+    postZaya('/zeon-notificacao', { mensagem })
+}
+
+// ─────────────────────────── Rotinas de coleta ───────────────────────────────
 
 async function checarNovosPedidos() {
     ultimaExecucao.pedidos = Date.now()
@@ -151,7 +147,6 @@ async function checarNovosPedidos() {
 
         console.log(`🛍️  [Zyon] NOVO PEDIDO DETECTADO: #${primeiroId}`)
         notifyZaya(primeiroId)
-
         ultimoPedidoVisto = primeiroId
         salvarUltimoPedido(primeiroId)
     } catch (err) {
@@ -159,66 +154,6 @@ async function checarNovosPedidos() {
     } finally {
         emColeta = false
     }
-}
-
-// Envia todos os dados Shopee para Zaya via POST /update-faturamento
-function enviarDadosParaZaya(fatDia, fatMes, aEnviar) {
-    const url = process.env.ZAYA_URL
-    if (!url) {
-        console.log('⚠️  [Zyon] ZAYA_URL não definida — dados não enviados à Zaya')
-        return
-    }
-
-    const data = JSON.stringify({ fatDia, fatMes, aEnviar })
-    let parsedUrl
-    try { parsedUrl = new URL(`${url}/update-faturamento`) } catch {
-        console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
-        return
-    }
-
-    const lib = parsedUrl.protocol === 'https:' ? https : http
-    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
-
-    const req = lib.request({
-        hostname: parsedUrl.hostname,
-        port,
-        path: parsedUrl.pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
-    }, res => {
-        console.log(`📨 [Zyon] Dados enviados à Zaya (HTTP ${res.statusCode}) — Dia: R$ ${fatDia || '?'}, Mês: R$ ${fatMes || '?'}, A Enviar: ${aEnviar || '?'}`)
-    })
-    req.on('error', err => console.error(`❌ [Zyon] Erro ao enviar dados: ${err.message}`))
-    req.write(data)
-    req.end()
-}
-
-function notifyZayaProducaoLucas(pedidos) {
-    const url = process.env.ZAYA_URL
-    if (!url) {
-        console.log('⚠️  [Zyon] ZAYA_URL não definida — aviso de produção ao Lucas não enviado')
-        return
-    }
-    const data = JSON.stringify({ pedidos })
-    let parsedUrl
-    try { parsedUrl = new URL(`${url}/notify-producao-lucas`) } catch {
-        console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
-        return
-    }
-    const lib = parsedUrl.protocol === 'https:' ? https : http
-    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
-    const req = lib.request({
-        hostname: parsedUrl.hostname,
-        port,
-        path: parsedUrl.pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
-    }, res => {
-        console.log(`📨 [Zyon] Zaya notificada — aviso de produção ao Lucas (HTTP ${res.statusCode}), ${pedidos.length} pedido(s)`)
-    })
-    req.on('error', err => console.error(`❌ [Zyon] Erro ao notificar Zaya (produção Lucas): ${err.message}`))
-    req.write(data)
-    req.end()
 }
 
 async function coletarEEnviarDados() {
@@ -230,14 +165,10 @@ async function coletarEEnviarDados() {
     emColeta = true
     try {
         console.log(`\n📊 [Zyon] Coletando dados Shopee — ${new Date().toLocaleTimeString('pt-BR')}`)
-
         const { fatDia, fatMes } = await coletarFaturamentoGerencial()
         const { orderText } = await coletarStatusPedidos()
-
         const m = orderText.match(/A Enviar\s*\((\d+)\)/i)
         const aEnviar = m ? m[1] : null
-
-        console.log(`💰 [Zyon] Dia: R$ ${fatDia || '?'} | Mês: R$ ${fatMes || '?'} | A Enviar: ${aEnviar || '?'}`)
         ultimosDados = { fatDia, fatMes, aEnviar, atualizadoEm: new Date().toISOString() }
         enviarDadosParaZaya(fatDia, fatMes, aEnviar)
     } catch (err) {
@@ -247,501 +178,44 @@ async function coletarEEnviarDados() {
     }
 }
 
-// ───────────────────────── Atendimento automático via Chat ─────────────────────────
+// ────────── Pedidos A Enviar — coleta intermediária e aviso ~17h ──────────────
 
-const CHAT_SYSTEM_PROMPT = `Você é Zyon, assistente virtual de atendimento ao cliente da loja.
-
-REGRAS CRÍTICAS — leia com atenção antes de gerar qualquer resposta:
-1. APRESENTAÇÃO SÓ NA PRIMEIRA MENSAGEM: apresente-se ("Olá! Sou o Zyon, assistente virtual da loja. Estou aqui para te ajudar! 😊") única e exclusivamente na primeira mensagem de uma conversa nova — ou seja, quando NÃO existir nenhuma mensagem anterior da Loja no histórico. Se já existir QUALQUER mensagem da Loja no histórico, está PROIBIDO se apresentar de novo (mesmo que reformulado, abreviado ou parcial) — vá direto ao assunto, como continuação natural de um papo que já está rolando.
-2. NUNCA REPITA UMA PERGUNTA JÁ RESPONDIDA: antes de perguntar qualquer coisa ao cliente, percorra TODO o histórico em busca da resposta — se o cliente já informou aquilo (nome, número, área de personalização, dados do pedido, etc.) em qualquer ponto da conversa, NÃO pergunte de novo; use a informação já dada e prossiga para o próximo passo.
-3. LEIA O HISTÓRICO INTEIRO ANTES DE RESPONDER, do início ao fim, não apenas a última mensagem — identifique o que já foi tratado e resolvido e responda apenas ao que ainda está em aberto, com tom natural e contínuo (sem repetir saudações, perguntas ou informações já dadas).
-
-INSTRUÇÕES GERAIS
-- Preste atenção a imagens/arquivos enviados pelo cliente (marcados na conversa como "[imagem/arquivo enviado]" em mensagens com remetente "Cliente") — eles fazem parte do contexto: podem ser a arte para personalização, comprovante, foto do produto recebido, foto da estampa, etc. Leve isso em conta ao decidir o que já foi resolvido e o que ainda precisa de resposta.
-- ATENÇÃO — NÃO CONFUNDIR IMAGEM DO CLIENTE COM CARD DO PRODUTO: o card/resumo do produto que aparece no início da conversa (com foto, título e preço do anúncio) é informação do PEDIDO, gerada automaticamente pela plataforma — NUNCA é uma imagem ou arte enviada pelo cliente. Considere como "imagem enviada pelo cliente" SOMENTE os itens marcados "[imagem/arquivo enviado]" dentro de mensagens cujo remetente seja "Cliente" na transcrição da conversa. Se o cliente não enviou nenhuma mensagem com esse marcador, ele NÃO enviou imagem — responda normalmente ao texto dele, sem mencionar ou agradecer por uma imagem que não existe.
-- Responda apenas utilizando informações presentes na Base de Conhecimento e no anúncio do produto.
-- Quando precisar confirmar características, medidas, cores, materiais, personalizações ou especificações, consulte o anúncio do produto.
-- Se uma informação não estiver disponível no anúncio ou na Base de Conhecimento, responda: "No momento não temos essa informação."
-- Nunca invente informações.
-- Seja cordial, objetivo e profissional.
-- RESPOSTAS CURTAS: para perguntas diretas e simples, responda em no máximo 3 linhas — direto ao ponto, sem rodeios nem explicações longas desnecessárias. Se não tiver certeza absoluta da resposta, NÃO especule nem tente "completar" a informação por conta própria — prefira encaminhar para atendimento humano (precisaHumano = true) a arriscar uma resposta incorreta.
-- Sempre que o cliente digitar "falar com atendente", responda: "Certo! Vou chamar um atendente para você. Antes, aqui está um resumo da nossa conversa: [resumo]. Em breve alguém entrará em contato. 😊"
-- RESUMO FINAL PARA HUMANO: sempre que a conversa for encaminhada para atendimento humano (precisaHumano = true), o campo "resumoParaDono" deve ser preenchido OBRIGATORIAMENTE neste formato exato:
-"📋 *Resumo para atendimento:*
-- Cliente: [nome]
-- Pedido: [id do pedido se disponível, ou "não informado"]
-- Assunto: [motivo do contato]
-- O que foi tratado: [resumo do que foi discutido]
-- O que precisa ser feito: [ação necessária]"
-- INFORMAÇÕES IMPORTANTES DO CLIENTE: sempre que o cliente fornecer NESTA interação uma informação relevante para o atendimento — área de personalização, nome, número, observação especial, prazo urgente, reclamação — preencha o campo "informacaoImportante" com uma frase curta e objetiva descrevendo o que foi informado (ex: "Cliente pediu personalização no lado direito do peito", "Cliente informou nome e número para a Camiseta do Brasil: João, 42"). Use null quando nada relevante foi informado nesta interação. Não repita uma informação já sinalizada em mensagens anteriores.
-- ÚLTIMA MENSAGEM: O Zyon deve sempre ser o último a responder na conversa. Quando o cliente encerrar com "ok", "obrigado", "entendi" ou similar — ou enviar um adesivo, figurinha, emoji, imagem sem texto, ou qualquer mensagem que indique que a conversa está sendo encerrada — responda com uma mensagem curta e cordial de encerramento. Exemplos:
-"Fico à disposição! 😊"
-"Qualquer dúvida, estamos aqui! 😊"
-"Foi um prazer ajudar! Estamos à disposição. 😊"
-"Obrigado pelo contato! Estamos à disposição. 😊"
-"Foi um prazer! Qualquer dúvida, estamos aqui. 😊"
-Não envie mais de uma mensagem de encerramento. Se já houver uma mensagem de encerramento do Zyon como última mensagem, não envie outra.
-
-BASE DE CONHECIMENTO
-ATRASO NA ENTREGA: Orientar o cliente a entrar em contato com a plataforma, pois não há acesso às informações logísticas.
-DEVOLUÇÃO E REEMBOLSO: O cliente pode solicitar devolução em até 30 dias após o recebimento diretamente nos detalhes da compra.
-GARANTIA: Garantia de 30 dias após o recebimento.
-TROCAS: A plataforma não realiza trocas. Orientar o cliente a solicitar a devolução e realizar uma nova compra.
-CAMISETA DO BRASIL: Solicitar nome e número do cliente para a personalização. ANTES de pedir, procure no histórico inteiro da conversa se o cliente já informou nome e número em alguma mensagem anterior — se já informou, NÃO peça de novo: confirme os dados recebidos e informe que o pedido está sendo processado. Exemplo: "Perfeito! Recebi os dados: Nome: [nome], Número: [número]. Seu pedido está sendo processado! 😊". Só peça os dados se eles realmente não constarem em nenhum ponto do histórico.
-PERSONALIZAÇÃO DOS DEMAIS PRODUTOS: O cliente deve enviar a arte final pronta pelo chat. Não criamos arte. Solicitar que o cliente confira se a imagem está em boa resolução antes do envio. Não nos responsabilizamos por imagens enviadas com baixa qualidade. Áreas máximas de personalização: Frente A3, Costas A3, Frente e costas: Frente 9x9cm / Costas 28x28cm. Essas regras não se aplicam à Camiseta do Brasil. Quando o cliente enviar uma foto do produto vestido ou uma foto tirada com celular da estampa, oriente que isso não é a arte adequada para personalização — a arte precisa ser o ARQUIVO da estampa (PNG com fundo transparente, preferencialmente). Exemplo de resposta: "Para personalização, precisamos do arquivo da arte em si, preferencialmente em PNG com fundo transparente — não uma foto da camiseta ou imagem tirada com celular. Você tem o arquivo da estampa? Pode ser enviado aqui no chat mesmo."
-CRIAÇÃO DE ARTE: A loja NÃO cria arte. O cliente deve enviar a arte final pronta. Nunca confirme, prometa ou sugira que a loja cria, desenha ou desenvolve artes — em nenhuma hipótese. Se ao ler o histórico você perceber que uma mensagem anterior da própria loja deu a entender que a arte seria criada pela loja, corrija educadamente nesta resposta com: "Pedimos desculpas pela confusão! Trabalhamos com personalização a partir da arte enviada pelo cliente — não criamos a arte do zero. Você precisaria enviar o arquivo da estampa pronto para prosseguirmos. 😊"
-PEDIDOS GRANDES / FARDAMENTO / ATACADO: Quando o cliente mencionar fardamento, pedido em quantidade (acima de 5 unidades), compra no atacado ou pedido corporativo, encaminhe IMEDIATAMENTE para atendimento humano (precisaHumano = true) — não tente negociar, orçar ou resolver por conta própria. Responda: "Para pedidos em maior quantidade ou fardamentos, vou encaminhar para um de nossos atendentes que poderá te ajudar melhor! 😊"
-CLIENTE INSATISFEITO OU RECLAMANDO: Quando o cliente demonstrar insatisfação, raiva ou reclamação — inclusive sobre uma informação recebida anteriormente na própria conversa — encaminhe para atendimento humano (precisaHumano = true) com o resumo completo da situação no campo "resumoParaDono", explicando o que gerou a insatisfação.
-ARTE JÁ ENVIADA PELA LOJA: Quando o histórico mostrar que a LOJA (não o cliente) já enviou uma imagem na conversa (mensagem marcada "[imagem/arquivo enviado]" com remetente "Loja"), isso significa que a arte já foi para produção. Nesse caso NÃO pergunte sobre personalização nem trate como um novo pedido de arte. Em vez disso:
-1. Responda ao cliente: "Olá! Sua arte já foi encaminhada para produção. Vi sua mensagem sobre [resumo do que o cliente disse] — vou informar nossa equipe para verificar. Em breve retornaremos! 😊"
-2. Defina precisaHumano = true
-3. No campo "resumoParaDono", inclua claramente: que a imagem foi enviada pela LOJA (não pelo cliente), que o cliente está pedindo alteração/correção, e qual foi exatamente a solicitação do cliente
-PEDIDOS A ENVIAR OU CLIENTES COBRANDO POSICIONAMENTO: Responder "No momento estamos com uma alta demanda de pedidos e nossa equipe está trabalhando para liberar todos os pedidos o mais rápido possível."
-PRAZO DE ENVIO: O prazo de envio SEMPRE está disponível no card de resumo do pedido, no campo "Enviar até: DD/MM/AAAA" (fornecido no contexto desta conversa como PRAZO DE ENVIO DESTE PEDIDO). Sempre que o cliente perguntar quando o pedido vai ser enviado, qual o prazo, "quando chega" ou similar, verifique esse campo e responda: "Olá! O prazo de envio do seu pedido é até [data do prazo informado no contexto]. Após a postagem, a entrega é gerenciada pela Shopee. 😊". NUNCA responda "No momento não temos essa informação" para perguntas sobre prazo de envio — essa informação está sempre disponível no card do pedido.
-CONFIRMAÇÃO DE ÁREA DE PERSONALIZAÇÃO: Sempre que o cliente enviar a arte para personalização, após confirmar o recebimento e a qualidade, pergunte em qual área deseja a personalização. Resposta sugerida: "A personalização será só no peito, nas costas, ou frente e costas? 😊"
-ARTE JÁ ENVIADA: Antes de pedir a arte de personalização, verifique no histórico se há alguma mensagem do CLIENTE marcada como "[imagem/arquivo enviado]" (ignore o card do produto no início da conversa — isso é informação do pedido, não uma arte enviada pelo cliente). Se o cliente já enviou, NÃO peça a arte novamente — reconheça que ela foi recebida e avance para a próxima etapa (confirmar qualidade, área de personalização, etc). Se o cliente NÃO enviou nenhuma imagem/arquivo, não diga que recebeu nada — siga normalmente a orientação de PERSONALIZAÇÃO DOS DEMAIS PRODUTOS.
-LOCALIZAÇÃO DA ARTE: Quando o cliente informar onde quer a personalização (ex: "lado direito do peito", "costas", "frente"), confirme a informação e registre. Resposta sugerida: "Perfeito! Arte no [local informado]. Vou registrar isso para a produção. ✅"
-RESUMO DE CONFIRMAÇÃO: Após o cliente confirmar a área de personalização e a qualidade da arte, envie um resumo completo. Antes de enviar o resumo, verifique no cabeçalho da conversa o ID do pedido e extraia a cor da camiseta e o tamanho do pedido — essas informações são OBRIGATÓRIAS no resumo. Use o seguinte formato:
-"✅ *Resumo do pedido de personalização:*
-- Produto: [nome do produto]
-- Arte: recebida e aprovada
-- Área: [frente / costas / peito esquerdo e costas]
-- Tamanho da impressão: [9x9cm peito / 28x28cm costas / A3 — conforme área escolhida]
-- Cor da camiseta: [extrair do pedido via ID]
-- Tamanho da camiseta: [extrair do pedido via ID]
-
-Tudo certo! Seu pedido está confirmado e seguirá para produção. Qualquer dúvida, estamos à disposição! 😊"
-Para obter a cor e o tamanho da camiseta, consulte os detalhes do pedido disponíveis no cabeçalho da conversa (junto ao ID do pedido e ao prazo de envio). Se não conseguir extrair essas informações dali, pergunte ao cliente antes de enviar o resumo — nunca envie o resumo com esses campos em branco ou inventados.
-SUGESTÃO DE PRODUTOS: Quando o contexto da conversa permitir (cliente perguntando sobre outros produtos, cliente que fez um pedido pequeno, cliente satisfeito, etc), você pode sugerir outros produtos da loja com o link direto, usando a lista de OUTROS PRODUTOS DA LOJA fornecida no contexto (use o link exatamente como informado). Se não houver outros produtos disponíveis no contexto, não sugira nenhum. Exemplo de resposta: "Aproveite e conheça também nossos outros modelos! 😊 [link do produto]"
-
-QUANDO NÃO RESPONDER E ENCAMINHAR PARA ANÁLISE HUMANA:
-- Cliente solicitar "falar com atendente"
-- Problemas de estoque
-- Reclamações complexas
-- Solicitações de exceção
-- Divergência entre anúncio e Base de Conhecimento
-- Necessidade de autorização especial
-- Assuntos não previstos no anúncio ou na Base de Conhecimento
-- Pedidos grandes, fardamento, atacado ou pedido corporativo (ver PEDIDOS GRANDES / FARDAMENTO / ATACADO)
-- Cliente insatisfeito, irritado ou reclamando — inclusive de algo dito anteriormente na conversa (ver CLIENTE INSATISFEITO OU RECLAMANDO)
-
-EM TODOS OS CASOS DE ENCAMINHAMENTO HUMANO:
-1. Gerar resumo da conversa com: nome do cliente, produto envolvido, motivo do contato, o que foi tentado resolver e por que precisa de atendimento humano
-2. Enviar o resumo para o cliente no chat
-3. Notificar o dono via Zaya com o resumo completo`
-
-// Pede à IA a resposta ao cliente e, no mesmo retorno em JSON, se a conversa precisa
-// de atendimento humano e o resumo a enviar ao dono — assim o código decide com segurança
-// sem depender de interpretar texto livre.
-async function gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem, prazoEnvio) {
-    const transcricao = mensagens.map(m => `${m.remetente === 'cliente' ? 'Cliente' : 'Loja'}: ${m.texto}`).join('\n')
-
-    const contextoProduto = infoProduto
-        ? `\n\nINFORMAÇÕES DO ANÚNCIO DO PRODUTO EM DISCUSSÃO (use como referência):\n${JSON.stringify(infoProduto).substring(0, 4000)}`
-        : '\n\nNenhuma informação de produto disponível para esta conversa — se a dúvida depender do anúncio, responda "No momento não temos essa informação."'
-
-    const contextoPrazo = prazoEnvio
-        ? `\n\nPRAZO DE ENVIO DESTE PEDIDO (campo "Enviar até" do card de resumo do pedido): ${prazoEnvio}`
-        : '\n\nNenhum prazo de envio foi identificado no card do pedido desta conversa (situação rara — só ocorre quando a conversa não está associada a um pedido). Se o cliente perguntar sobre prazo, NÃO diga que não temos essa informação — oriente-o a conferir o prazo de envio diretamente nos detalhes do pedido no app/site da Shopee.'
-
-    // Catálogo de outros produtos já conhecidos (cache local) para a instrução SUGESTÃO DE
-    // PRODUTOS — sem isso a IA não teria links reais para oferecer. Exclui o produto em discussão.
-    const outrosProdutos = Object.values(produtos)
-        .filter(p => p.titulo && p.url && p.produtoId !== infoProduto?.produtoId)
-        .map(p => `- ${p.titulo}: ${p.url}`)
-    const contextoCatalogo = outrosProdutos.length
-        ? `\n\nOUTROS PRODUTOS DA LOJA DISPONÍVEIS PARA SUGESTÃO (use o link exatamente como informado):\n${outrosProdutos.join('\n').substring(0, 2000)}`
-        : '\n\nNenhum outro produto disponível no catálogo local para sugestão no momento — não sugira produtos nesta conversa.'
-
-    const formatoSaida = `\n\nResponda EXCLUSIVAMENTE em JSON, neste formato exato (sem texto fora do JSON):
-{"precisaHumano": true ou false, "resposta": "mensagem a enviar ao cliente agora no chat — a resposta normal de atendimento, ou, quando precisaHumano for true, a mensagem de encaminhamento com o resumo já embutido conforme instruído", "resumoParaDono": "resumo completo da conversa no formato indicado em RESUMO FINAL PARA HUMANO — use null quando precisaHumano for false", "informacaoImportante": "frase curta descrevendo uma informação relevante fornecida pelo cliente NESTA interação, conforme INFORMAÇÕES IMPORTANTES DO CLIENTE — use null quando nada relevante foi informado agora"}`
-
-    const messages = [{ role: 'system', content: CHAT_SYSTEM_PROMPT + contextoProduto + contextoPrazo + contextoCatalogo + formatoSaida }]
-    if (primeiraMensagem) {
-        messages.push({ role: 'system', content: 'Esta é a primeira mensagem desta conversa — comece com a apresentação indicada nas instruções.' })
-    } else {
-        messages.push({ role: 'system', content: 'Esta conversa já tem mensagens anteriores da loja — NÃO se apresente novamente. Responda direto, como continuação natural do que já foi conversado.' })
-    }
-    messages.push({ role: 'user', content: `Cliente: ${nomeCliente}\n\nConversa completa até agora:\n${transcricao}\n\nGere a próxima resposta da loja.` })
-
-    const response = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 700,
-        response_format: { type: 'json_object' },
-        messages,
-    })
-
-    try {
-        return JSON.parse(response.choices[0].message.content)
-    } catch (err) {
-        console.error('❌ [Zyon/chat] IA não retornou JSON válido:', err.message)
-        return { precisaHumano: false, resposta: 'No momento não temos essa informação.', resumoParaDono: null, informacaoImportante: null }
-    }
-}
-
-// Notifica o dono (via Zaya) quando uma conversa precisa de atendimento humano
-function notificarAtendimentoHumano(nomeCliente, ultimaMensagem, resumo) {
-    const url = process.env.ZAYA_URL
-    if (!url) {
-        console.log(`⚠️  [Zyon] ZAYA_URL não definida — ${nomeCliente} precisa de atendimento humano, mas Zaya não foi notificada`)
-        return
-    }
-
-    const data = JSON.stringify({ nomeCliente, ultimaMensagem, resumo })
-    let parsedUrl
-    try { parsedUrl = new URL(`${url}/notify-chat-human`) } catch {
-        console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
-        return
-    }
-
-    const lib = parsedUrl.protocol === 'https:' ? https : http
-    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
-
-    const req = lib.request({
-        hostname: parsedUrl.hostname,
-        port,
-        path: parsedUrl.pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
-    }, res => {
-        console.log(`📨 [Zyon] Dono notificado para atendimento humano (HTTP ${res.statusCode}): ${nomeCliente}`)
-    })
-    req.on('error', err => console.error(`❌ [Zyon] Erro ao notificar atendimento humano: ${err.message}`))
-    req.write(data)
-    req.end()
-}
-
-// Notifica o dono (via Zaya) quando o cliente fornece, durante o atendimento, uma informação
-// importante (área de personalização, nome/número, observação especial, prazo urgente, reclamação)
-function notificarAtualizacaoAtendimento(nomeCliente, informacao) {
-    const url = process.env.ZAYA_URL
-    if (!url) {
-        console.log(`⚠️  [Zyon] ZAYA_URL não definida — informação importante de ${nomeCliente} não notificada: ${informacao}`)
-        return
-    }
-
-    const data = JSON.stringify({ nomeCliente, informacao })
-    let parsedUrl
-    try { parsedUrl = new URL(`${url}/notify-chat-update`) } catch {
-        console.error(`❌ [Zyon] ZAYA_URL inválida: ${url}`)
-        return
-    }
-
-    const lib = parsedUrl.protocol === 'https:' ? https : http
-    const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
-
-    const req = lib.request({
-        hostname: parsedUrl.hostname,
-        port,
-        path: parsedUrl.pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
-    }, res => {
-        console.log(`📌 [Zyon] Dono notificado sobre informação importante (HTTP ${res.statusCode}): ${nomeCliente} — ${informacao}`)
-    })
-    req.on('error', err => console.error(`❌ [Zyon] Erro ao notificar informação importante: ${err.message}`))
-    req.write(data)
-    req.end()
-}
-
-// Retorna as informações do produto a partir do cache em produtos.json (chave = produtoId,
-// extraído diretamente do checkbox no painel da estação do chat — estável e confiável).
-// Se ainda não estiver salvo, extrai do anúncio via Puppeteer (cadastro → 3 pontinhos →
-// visualizar página) usando o nome para localizá-lo, e salva sob o produtoId vindo do chat.
-async function obterInfoProduto(page, produtoId, produtoNome) {
-    if (!produtoId && !produtoNome) return null
-
-    if (produtoId && produtos[produtoId]) {
-        console.log(`📦 [Zyon/produto] Usando dados salvos em produtos.json: #${produtoId} — ${produtos[produtoId].titulo}`)
-        return produtos[produtoId]
-    }
-    if (!produtoNome) return null
-
-    console.log(`🔎 [Zyon/produto] Produto #${produtoId || '?'} não encontrado em produtos.json — extraindo do anúncio: ${produtoNome}`)
-    try {
-        const info = await extrairInfoProduto(page, produtoNome)
-        if (info) {
-            const chave = produtoId || info.produtoId
-            if (chave) {
-                info.produtoId = chave
-                produtos[chave] = info
-                salvarJSON(PRODUTOS_FILE, produtos)
-                console.log(`💾 [Zyon/produto] Salvo em produtos.json: #${chave} — ${info.titulo}`)
-            }
-        }
-        return info
-    } catch (err) {
-        console.error(`❌ [Zyon/produto] Erro ao extrair informações do produto: ${err.message}`)
-        return null
-    }
-}
-
-// Processa a conversa atualmente aberta: lê o histórico, identifica o produto, gera a
-// resposta com IA e envia — encaminhando para atendimento humano com resumo quando necessário
-async function processarConversaAberta(page, nomeCliente) {
-    const { mensagens, produtoId, produtoNome, prazoEnvio } = await lerConversaCompleta(page)
-    if (mensagens.length === 0) return
-
-    const ultimaMsgCliente = [...mensagens].reverse().find(m => m.remetente === 'cliente')
-    if (!ultimaMsgCliente) return
-
-    // A interface web do Shopee não expõe IDs nem timestamps estáveis de mensagem — então usamos
-    // a POSIÇÃO da última mensagem do cliente na conversa (quantas mensagens dele já existem)
-    // combinada com o texto como identificador. Isso evita o bug de pular uma mensagem nova só
-    // porque o texto coincide com uma anterior (ex: cliente manda "Ok" de novo, ou reenvia uma
-    // imagem) — a posição muda a cada nova mensagem, então o ID muda e o Zyon responde de novo.
-    const posicaoUltimaCliente = mensagens.filter(m => m.remetente === 'cliente').length
-    const idMensagem = `${posicaoUltimaCliente}::${ultimaMsgCliente.texto}`.substring(0, 200)
-    if (mensagensRespondidas[nomeCliente] === idMensagem) {
-        console.log(`⏭️  [Zyon/chat] ${nomeCliente}: última mensagem já respondida, pulando`)
-        return
-    }
-
-    const primeiraMensagem = !mensagens.some(m => m.remetente === 'loja')
-    console.log(`🧑 [Zyon/chat] ${nomeCliente} — produto: ${produtoNome || '(não identificado)'}${produtoId ? ` (#${produtoId})` : ''} — gerando resposta...`)
-
-    const infoProduto = await obterInfoProduto(page, produtoId, produtoNome)
-    const resultado = await gerarRespostaChat(nomeCliente, mensagens, infoProduto, primeiraMensagem, prazoEnvio)
-
-    await enviarMensagemNoChat(page, resultado.resposta)
-
-    if (resultado.precisaHumano) {
-        console.log(`🙋 [Zyon/chat] ${nomeCliente}: encaminhado para atendimento humano`)
-
-        // Quando a LOJA (não o cliente) já enviou uma imagem na conversa, a arte já foi
-        // para produção — destacamos isso no início do resumo enviado ao dono para que
-        // ele perceba de cara que se trata de uma solicitação de alteração, não de um
-        // pedido de personalização novo
-        const arteEnviadaPelaLoja = mensagens.some(m => m.remetente === 'loja' && m.texto.includes('[imagem/arquivo enviado]'))
-        let resumo = resultado.resumoParaDono || resultado.resposta
-        if (arteEnviadaPelaLoja) {
-            resumo = `⚠️ Arte já enviada para produção — cliente solicitou alteração: ${ultimaMsgCliente.texto}\n\n${resumo}`
-        }
-
-        notificarAtendimentoHumano(nomeCliente, ultimaMsgCliente.texto, resumo)
-    }
-
-    if (resultado.informacaoImportante) {
-        console.log(`📌 [Zyon/chat] ${nomeCliente}: informação importante identificada — ${resultado.informacaoImportante}`)
-        notificarAtualizacaoAtendimento(nomeCliente, resultado.informacaoImportante)
-    }
-
-    mensagensRespondidas[nomeCliente] = idMensagem
-    salvarJSON(RESPONDIDAS_FILE, mensagensRespondidas)
-}
-
-const MENSAGEM_SOLICITAR_ARTE = 'Olá! Notamos que seu pedido de personalização ainda não possui a arte enviada. Para prosseguirmos com a produção, por favor envie a arte final pronta aqui no chat, preferencialmente em PNG com fundo transparente e boa resolução. 😊'
-
-// Verdadeiro quando o registro de arteSolicitada para o pedido já é de hoje — usado para
-// nunca solicitar a arte duas vezes no mesmo dia, mas permitir nova checagem em dias seguintes
-// (o cliente pode ter enviado a arte depois, ou ainda não ter enviado e merecer um lembrete).
-function verificadoHoje(registro) {
-    if (!registro?.verificadoEm) return false
-    return new Date(registro.verificadoEm).toDateString() === new Date().toDateString()
-}
-
-// Verifica TODOS os pedidos em "A Enviar — Em aberto" (independente do nome do produto): para
-// cada um, abre o chat do comprador clicando direto no ícone do card do pedido (abrirChatDoPedido
-// — muito mais confiável que buscar pelo nome dentro do chat) e, se ele ainda não enviou
-// nenhuma imagem/arquivo na conversa, solicita a arte educadamente. Roda só quando não há
-// conversas pendentes no chat (chamada a partir de verificarChatClientes), reaproveitando a
-// mesma sessão/browser. Registra cada pedido verificado em arte_solicitada.json para nunca
-// solicitar duas vezes no mesmo dia.
-async function verificarPedidosSemArte(browser, page) {
-    console.log(`\n🎨 [Zyon] Verificando pedidos em aberto sem arte enviada...`)
-    const pedidos = await listarPedidosEmAberto(page)
-    pedidos.forEach((p, i) => {
-        console.log(`🎨 [Zyon/arte] ${i + 1}/${pedidos.length} — Pedido #${p.orderId} | Comprador: ${p.comprador || '?'} | Produto: ${p.produtoNome}`)
-    })
-    const pendentes = pedidos.filter(p => !verificadoHoje(arteSolicitada[p.orderId]))
-
-    if (pendentes.length === 0) {
-        console.log('🎨 [Zyon] Nenhum pedido novo para verificar hoje')
-        return
-    }
-    console.log(`🎨 [Zyon] ${pendentes.length} pedido(s) a verificar`)
-
-    for (const pedido of pendentes) {
-        try {
-            // O passo anterior pode ter trocado de aba/navegado para fora da listagem de
-            // pedidos (chat abre em aba nova ou substitui a atual) — garante que estamos
-            // na listagem antes de procurar o ícone de chat do próximo pedido
-            if (!page.url().includes('/portal/sale/order')) {
-                await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-                await new Promise(r => setTimeout(r, 8000))
-            }
-
-            const chat = await abrirChatDoPedido(page, browser, pedido.orderId)
-            if (!chat) {
-                console.log(`⚠️  [Zyon/arte] Pedido #${pedido.orderId} — não foi possível abrir o chat pelo ícone do pedido, pulando`)
-                continue
-            }
-
-            const { mensagens } = await lerConversaCompleta(chat.pagina)
-            const arteEnviada = mensagens.some(m => m.remetente === 'cliente' && m.texto.includes('[imagem/arquivo enviado]'))
-
-            if (arteEnviada) {
-                console.log(`✅ [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador || '?'} já enviou a arte`)
-            } else {
-                console.log(`📨 [Zyon/arte] Pedido #${pedido.orderId} — ${pedido.comprador || '?'} ainda não enviou a arte, solicitando...`)
-                await enviarMensagemNoChat(chat.pagina, MENSAGEM_SOLICITAR_ARTE)
-            }
-
-            if (chat.abaNova) await chat.pagina.close().catch(() => {})
-
-            arteSolicitada[pedido.orderId] = {
-                comprador: pedido.comprador,
-                produtoNome: pedido.produtoNome,
-                arteEnviada,
-                verificadoEm: new Date().toISOString(),
-            }
-            salvarJSON(ARTE_SOLICITADA_FILE, arteSolicitada)
-        } catch (err) {
-            console.error(`❌ [Zyon/arte] Erro ao verificar pedido #${pedido.orderId}: ${err.message}`)
-        }
-    }
-}
-
-// A cada 5 min: abre o chat e processa as conversas com mensagens não respondidas
-// Roda `tarefa(browser, page)` num browser novo. Se o browser do Puppeteer fechar
-// inesperadamente (crash do Chrome, processo morto, etc.) durante a execução, a Promise
-// pendente é rejeitada (em vez de ficar travada para sempre), o browser é relançado
-// automaticamente e a operação é tentada mais uma vez.
-async function executarComBrowser(nomeOperacao, tarefa, tentativas = 2) {
-    for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
-        let browser
-        let fechouInesperadamente = false
-        try {
-            browser = await launchBrowser(resolverChrome())
-            browser.once('disconnected', () => { fechouInesperadamente = true })
-
-            const page = await browser.newPage()
-            await configurarPagina(page)
-
-            const desconexao = new Promise((_, reject) => {
-                browser.once('disconnected', () => reject(new Error(`Browser do Puppeteer fechou inesperadamente durante ${nomeOperacao}`)))
-            })
-
-            await Promise.race([tarefa(browser, page), desconexao])
-            return
-        } catch (err) {
-            console.error(`❌ [Zyon] Erro em ${nomeOperacao} (tentativa ${tentativa}/${tentativas}):`, err.message)
-            if (fechouInesperadamente && tentativa < tentativas) {
-                console.log(`🔁 [Zyon] Reabrindo o browser e tentando "${nomeOperacao}" novamente...`)
-                continue
-            }
-            throw err
-        } finally {
-            if (browser && browser.isConnected()) {
-                try { await browser.close() } catch {}
-            }
-        }
-    }
-}
-
-async function verificarChatClientes() {
-    ultimaExecucao.chat = Date.now()
+async function atualizarPedidosAEnviar() {
     if (emColeta) {
-        console.log('⏭️  [Zyon] Browser ocupado — verificação de chat adiada')
+        console.log('⏭️  [Zyon] Browser ocupado — atualização de pedidos adiada')
         return
     }
     emColeta = true
     try {
-        console.log(`\n💬 [Zyon] Verificando chat de clientes... ${new Date().toLocaleTimeString('pt-BR')}`)
-        await executarComBrowser('verificação de chat', async (browser, page) => {
-            await abrirChat(page)
-
-            // Conversas já abertas neste ciclo — passadas como filtro para abrirProximaConversaNaoRespondida
-            // para nunca reabrir a mesma conversa duas vezes na mesma rodada (evita loop)
-            const conversasVisitadas = []
-            let semConversasPendentes = false
-
-            // Máximo 3 conversas por ciclo — evita ficar preso processando uma fila grande
-            for (let i = 0; i < 3; i++) {
-                const cliente = await abrirProximaConversaNaoRespondida(page, conversasVisitadas)
-                if (!cliente) {
-                    semConversasPendentes = true
-                    break
-                }
-                conversasVisitadas.push(cliente)
-                try {
-                    await processarConversaAberta(page, cliente)
-                } catch (err) {
-                    console.error(`❌ [Zyon/chat] Erro ao processar conversa de ${cliente}: ${err.message}`)
-                }
-                await abrirChat(page) // volta à lista antes de procurar a próxima conversa pendente
-                console.log(`⏳ [Zyon/chat] Aguardando antes da próxima conversa...`)
-                await new Promise(r => setTimeout(r, 8000 + Math.floor(Math.random() * 7000)))
-            }
-
-            // Verificação de pedidos sem arte só roda quando o chat está em dia — não
-            // queremos atrasar o atendimento normal por causa dela
-            if (semConversasPendentes) {
-                try {
-                    await verificarPedidosSemArte(browser, page)
-                } catch (err) {
-                    console.error('❌ [Zyon/arte] Erro ao verificar pedidos sem arte:', err.message)
-                }
-            }
-        })
+        console.log(`\n📦 [Zyon] Atualizando lista de pedidos A Enviar — ${new Date().toLocaleTimeString('pt-BR')}`)
+        const resultado = await coletarPedidosAEnviar()
+        ultimosPedidosAEnviar = { ...resultado, atualizadoEm: new Date().toISOString() }
+        console.log(`📦 [Zyon] Atualizado — HOJE: ${resultado.hoje.length}, AMANHÃ: ${resultado.amanha.length}, Outros: ${resultado.outros.length}`)
     } catch (err) {
-        console.error('❌ [Zyon] Erro ao verificar chat:', err.message)
-    } finally {
-        emColeta = false
-    }
-}
-
-// Uma vez por dia: revisita os anúncios já salvos em produtos.json para capturar mudanças
-async function atualizarProdutosSalvos() {
-    const ids = Object.keys(produtos)
-    if (ids.length === 0) return
-    if (emColeta) {
-        console.log('⏭️  [Zyon] Browser ocupado — atualização diária de produtos adiada')
-        return
-    }
-
-    emColeta = true
-    try {
-        console.log(`\n🔄 [Zyon] Atualizando ${ids.length} produto(s) salvos em produtos.json — ${new Date().toLocaleTimeString('pt-BR')}`)
-        await executarComBrowser('atualização diária de produtos', async (browser, page) => {
-            for (const id of ids) {
-                try {
-                    const info = await extrairInfoProduto(page, produtos[id].titulo)
-                    if (info && info.produtoId) {
-                        produtos[info.produtoId] = info
-                        console.log(`🔄 [Zyon/produto] Atualizado: #${info.produtoId} — ${info.titulo}`)
-                    }
-                } catch (err) {
-                    console.error(`❌ [Zyon/produto] Erro ao atualizar produto #${id}: ${err.message}`)
-                }
-            }
-            salvarJSON(PRODUTOS_FILE, produtos)
-        })
-    } catch (err) {
-        console.error('❌ [Zyon] Erro na atualização diária de produtos:', err.message)
+        console.error('❌ [Zyon] Erro ao atualizar pedidos A Enviar:', err.message)
     } finally {
         emColeta = false
     }
 }
 
 async function avisarLucasProducao() {
-    ultimaExecucao.lucas17h = Date.now()
     if (emColeta) {
         console.log('⏭️  [Zyon] Browser ocupado — aviso de produção ao Lucas adiado')
         return
     }
     emColeta = true
     try {
-        console.log(`\n🎨 [Zyon] Coletando pedidos em aberto para aviso diário ao Lucas — ${new Date().toLocaleTimeString('pt-BR')}`)
-        await executarComBrowser('aviso de produção Lucas', async (browser, page) => {
-            const pedidos = await listarPedidosEmAberto(page)
-            if (pedidos.length === 0) {
-                console.log('🎨 [Zyon] Nenhum pedido em "A Enviar" — aviso ao Lucas não necessário')
-                return
-            }
-            console.log(`🎨 [Zyon] ${pedidos.length} pedido(s) em aberto — notificando Lucas via Zaya`)
-            notifyZayaProducaoLucas(pedidos)
-        })
+        console.log(`\n🎨 [Zyon] Coletando pedidos para aviso ao Lucas — ${new Date().toLocaleTimeString('pt-BR')}`)
+        const resultado = await coletarPedidosAEnviar()
+        ultimosPedidosAEnviar = { ...resultado, atualizadoEm: new Date().toISOString() }
+
+        const total = resultado.hoje.length + resultado.amanha.length
+        if (total === 0) {
+            console.log('🎨 [Zyon] Nenhum pedido urgente — aviso ao Lucas não necessário')
+            return
+        }
+        console.log(`🎨 [Zyon] HOJE: ${resultado.hoje.length} | AMANHÃ: ${resultado.amanha.length} — notificando Lucas`)
+        notifyZayaProducaoLucas(resultado.hoje, resultado.amanha)
     } catch (err) {
         console.error('❌ [Zyon] Erro ao coletar pedidos para aviso ao Lucas:', err.message)
     } finally {
@@ -749,21 +223,165 @@ async function avisarLucasProducao() {
     }
 }
 
-const INTERVALO_MS = 30 * 60 * 1000
-const INTERVALO_DADOS_MS = 60 * 60 * 1000
-const INTERVALO_CHAT_MS = 10 * 60 * 1000
-const INTERVALO_PRODUTOS_MS = 24 * 60 * 60 * 1000
-const INTERVALO_LUCAS_17H_MS = 24 * 60 * 60 * 1000
+// ─────────────────── Boost de anúncios (~4h com variação ±20min) ─────────────
+
+async function executarBoost() {
+    ultimaExecucao.boost = Date.now()
+    if (emColeta) {
+        console.log('⏭️  [Zyon] Browser ocupado — boost adiado')
+        return
+    }
+    emColeta = true
+    try {
+        console.log(`\n🚀 [Zyon] Impulsionando anúncios — ${new Date().toLocaleTimeString('pt-BR')}`)
+        const resultado = await impulsionarAnuncios()
+
+        // Registra log de boost
+        const log = carregarJSON(BOOST_LOG_FILE, [])
+        log.push(resultado)
+        if (log.length > 100) log.splice(0, log.length - 100)
+        salvarJSON(BOOST_LOG_FILE, log)
+
+        if (resultado.clicados > 0) {
+            console.log(`🚀 [Zyon/boost] ${resultado.clicados} produto(s) impulsionados`)
+        }
+    } catch (err) {
+        console.error('❌ [Zyon] Erro ao impulsionar anúncios:', err.message)
+    } finally {
+        emColeta = false
+    }
+}
+
+// ────────────────── Verificação de Ads + Financeiro (2-3x/dia) ───────────────
+
+async function verificarAdsEFinanceiro() {
+    ultimaExecucao.ads = Date.now()
+    if (emColeta) {
+        console.log('⏭️  [Zyon] Browser ocupado — verificação de ads adiada')
+        return
+    }
+    emColeta = true
+    try {
+        console.log(`\n💳 [Zyon] Verificando Ads + Financeiro — ${new Date().toLocaleTimeString('pt-BR')}`)
+
+        // Saldo Ads
+        const ads = await verificarSaldoAds()
+        if (ads.saldoBaixo) {
+            const msg = `⚠️ *[Zyon] Saldo de Shopee Ads baixo!*\n\nSaldo atual: R$ ${ads.saldo?.toFixed(2) ?? '?'}\nGasto hoje: R$ ${ads.gastoDia?.toFixed(2) ?? '?'}\n\n_Recarregue manualmente para não pausar os anúncios._`
+            notifyDono(msg)
+            console.log(`⚠️ [Zyon/ads] Saldo baixo (R$ ${ads.saldo?.toFixed(2)}) — dono notificado`)
+        }
+
+        // Renda + Carteira
+        const renda = await coletarRenda()
+        const carteira = await coletarSaldoCarteira()
+
+        console.log(`💰 [Zyon] Renda pendente: R$ ${renda.rendaPendente ?? '?'} | Carteira: R$ ${carteira.saldo ?? '?'}`)
+
+        return { ads, renda, carteira }
+    } catch (err) {
+        console.error('❌ [Zyon] Erro ao verificar ads/financeiro:', err.message)
+        return null
+    } finally {
+        emColeta = false
+    }
+}
+
+// ────────────── Informações Gerenciais + Resumo IA (~20h-21h) ─────────────────
+
+async function coletarRelatorioGerencial() {
+    ultimaExecucao.gerencial = Date.now()
+    if (emColeta) {
+        console.log('⏭️  [Zyon] Browser ocupado — relatório gerencial adiado')
+        return
+    }
+    emColeta = true
+    try {
+        console.log(`\n📊 [Zyon] Coletando métricas gerenciais — ${new Date().toLocaleTimeString('pt-BR')}`)
+        const metricas = await coletarMetricasCompletas()
+        ultimasMetricas = metricas
+
+        // Gera resumo via Groq
+        const resumo = await groq.chat.completions.create({
+            model: 'llama-3.3-70b-versatile',
+            max_tokens: 400,
+            messages: [{
+                role: 'user',
+                content: `Você é um assistente de loja Shopee. Analise estes dados e gere um resumo executivo em PT-BR em no máximo 8 linhas: situação geral, top produtos se disponível, alertas importantes.
+
+Dados:
+- Faturamento do dia: R$ ${metricas.fatDia ?? '?'}
+- Pedidos do mês: ${metricas.totalPedidosMes ?? '?'}
+- Taxa de conversão: ${metricas.taxaConversao ?? '?'}%
+- Pedidos A Enviar HOJE: ${ultimosPedidosAEnviar.hoje.length}
+- Pedidos A Enviar AMANHÃ: ${ultimosPedidosAEnviar.amanha.length}
+- Texto da página: ${(metricas.resumoTexto || '').substring(0, 800)}
+
+Seja direto. Comece com "📊 Situação:"`,
+            }],
+        }).then(r => r.choices[0].message.content.trim()).catch(() => null)
+
+        if (resumo) {
+            console.log(`📊 [Zyon] Resumo gerencial gerado`)
+            return { metricas, resumo }
+        }
+        return { metricas, resumo: null }
+    } catch (err) {
+        console.error('❌ [Zyon] Erro ao coletar relatório gerencial:', err.message)
+        return null
+    } finally {
+        emColeta = false
+    }
+}
+
+// ─────────────────────── Relatório Consolidado (PARTE C) ─────────────────────
+
+async function enviarRelatorioConsolidado() {
+    console.log(`\n🌙 [Zyon] Gerando relatório consolidado — ${new Date().toLocaleTimeString('pt-BR')}`)
+    try {
+        const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+
+        const linhas = [
+            `📋 *Resumo Zyon — ${hoje}*`,
+            ``,
+            `🛍️ Pedidos A Enviar: ${ultimosPedidosAEnviar.total} total (${ultimosPedidosAEnviar.hoje.length} urgentes hoje, ${ultimosPedidosAEnviar.amanha.length} amanhã)`,
+        ]
+
+        if (ultimosDados.fatDia) linhas.push(`💰 Faturamento do dia: R$ ${ultimosDados.fatDia}`)
+        if (ultimosDados.fatMes) linhas.push(`📈 Faturamento do mês: R$ ${ultimosDados.fatMes}`)
+
+        if (ultimasMetricas) {
+            if (ultimasMetricas.totalPedidosMes) linhas.push(`📦 Pedidos no mês: ${ultimasMetricas.totalPedidosMes}`)
+            if (ultimasMetricas.taxaConversao) linhas.push(`🎯 Conversão: ${ultimasMetricas.taxaConversao}%`)
+        }
+
+        // Inclui resumo gerencial se disponível
+        if (ultimasMetricas?.resumo) {
+            linhas.push(``, ultimasMetricas.resumo)
+        }
+
+        linhas.push(``, `_Próxima atualização: amanhã cedo._`)
+
+        const mensagem = linhas.join('\n')
+        notifyDono(mensagem)
+        console.log(`📨 [Zyon] Relatório consolidado enviado ao dono`)
+    } catch (err) {
+        console.error('❌ [Zyon] Erro ao enviar relatório consolidado:', err.message)
+    }
+}
+
+// ─────────────────────────── Endpoints HTTP ──────────────────────────────────
+
 const ZYON_PORT = Number(process.env.ZYON_PORT) || 3001
 
-// Servidor HTTP: recebe solicitações imediatas da Zaya
 const zyonServer = http.createServer(async (req, res) => {
+
     if (req.method === 'GET' && req.url === '/dados') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, ...ultimosDados }))
+        res.end(JSON.stringify({ ok: true, ...ultimosDados, pedidosAEnviar: ultimosPedidosAEnviar }))
 
     } else if (req.method === 'POST' && req.url === '/solicitar-faturamento') {
-        console.log(`\n📥 [Zyon] Coleta imediata solicitada pela Zaya — ${new Date().toLocaleTimeString('pt-BR')}`)
+        console.log(`\n📥 [Zyon] Coleta imediata solicitada — ${new Date().toLocaleTimeString('pt-BR')}`)
         await coletarEEnviarDados()
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
@@ -779,35 +397,132 @@ const zyonServer = http.createServer(async (req, res) => {
                     res.end(JSON.stringify({ ok: false, error: 'orderIds inválido' }))
                     return
                 }
-                console.log(`\n🔍 [Zyon] Verificando despacho de ${orderIds.length} pedido(s) (lista ${listaId || '?'}) — ${new Date().toLocaleTimeString('pt-BR')}`)
+                console.log(`\n🔍 [Zyon] Verificando despacho de ${orderIds.length} pedido(s) (lista ${listaId || '?'})`)
 
                 if (emColeta) {
-                    console.log('⏭️  [Zyon] Browser ocupado — verificação de despacho não pode rodar agora')
                     res.writeHead(503, { 'Content-Type': 'application/json' })
                     res.end(JSON.stringify({ ok: false, error: 'browser ocupado, tente novamente em alguns minutos' }))
                     return
                 }
 
                 emColeta = true
-                let enviados = []
-                let pendentes = []
+                let resultados = []
                 try {
-                    await executarComBrowser('verificação de despacho', async (browser, page) => {
-                        const emAberto = await listarPedidosEmAberto(page)
-                        const idsEmAberto = new Set(emAberto.map(p => p.orderId))
-                        enviados = orderIds.filter(id => !idsEmAberto.has(id))
-                        pendentes = orderIds.filter(id => idsEmAberto.has(id))
-                    })
+                    const browser = await launchBrowser(resolverChrome())
+                    try {
+                        const page = await browser.newPage()
+                        await configurarPagina(page)
+                        resultados = await verificarStatusPedidos(page, orderIds)
+                    } finally {
+                        if (browser.isConnected()) await browser.close().catch(() => {})
+                    }
                 } finally {
                     emColeta = false
                 }
 
-                console.log(`✅ [Zyon] Verificação concluída — enviados: ${enviados.length}, pendentes: ${pendentes.length}`)
+                const enviados = resultados.filter(r => r.enviado).map(r => r.orderId)
+                const pendentes = resultados.filter(r => !r.enviado).map(r => r.orderId)
                 res.writeHead(200, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ ok: true, enviados, pendentes }))
+                res.end(JSON.stringify({ ok: true, resultados, enviados, pendentes }))
             } catch (err) {
                 emColeta = false
                 console.error('❌ [Zyon] Erro em /verificar-pedidos-enviados:', err.message)
+                res.writeHead(500, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // PARTE D — tarefas sob demanda via Zeon
+    } else if (req.method === 'POST' && req.url === '/executar-tarefa') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { descricao } = JSON.parse(body)
+                if (!descricao) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ ok: false, error: 'Informe a descricao da tarefa' }))
+                    return
+                }
+                console.log(`\n⚡ [Zyon] Tarefa sob demanda recebida: ${descricao}`)
+
+                // Interpreta a tarefa com Groq
+                const interpretacao = await groq.chat.completions.create({
+                    model: 'llama-3.3-70b-versatile',
+                    max_tokens: 200,
+                    response_format: { type: 'json_object' },
+                    messages: [{
+                        role: 'user',
+                        content: `Você é um assistente que mapeia pedidos em texto para ações de um agente Shopee.
+
+Pedido: "${descricao}"
+
+Mapeie para UMA das ações: pedidos_aenviar, boost_anuncios, verificar_ads, renda, carteira, metricas, verificar_pedido_especifico, nao_identificado
+
+Se for "verificar_pedido_especifico", extraia o orderId do texto.
+
+Responda SOMENTE em JSON: {"acao": "...", "orderId": null ou "ID_AQUI", "justificativa": "..."}`
+                    }],
+                }).then(r => JSON.parse(r.choices[0].message.content)).catch(() => ({ acao: 'nao_identificado' }))
+
+                console.log(`⚡ [Zyon] Ação identificada: ${interpretacao.acao}`)
+
+                if (emColeta) {
+                    res.writeHead(503, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ ok: false, error: 'browser ocupado, tente em alguns minutos', acao: interpretacao.acao }))
+                    return
+                }
+
+                let resultado = null
+
+                switch (interpretacao.acao) {
+                    case 'pedidos_aenviar':
+                        emColeta = true
+                        try { resultado = await coletarPedidosAEnviar() } finally { emColeta = false }
+                        break
+                    case 'boost_anuncios':
+                        emColeta = true
+                        try { resultado = await impulsionarAnuncios() } finally { emColeta = false }
+                        break
+                    case 'verificar_ads':
+                        emColeta = true
+                        try { resultado = await verificarSaldoAds() } finally { emColeta = false }
+                        break
+                    case 'renda':
+                        emColeta = true
+                        try { resultado = await coletarRenda() } finally { emColeta = false }
+                        break
+                    case 'carteira':
+                        emColeta = true
+                        try { resultado = await coletarSaldoCarteira() } finally { emColeta = false }
+                        break
+                    case 'metricas':
+                        emColeta = true
+                        try { resultado = await coletarMetricasCompletas() } finally { emColeta = false }
+                        break
+                    case 'verificar_pedido_especifico':
+                        if (interpretacao.orderId) {
+                            emColeta = true
+                            try {
+                                const browser = await launchBrowser(resolverChrome())
+                                try {
+                                    const page = await browser.newPage()
+                                    await configurarPagina(page)
+                                    const r = await verificarStatusPedidos(page, [interpretacao.orderId])
+                                    resultado = r[0] || null
+                                } finally { if (browser.isConnected()) await browser.close().catch(() => {}) }
+                            } finally { emColeta = false }
+                        }
+                        break
+                    default:
+                        resultado = { naoIdentificado: true, descricao }
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, acao: interpretacao.acao, resultado }))
+            } catch (err) {
+                emColeta = false
+                console.error('❌ [Zyon] Erro em /executar-tarefa:', err.message)
                 res.writeHead(500, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err.message }))
             }
@@ -822,121 +537,96 @@ zyonServer.listen(ZYON_PORT, () => {
     console.log(`🌐 Zyon HTTP server escutando na porta ${ZYON_PORT}`)
 })
 
-console.log('⚡ Zyon iniciado — monitoramento de pedidos e atendimento Shopee')
-console.log(`🔁 Pedidos novos: a cada ${INTERVALO_MS / 60000} min | Dados completos: a cada ${INTERVALO_DADOS_MS / 60000} min | Chat: a cada ${INTERVALO_CHAT_MS / 60000} min`)
-console.log(`🎨 Aviso de produção ao Lucas: todo dia às 17h`)
-console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
-console.log('─────────────────────────────────────────────────')
+// ───────────────────── Agendamentos humanizados ───────────────────────────────
 
-// Referências dos setInterval ativos — guardadas para que o watchdog possa derrubar e
-// recriar um intervalo travado sem duplicar execuções
-let intervaloPedidosRef = null
-let intervaloChatRef = null
-let intervaloProdutosRef = null
-let intervaloDadosRef = null
-let intervaloLucasRef = null
-
-function iniciarMonitoramentoPedidos() {
-    if (intervaloPedidosRef) clearInterval(intervaloPedidosRef)
-    intervaloPedidosRef = setInterval(() => executarComSeguranca('checarNovosPedidos', checarNovosPedidos), INTERVALO_MS)
-}
-function iniciarMonitoramentoChat() {
-    if (intervaloChatRef) clearInterval(intervaloChatRef)
-    intervaloChatRef = setInterval(() => executarComSeguranca('verificarChatClientes', verificarChatClientes), INTERVALO_CHAT_MS)
-}
-function iniciarAtualizacaoProdutos() {
-    if (intervaloProdutosRef) clearInterval(intervaloProdutosRef)
-    intervaloProdutosRef = setInterval(() => executarComSeguranca('atualizarProdutosSalvos', atualizarProdutosSalvos), INTERVALO_PRODUTOS_MS)
+// Agenda próxima execução com variação aleatória (não-repetitiva como setInterval)
+function agendarProxima(nome, fn, intervaloBaseMs, variacaoMs) {
+    const delay = Math.max(60000, intervaloBaseMs + Math.floor((Math.random() * 2 - 1) * variacaoMs))
+    setTimeout(async () => {
+        await executarComSeguranca(nome, fn)
+        agendarProxima(nome, fn, intervaloBaseMs, variacaoMs)
+    }, delay)
 }
 
-// Agenda o aviso diário ao Lucas para as 17h em ponto, depois repete a cada 24h.
-function agendarAvisoLucas17h() {
-    if (intervaloLucasRef) {
-        clearInterval(intervaloLucasRef)
-        intervaloLucasRef = null
-    }
+// Agenda execução única num horário-alvo com variação em minutos
+function agendarHorario(nome, fn, horaAlvo, minAlvo, variacaoMinutos, repetirDiariamente = true) {
     const agora = new Date()
-    const proximas17h = new Date(agora)
-    proximas17h.setHours(17, 0, 0, 0)
-    if (proximas17h <= agora) proximas17h.setDate(proximas17h.getDate() + 1)
-    const msAte17h = proximas17h - agora
-
-    console.log(`🎨 [Zyon] Próximo aviso de produção ao Lucas agendado para ${proximas17h.toLocaleTimeString('pt-BR')} (em ${Math.round(msAte17h / 60000)} min)`)
-
-    setTimeout(() => {
-        executarComSeguranca('avisarLucasProducao', avisarLucasProducao)
-        intervaloLucasRef = setInterval(() => executarComSeguranca('avisarLucasProducao', avisarLucasProducao), INTERVALO_LUCAS_17H_MS)
-    }, msAte17h)
+    const alvo = new Date(agora)
+    const varMs = Math.floor((Math.random() * 2 - 1) * variacaoMinutos * 60000)
+    alvo.setHours(horaAlvo, minAlvo, 0, 0)
+    alvo.setTime(alvo.getTime() + varMs)
+    if (alvo <= agora) alvo.setDate(alvo.getDate() + 1)
+    const msAte = alvo - agora
+    console.log(`🕐 [Zyon] "${nome}" agendado para ${alvo.toLocaleTimeString('pt-BR')} (em ${Math.round(msAte / 60000)} min)`)
+    setTimeout(async () => {
+        await executarComSeguranca(nome, fn)
+        if (repetirDiariamente) agendarHorario(nome, fn, horaAlvo, minAlvo, variacaoMinutos, true)
+    }, msAte)
 }
 
-// Agenda a coleta de faturamento para disparar exatamente no início de cada hora
-// (1h00, 2h00, ...), aguardando com setTimeout até a próxima hora cheia e então
-// passando a rodar a cada 60 min — assim o relatório sempre bate na hora certa.
-function agendarColetaDeDadosNaHoraCheia() {
-    if (intervaloDadosRef) {
-        clearInterval(intervaloDadosRef)
-        intervaloDadosRef = null
-    }
+// Intervalo de pedidos: 30min base com ±5min de variação (25-35min efetivos)
+const INTERVALO_PEDIDOS_BASE = 30 * 60 * 1000
+const VARIACAO_PEDIDOS = 5 * 60 * 1000
 
-    const agora = new Date()
-    const proximaHora = new Date(agora)
-    proximaHora.setHours(proximaHora.getHours() + 1, 0, 0, 0)
-    const msAteProximaHora = proximaHora - agora
+// Intervalo de faturamento: 60min base
+const INTERVALO_DADOS_BASE = 60 * 60 * 1000
 
-    console.log(`🕐 [Zyon] Próxima coleta de faturamento agendada para ${proximaHora.toLocaleTimeString('pt-BR')} (em ${Math.round(msAteProximaHora / 60000)} min)`)
+// Boost: 4h base com ±20min
+const INTERVALO_BOOST_BASE = 4 * 60 * 60 * 1000
+const VARIACAO_BOOST = 20 * 60 * 1000
 
-    setTimeout(() => {
-        executarComSeguranca('coletarEEnviarDados', coletarEEnviarDados)
-        intervaloDadosRef = setInterval(() => executarComSeguranca('coletarEEnviarDados', coletarEEnviarDados), INTERVALO_DADOS_MS)
-    }, msAteProximaHora)
-}
+// Ads/financeiro: 3 vezes por dia em horários variáveis
+const INTERVALO_ADS_BASE = 8 * 60 * 60 * 1000
+const VARIACAO_ADS = 30 * 60 * 1000
 
-// Watchdog: a cada 5 min verifica se cada tarefa periódica realmente rodou dentro do
-// prazo esperado (com tolerância). Se alguma ficou parada — setInterval perdido,
-// processo travado, etc. — recria o agendamento e dispara uma execução imediata.
+// Watchdog: detecta se alguma tarefa ficou parada por muito tempo
 const WATCHDOG_INTERVALO_MS = 5 * 60 * 1000
 const WATCHDOG_TOLERANCIA = 2.5
 
 function verificarEReiniciarIntervalos() {
     const agora = Date.now()
-
-    if (agora - ultimaExecucao.pedidos > INTERVALO_MS * WATCHDOG_TOLERANCIA) {
+    if (agora - ultimaExecucao.pedidos > INTERVALO_PEDIDOS_BASE * WATCHDOG_TOLERANCIA) {
         console.warn('🐶 [Zyon/watchdog] Monitoramento de pedidos parado — reiniciando...')
         ultimaExecucao.pedidos = agora
-        iniciarMonitoramentoPedidos()
+        agendarProxima('checarNovosPedidos', checarNovosPedidos, INTERVALO_PEDIDOS_BASE, VARIACAO_PEDIDOS)
         executarComSeguranca('checarNovosPedidos', checarNovosPedidos)
     }
-
-    if (agora - ultimaExecucao.chat > INTERVALO_CHAT_MS * WATCHDOG_TOLERANCIA) {
-        console.warn('🐶 [Zyon/watchdog] Verificação de chat parada — reiniciando...')
-        ultimaExecucao.chat = agora
-        iniciarMonitoramentoChat()
-        executarComSeguranca('verificarChatClientes', verificarChatClientes)
-    }
-
-    if (agora - ultimaExecucao.dados > INTERVALO_DADOS_MS * WATCHDOG_TOLERANCIA) {
-        console.warn('🐶 [Zyon/watchdog] Coleta de faturamento parada — reiniciando...')
-        ultimaExecucao.dados = agora
-        agendarColetaDeDadosNaHoraCheia()
-    }
-
-    if (agora - ultimaExecucao.lucas17h > INTERVALO_LUCAS_17H_MS * WATCHDOG_TOLERANCIA) {
-        console.warn('🐶 [Zyon/watchdog] Aviso de produção ao Lucas parado — reagendando...')
-        ultimaExecucao.lucas17h = agora
-        agendarAvisoLucas17h()
+    if (agora - ultimaExecucao.boost > INTERVALO_BOOST_BASE * WATCHDOG_TOLERANCIA) {
+        console.warn('🐶 [Zyon/watchdog] Boost parado — reagendando...')
+        ultimaExecucao.boost = agora
+        agendarProxima('executarBoost', executarBoost, INTERVALO_BOOST_BASE, VARIACAO_BOOST)
     }
 }
 
-// Executa em sequência na inicialização (nunca dois browsers ao mesmo tempo) — cada
-// etapa isolada com executarComSeguranca para que uma falha não impeça as seguintes
+// ─────────────────────── Sequência de inicialização ──────────────────────────
+
+console.log('⚡ Zyon iniciado — agente operacional Shopee')
+console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
+console.log('─────────────────────────────────────────────────')
+
 ;(async () => {
+    // Startup: verifica pedidos e dados imediatamente (sequencial para não abrir dois browsers)
     await executarComSeguranca('checarNovosPedidos', checarNovosPedidos)
     await executarComSeguranca('coletarEEnviarDados', coletarEEnviarDados)
-    await executarComSeguranca('verificarChatClientes', verificarChatClientes)
+    await executarComSeguranca('atualizarPedidosAEnviar', atualizarPedidosAEnviar)
+    await executarComSeguranca('executarBoost', executarBoost)
 })()
-iniciarMonitoramentoPedidos()
-agendarColetaDeDadosNaHoraCheia()
-iniciarMonitoramentoChat()
-iniciarAtualizacaoProdutos()
-agendarAvisoLucas17h()
+
+// Agendamentos periódicos com variação humanizada
+agendarProxima('checarNovosPedidos', checarNovosPedidos, INTERVALO_PEDIDOS_BASE, VARIACAO_PEDIDOS)
+agendarProxima('coletarEEnviarDados', coletarEEnviarDados, INTERVALO_DADOS_BASE, 10 * 60 * 1000)
+agendarProxima('executarBoost', executarBoost, INTERVALO_BOOST_BASE, VARIACAO_BOOST)
+agendarProxima('verificarAdsEFinanceiro', verificarAdsEFinanceiro, INTERVALO_ADS_BASE, VARIACAO_ADS)
+agendarProxima('atualizarPedidosAEnviar', atualizarPedidosAEnviar, INTERVALO_PEDIDOS_BASE, VARIACAO_PEDIDOS)
+
+// Aviso ao Lucas ~17h (16h50-17h15) — diário
+agendarHorario('avisarLucasProducao', avisarLucasProducao, 17, 0, 15)
+
+// Métricas gerenciais ~20h30 (±30min) — diário
+agendarHorario('coletarRelatorioGerencial', coletarRelatorioGerencial, 20, 30, 30)
+
+// Relatório consolidado ~22h (±20min) — diário
+agendarHorario('enviarRelatorioConsolidado', enviarRelatorioConsolidado, 22, 0, 20)
+
+// Watchdog
 setInterval(verificarEReiniciarIntervalos, WATCHDOG_INTERVALO_MS)

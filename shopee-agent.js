@@ -7,9 +7,13 @@ const fs = require('fs')
 const path = require('path')
 
 const BASE_URL = 'https://seller.shopee.com.br'
-const CHAT_URL = `${BASE_URL}/new-webchat/conversations`
 const PRODUTOS_LIST_URL = `${BASE_URL}/portal/product/list/all`
 const ORDERS_TOSHIP_URL = `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`
+const ORDERS_ALL_URL = `${BASE_URL}/portal/sale/order`
+const ADS_URL = `${BASE_URL}/portal/marketing/pas/index`
+const INCOME_URL = `${BASE_URL}/portal/finance/income`
+const WALLET_URL = `${BASE_URL}/portal/finance/wallet/shopeepay`
+const DATACENTER_URL = `${BASE_URL}/datacenter/overview`
 const PROFILE_DIR = path.join(__dirname, 'shopee_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_shopee')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
@@ -52,18 +56,14 @@ function launchBrowser(executablePath) {
 }
 
 function resolverChrome() {
-    // 1. Variável de ambiente explícita
     for (const ev of [process.env.CHROME_PATH, process.env.PUPPETEER_EXECUTABLE_PATH]) {
         if (ev && fs.existsSync(ev)) return ev
     }
-
-    // 2. Chrome embutido no puppeteer — baixado em .cache/puppeteer durante npm install
     try {
         const ep = require('puppeteer').executablePath()
         if (ep && fs.existsSync(ep)) return ep
     } catch {}
 
-    // 3. Caminhos Linux (sistema)
     const linuxPaths = [
         '/usr/bin/chromium',
         '/usr/bin/chromium-browser',
@@ -71,8 +71,6 @@ function resolverChrome() {
         '/usr/bin/google-chrome',
         '/usr/bin/google-chrome-stable',
     ]
-
-    // 4. Windows (desenvolvimento local)
     const winPaths = [
         process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null,
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -103,7 +101,6 @@ async function extrairPagina(page, url, nome, waitMs = 8000) {
 
 async function coletarDadosShopee() {
     const browser = await launchBrowser(resolverChrome())
-
     try {
         const page = await browser.newPage()
         await configurarPagina(page)
@@ -124,15 +121,11 @@ async function coletarDadosShopee() {
             document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
             return document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 8000)
         })
-        console.log(`📄 [Zyon/vendas] ${vendas.length} chars: ${vendas.substring(0, 200)}...`)
 
         console.log('📦 [Zyon] Coletando pedidos...')
         const pedidos = await extrairPagina(page, `${BASE_URL}/order/list/all`, 'pedidos')
 
-        console.log('💬 [Zyon] Coletando mensagens...')
-        const mensagens = await extrairPagina(page, `${BASE_URL}/chat/`, 'mensagens')
-
-        return { vendas, pedidos, mensagens }
+        return { vendas, pedidos }
     } finally {
         await browser.close()
     }
@@ -140,7 +133,6 @@ async function coletarDadosShopee() {
 
 async function verificarNovosPedidos() {
     const browser = await launchBrowser(resolverChrome())
-
     try {
         const page = await browser.newPage()
         await configurarPagina(page)
@@ -158,7 +150,6 @@ async function verificarNovosPedidos() {
         console.log(`🌐 [Zyon] URL: ${urlAtual}`)
         console.log(`📋 [Zyon] Body preview: ${bodyText.substring(0, 1000)}`)
 
-        // Captura o primeiro "ID do Pedido XXXXXX" — o mais recente da lista ordenada
         const match = bodyText.match(/ID do Pedido\s+([A-Z0-9]{6,20})/i)
         return match ? match[1] : null
     } finally {
@@ -166,13 +157,10 @@ async function verificarNovosPedidos() {
     }
 }
 
-// Formata número como moeda BR — sem assumir centavos vs real
 function formatarBRL(valor) {
     return valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-// Busca recursiva em JSON por campos com nomes de receita (revenue, gmv, etc.)
-// Detecta contexto "hoje/today" vs "mês/month" pelo caminho completo do campo
 function buscarReceitaRecursivo(obj, caminho, profundidade) {
     if (profundidade === undefined) profundidade = 0
     if (caminho === undefined) caminho = ''
@@ -208,17 +196,12 @@ function buscarReceitaRecursivo(obj, caminho, profundidade) {
     return resultado
 }
 
-// Acessa a página de Informações Gerenciais da Shopee, trata o diálogo de senha,
-// intercepta as respostas de API e extrai o faturamento do dia e do mês.
-// Chamada pelo Zyon a cada 30 min; os valores são enviados à Zaya via POST.
 async function coletarFaturamentoGerencial() {
     const browser = await launchBrowser(resolverChrome())
     try {
         const page = await browser.newPage()
         await configurarPagina(page)
 
-        // Intercepta respostas JSON da API antes de navegar
-        // fullPath inclui query string para diagnóstico; url é só o path (sem query)
         const respostasApi = []
         page.on('response', function(response) {
             const url = response.url()
@@ -236,70 +219,42 @@ async function coletarFaturamentoGerencial() {
             }).catch(function() {})
         })
 
-        // Informações Gerenciais (Data Center)
-        await page.goto(`${BASE_URL}/datacenter/overview`, { waitUntil: 'networkidle2', timeout: 30000 })
+        await page.goto(DATACENTER_URL, { waitUntil: 'networkidle2', timeout: 30000 })
         await randomDelay()
-        await verificarAutenticacaoPendente(page, `${BASE_URL}/datacenter/overview`)
+        await verificarAutenticacaoPendente(page, DATACENTER_URL)
 
         const urlAtual = page.url()
         console.log(`🌐 [Zyon/gerencial] URL: ${urlAtual}`)
 
-        // Shopee exige confirmação de senha em páginas financeiras — preenche automaticamente
         try {
             await page.waitForSelector('input[type="password"]', { timeout: 6000, visible: true })
             console.log('🔐 [Zyon] Diálogo de senha detectado — inserindo...')
             await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 + Math.floor(Math.random() * 60) })
             await page.keyboard.press('Enter')
             await randomDelay()
-            console.log('🔐 [Zyon] Senha inserida')
         } catch (_) {
-            console.log('🔓 [Zyon] Sem diálogo de senha (ou já autenticado)')
+            console.log('🔓 [Zyon] Sem diálogo de senha')
         }
 
-        // Aguarda APIs assíncronas após possível autenticação
         await randomDelay()
-
         await page.screenshot({ path: path.join(DEBUG_DIR, 'gerencial.png') })
-        console.log('📸 [Zyon] Screenshot inicial: debug_shopee/gerencial.png')
-        console.log(`📡 [Zyon/gerencial] APIs iniciais: ${respostasApi.length}`)
-        respostasApi.forEach(function(r) { console.log('  → ' + r.url) })
 
-        // ── Extração do faturamento DO DIA ────────────────────────────────────
-        // /api/mydata/v3/dashboard/key-metrics/ → result.paid_gmv.value
         let fatDia = null, fatMes = null
         for (const { url, json } of respostasApi) {
             if (url.includes('/mydata/') && url.includes('/key-metric')) {
                 const paid = json && json.result && json.result.paid_gmv
                 if (paid != null && typeof paid.value === 'number' && !fatDia) {
                     fatDia = formatarBRL(paid.value)
-                    console.log('💰 [Zyon] key-metrics paid_gmv.value = ' + paid.value + ' → fatDia = ' + fatDia)
                 }
             }
-            // fallback: traffic-sources carga inicial (período = dia)
             if (!fatDia && url.includes('/mydata/') && url.includes('/traffic-source')) {
                 const sales = json && json.result && json.result.overview && json.result.overview.total_sales
-                if (typeof sales === 'number') {
-                    fatDia = formatarBRL(sales)
-                    console.log('💰 [Zyon] traffic-sources[dia] total_sales = ' + sales + ' → fatDia = ' + fatDia)
-                }
+                if (typeof sales === 'number') fatDia = formatarBRL(sales)
             }
         }
 
-        // ── Extração do faturamento DO MÊS ────────────────────────────────────
-        // Abordagem 1: fetch direto com parâmetros de período mensal (não depende de UI)
         const resultMes = await page.evaluate(async function() {
-            var tentativas = [
-                'period=month',
-                'date_range_type=1',
-                'period=3',
-                'date_type=2',
-                'time_type=2',
-                'data_interval=month',
-                'period_type=2',
-                'time_granularity=2',
-                'period=2',
-                'time_period=month',
-            ]
+            var tentativas = ['period=month', 'date_range_type=1', 'period=3', 'date_type=2', 'time_type=2']
             for (var i = 0; i < tentativas.length; i++) {
                 try {
                     var resp = await fetch('/api/mydata/v1/dashboard/traffic-sources/?' + tentativas[i], {
@@ -318,12 +273,8 @@ async function coletarFaturamentoGerencial() {
 
         if (resultMes) {
             fatMes = formatarBRL(resultMes.sales)
-            console.log('💰 [Zyon] fatMes fetch direto (' + resultMes.param + ') = ' + resultMes.sales + ' → ' + fatMes)
         } else {
-            // Abordagem 2: clicar no filtro de período mensal na página
-            console.log('🖱️  [Zyon] Fetch direto sem resultado — tentando clicar no filtro "Por Mês"...')
             const preClickCount = respostasApi.length
-
             const filtroClicado = await page.evaluate(function() {
                 var textos = ['Por Mês', 'Por mês', 'Mês', 'Month']
                 var seletores = ['span', 'button', 'li', 'a', 'div']
@@ -333,17 +284,14 @@ async function coletarFaturamentoGerencial() {
                         for (var i = 0; i < els.length; i++) {
                             var el = els[i]
                             if (el.textContent.trim() === textos[t] && el.offsetParent !== null) {
-                                el.click()
-                                return textos[t]
+                                el.click(); return textos[t]
                             }
                         }
                     }
                 }
                 return null
             })
-
             if (filtroClicado) {
-                console.log('🖱️  [Zyon] Clicado: "' + filtroClicado + '" — aguardando API mensal...')
                 await randomDelay()
                 var novasRespostas = respostasApi.slice(preClickCount)
                 for (var i = 0; i < novasRespostas.length; i++) {
@@ -352,38 +300,21 @@ async function coletarFaturamentoGerencial() {
                         var salesVal = r.json && r.json.result && r.json.result.overview && r.json.result.overview.total_sales
                         if (typeof salesVal === 'number') {
                             fatMes = formatarBRL(salesVal)
-                            console.log('💰 [Zyon] fatMes via clique = ' + salesVal + ' → ' + fatMes + ' | URL: ' + r.fullPath)
                             break
                         }
                     }
                 }
-                if (!fatMes) console.log('⚠️  [Zyon] Clique feito mas API não retornou total_sales mensal')
-            } else {
-                console.log('⚠️  [Zyon] Filtro "Por Mês" não encontrado na página')
             }
         }
 
-        // Salva screenshot e todas as APIs (dia + mês) para debug
         await page.screenshot({ path: path.join(DEBUG_DIR, 'gerencial_mes.png') })
-        console.log('📸 [Zyon] Screenshot (após filtro): debug_shopee/gerencial_mes.png')
-
-        try {
-            fs.writeFileSync(
-                path.join(DEBUG_DIR, 'gerencial_api.json'),
-                JSON.stringify(respostasApi, null, 2).substring(0, 500000)
-            )
-            console.log('💾 [Zyon] Salvo: debug_shopee/gerencial_api.json (' + respostasApi.length + ' APIs)')
-        } catch (_) {}
-
         console.log('💰 [Zyon] Faturamento — Dia: ' + (fatDia || 'não encontrado') + ', Mês: ' + (fatMes || 'não encontrado'))
-
-        return { fatDia: fatDia, fatMes: fatMes }
+        return { fatDia, fatMes }
     } finally {
         await browser.close()
     }
 }
 
-// Busca apenas a contagem de pedidos A Enviar — faturamento vem do Zyon via /update-faturamento
 async function coletarStatusPedidos() {
     const browser = await launchBrowser(resolverChrome())
     try {
@@ -401,400 +332,14 @@ async function coletarStatusPedidos() {
             return document.body.innerText.replace(/\s+/g, ' ').trim()
         })
         console.log('📊 [Zyon/orders] ' + orderText.substring(0, 600))
-
-        return { orderText: orderText }
+        return { orderText }
     } finally {
         await browser.close()
     }
 }
 
-// ───────────────────────────── Chat de clientes ─────────────────────────────
+// ─────────────────────────────────────── Produtos ────────────────────────────────────────
 
-// Salva uma versão simplificada do HTML (sem scripts/estilos/imagens) em debug_shopee/
-// para permitir localizar os seletores exatos da interface do chat
-async function salvarHtmlDebug(page, nome) {
-    try {
-        const html = await page.evaluate(() => {
-            const clone = document.body.cloneNode(true)
-            clone.querySelectorAll('script, style, svg, noscript, iframe, link, img').forEach(el => el.remove())
-            return clone.outerHTML.replace(/\s{2,}/g, ' ')
-        })
-        fs.writeFileSync(path.join(DEBUG_DIR, `${nome}.html`), html.substring(0, 400000))
-        console.log(`💾 [Zyon/chat] HTML salvo p/ inspeção: debug_shopee/${nome}.html (${html.length} chars)`)
-    } catch (err) {
-        console.error(`❌ [Zyon/chat] Erro ao salvar HTML (${nome}): ${err.message}`)
-    }
-}
-
-// Abre a aba de Chat do Seller Center e aguarda a lista de conversas carregar de fato
-// (a SPA do new-webchat continua buscando dados após o "networkidle" do goto)
-async function abrirChat(page) {
-    await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-    await randomDelay()
-    await verificarAutenticacaoPendente(page, CHAT_URL)
-
-    const seletorLista = '[class*="conversation"], [class*="chat-list"], [class*="session-list"], [class*="webchat"]'
-    let listaCarregou = false
-    for (let tentativa = 1; tentativa <= 2 && !listaCarregou; tentativa++) {
-        try {
-            await page.waitForSelector(seletorLista, { timeout: 40000 })
-            await page.waitForNetworkIdle({ idleTime: 1500, timeout: 20000 })
-            listaCarregou = true
-        } catch (_) {
-            if (tentativa === 1) {
-                // O seletor falha intermitentemente porque a SPA às vezes trava no carregamento
-                // inicial — recarregar a página costuma resolver antes de desistir de vez.
-                console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu — recarregando a página e tentando novamente')
-                await page.reload({ waitUntil: 'networkidle2', timeout: 30000 })
-                await randomDelay()
-                await verificarAutenticacaoPendente(page, CHAT_URL)
-            } else {
-                console.log('⚠️  [Zyon/chat] Lista de conversas não apareceu dentro do tempo esperado — screenshot ainda será salvo para diagnóstico')
-            }
-        }
-    }
-    await randomDelay()
-
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_lista.png') })
-    console.log(`📸 [Zyon/chat] Screenshot: debug_shopee/chat_lista.png (URL atual: ${page.url()})`)
-    await salvarHtmlDebug(page, 'chat_lista')
-}
-
-// A lista de conversas é virtualizada (ReactVirtualized) e organizada em seções marcadas
-// por linhas separadoras com id="tab_unreplied" ("Sem resposta (N)") e id="tab_manually_replied"
-// ("Replied (N)"), irmãs diretas das células de conversa ([data-cy="webchat-conversation-cell-root"]).
-// Pega a primeira célula entre essas duas marcações — a Shopee já filtra "sem resposta" para nós.
-// `ignorar` lista nomes de conversas já abertas neste ciclo — evita reabrir a mesma
-// conversa em loop quando a Shopee não a remove imediatamente da seção "Sem resposta"
-// após o envio da resposta (ex: indicador de não lida com atraso para atualizar)
-async function abrirProximaConversaNaoRespondida(page, ignorar = []) {
-    await humanMouseMove(page, 200 + Math.floor(Math.random() * 150), 250 + Math.floor(Math.random() * 200))
-    const resultado = await page.evaluate((ignorar) => {
-        const container = document.querySelector('[data-cy="webchat-conversation-list"] .ReactVirtualized__Grid__innerScrollContainer')
-        if (!container) return { erro: 'lista de conversas não encontrada (container ReactVirtualized ausente)' }
-
-        const filhos = Array.from(container.children)
-        const inicio = filhos.findIndex(el => el.id === 'tab_unreplied')
-        if (inicio === -1) return { erro: 'seção "Sem resposta" (#tab_unreplied) não encontrada' }
-        let fim = filhos.findIndex((el, i) => i > inicio && el.id === 'tab_manually_replied')
-        if (fim === -1) fim = filhos.length
-
-        for (let i = inicio + 1; i < fim; i++) {
-            const cell = filhos[i].querySelector('[data-cy="webchat-conversation-cell-root"]')
-            if (!cell) continue
-
-            const nomeEl = cell.querySelector('[data-cy="webchat-conversation-cell-name"]')
-            const nome = (nomeEl?.getAttribute('title') || nomeEl?.textContent || '').trim()
-            if (!nome || ignorar.includes(nome)) continue
-
-            const badgeEl = cell.querySelector('[data-cy="webchat-conversation-cell-message"]')?.nextElementSibling
-            const badge = (badgeEl?.textContent || '').trim() || null
-
-            const rect = cell.getBoundingClientRect()
-            return { nome, badge, x: Math.floor(rect.left + rect.width / 2), y: Math.floor(rect.top + rect.height / 2) }
-        }
-        return { nome: null }
-    }, ignorar)
-
-    if (resultado.erro) {
-        console.log(`⚠️  [Zyon/chat] ${resultado.erro}`)
-        return null
-    }
-    if (!resultado.nome) return null
-
-    console.log(`💬 [Zyon/chat] Abrindo conversa: ${resultado.nome} (badge: ${resultado.badge || 'sem indicador'})`)
-
-    await new Promise(r => setTimeout(r, 800 + Math.floor(Math.random() * 1200)))
-    const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {})
-    await page.mouse.move(resultado.x, resultado.y, { steps: 10 + Math.floor(Math.random() * 8) })
-    await new Promise(r => setTimeout(r, 80 + Math.floor(Math.random() * 120)))
-    await page.mouse.click(resultado.x, resultado.y)
-    await navPromise
-
-    const SELETOR_CONTEUDO_CONV = '[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"], [data-cy="webchat-conversation-detail-input"]'
-    for (let tentativa = 1; tentativa <= 3; tentativa++) {
-        let conteudoCarregou = false
-        try {
-            await page.waitForSelector(SELETOR_CONTEUDO_CONV, { timeout: 9000 })
-            conteudoCarregou = true
-        } catch (_) {}
-
-        const paginaErro = !conteudoCarregou && await page.evaluate(() => {
-            const texto = (document.body?.innerText || '').toLowerCase()
-            return /p[áa]gina indispon[íi]vel|desculpe.*algo deu errado|something went wrong|page not available/.test(texto)
-        })
-
-        if (!paginaErro) break
-
-        if (tentativa < 3) {
-            console.log(`⚠️  [Zyon/chat] Página de erro ao abrir "${resultado.nome}" (tentativa ${tentativa}/3) — aguardando 15-20s antes de tentar novamente...`)
-            await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-            await randomDelay(15000, 20000)
-            const cellPos = await page.evaluate((nomeAlvo) => {
-                const cells = document.querySelectorAll('[data-cy="webchat-conversation-cell-root"]')
-                for (const cell of cells) {
-                    const nomeEl = cell.querySelector('[data-cy="webchat-conversation-cell-name"]')
-                    const nome = (nomeEl?.getAttribute('title') || nomeEl?.textContent || '').trim()
-                    if (nome === nomeAlvo) {
-                        const rect = cell.getBoundingClientRect()
-                        return { x: Math.floor(rect.left + rect.width / 2), y: Math.floor(rect.top + rect.height / 2) }
-                    }
-                }
-                return null
-            }, resultado.nome)
-            if (!cellPos) {
-                console.log(`⚠️  [Zyon/chat] Conversa "${resultado.nome}" não encontrada na lista após recarregamento — pulando`)
-                return null
-            }
-            const retryNavPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {})
-            await new Promise(r => setTimeout(r, 800 + Math.floor(Math.random() * 1200)))
-            await page.mouse.move(cellPos.x, cellPos.y, { steps: 10 + Math.floor(Math.random() * 8) })
-            await new Promise(r => setTimeout(r, 80 + Math.floor(Math.random() * 120)))
-            await page.mouse.click(cellPos.x, cellPos.y)
-            await retryNavPromise
-        } else {
-            console.log(`❌ [Zyon/chat] Conversa "${resultado.nome}" continua com erro após 3 tentativas — pulando`)
-            await page.goto(CHAT_URL, { waitUntil: 'networkidle2', timeout: 30000 })
-            await randomDelay()
-            return null
-        }
-    }
-
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_conversa.png') })
-    await salvarHtmlDebug(page, 'chat_conversa')
-    return resultado.nome
-}
-
-// Percorre a lista virtualizada de mensagens do topo ao fim, coletando e deduplicando
-// cada mensagem visível a cada passo. Todo o scroll é feito via page.mouse.wheel() —
-// eventos de wheel nativos do Chrome, indistinguíveis de scroll real de usuário — nunca
-// via scrollTop direto (sintético), que sistemas anti-bot conseguem detectar.
-// Deduplicação pela posição CSS "top" de cada linha (estável entre re-renderizações do
-// ReactVirtualized). Extração de produtoId, prazoEnvio e dados do anúncio inalterada.
-async function lerConversaCompleta(page) {
-    // Localiza o grid e posiciona o mouse sobre ele antes de qualquer interação
-    const gridPos = await page.evaluate(() => {
-        const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
-        if (!grid) return null
-        const rect = grid.getBoundingClientRect()
-        return { x: Math.floor(rect.left + rect.width / 2), y: Math.floor(rect.top + rect.height / 2) }
-    }).catch(() => null)
-
-    if (gridPos) {
-        await page.mouse.move(gridPos.x, gridPos.y, { steps: 5 + Math.floor(Math.random() * 4) })
-        await new Promise(r => setTimeout(r, 150 + Math.floor(Math.random() * 150)))
-    }
-
-    // Rola ao topo com wheel real (2 passagens) para forçar carregamento do histórico antigo.
-    // ~40 eventos × ~120px = ~4800px de scroll para cima por passagem.
-    for (let i = 0; i < 2; i++) {
-        const numScrollsSubida = 35 + Math.floor(Math.random() * 10)
-        for (let j = 0; j < numScrollsSubida; j++) {
-            await page.mouse.wheel({ deltaY: -(100 + Math.floor(Math.random() * 60)) }).catch(() => {})
-            await new Promise(r => setTimeout(r, 18 + Math.floor(Math.random() * 25)))
-        }
-        await new Promise(r => setTimeout(r, 3000 + Math.floor(Math.random() * 2000)))
-    }
-
-    // Aguarda o card do produto (assíncrono — pode aparecer depois do scroll inicial)
-    await page.waitForSelector('[data-cy="webchat-station-root"] [title][style*="word-break"]', { timeout: 8000 }).catch(() => {})
-
-    // Coleta mensagens visíveis no DOM e retorna array serializável para o Node.js.
-    // A deduplicação é feita no Map do Node (não dentro do evaluate) para poder acumular
-    // entre múltiplas chamadas conforme o scroll avança.
-    const coletadas = new Map()
-
-    const coletarVisiveis = async () => {
-        const msgs = await page.evaluate(() => {
-            const resultado = []
-            const itens = document.querySelectorAll('[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"]')
-            itens.forEach((el) => {
-                const remetente = el.getAttribute('data-cy') === 'webchat-message-send' ? 'loja' : 'cliente'
-                // O texto vem com o horário colado (ex: "Boa noite21:47") porque o timestamp fica
-                // num <div> aninhado dentro do próprio texto — removemos o sufixo "HH:MM" do final.
-                let texto = (el.innerText || '')
-                    .replace(/\s+/g, ' ')
-                    .trim()
-                    .replace(/\s*\d{1,2}:\d{2}\s*$/, '')
-                    .trim()
-
-                // Mensagens de imagem/arquivo não têm texto (ou só o nome do arquivo) — sem isso
-                // elas seriam descartadas silenciosamente e a IA nunca saberia que algo foi enviado.
-                // Marcamos explicitamente para que o prompt possa orientar a não pedir a arte de novo.
-                const temAnexo = !!el.querySelector('img, [class*="image" i], [class*="photo" i], [class*="attachment" i], [class*="thumbnail" i], [class*="file-message" i]')
-                if (temAnexo) texto = texto ? `${texto} [imagem/arquivo enviado]` : '[imagem/arquivo enviado]'
-                if (!texto) return
-
-                const linha = el.closest('[style*="position: absolute"]')
-                const topMatch = linha?.getAttribute('style')?.match(/top:\s*([\d.]+)px/)
-                const chave = topMatch ? `${topMatch[1]}::${remetente}` : `${remetente}::${texto.substring(0, 80)}`
-                resultado.push({ chave, remetente, texto: texto.substring(0, 1000), ordem: topMatch ? parseFloat(topMatch[1]) : resultado.length })
-            })
-            return resultado
-        }).catch(() => [])
-        msgs.forEach(m => {
-            if (!coletadas.has(m.chave)) coletadas.set(m.chave, { remetente: m.remetente, texto: m.texto, ordem: m.ordem })
-        })
-    }
-
-    // Coleta inicial no topo, depois percorre para baixo em passos com wheel real
-    await coletarVisiveis()
-
-    let passosFeitos = 0
-    const MAX_PASSOS = 15
-
-    while (passosFeitos < MAX_PASSOS) {
-        const gridAinda = await page.evaluate(() => !!document.querySelector('#messageSection .ReactVirtualized__Grid')).catch(() => false)
-        if (!gridAinda) break
-
-        // Simula uma "rolada" humana: 3-6 eventos de wheel pequenos em sequência
-        const numWheels = 3 + Math.floor(Math.random() * 4)
-        for (let k = 0; k < numWheels; k++) {
-            await page.mouse.wheel({ deltaY: 80 + Math.floor(Math.random() * 70) }).catch(() => {})
-            await new Promise(r => setTimeout(r, 28 + Math.floor(Math.random() * 45)))
-        }
-        passosFeitos++
-
-        await new Promise(r => setTimeout(r, 1200 + Math.floor(Math.random() * 800)))
-        await coletarVisiveis()
-
-        if (passosFeitos % 3 === 0) {
-            await new Promise(r => setTimeout(r, 2000 + Math.floor(Math.random() * 1000)))
-        }
-
-        // Para quando chegar ao fim da lista
-        const chegouAoFim = await page.evaluate(() => {
-            const grid = document.querySelector('#messageSection .ReactVirtualized__Grid')
-            if (!grid) return true
-            return grid.scrollTop >= grid.scrollHeight - grid.clientHeight - 50
-        }).catch(() => true)
-        if (chegouAoFim) break
-    }
-
-    const mensagens = Array.from(coletadas.values())
-        .sort((a, b) => a.ordem - b.ordem)
-        .map(({ remetente, texto }) => ({ remetente, texto }))
-
-    // Extração de metadados do produto e prazo de envio — evaluate separado do scroll
-    const metadados = await page.evaluate(() => {
-        let produtoId = null
-        let produtoNome = null
-        let produtoPreco = null
-        const stationRoot = document.querySelector('[data-cy="webchat-station-root"]')
-        if (stationRoot) {
-            const checkbox = stationRoot.querySelector('input[type="checkbox"][value]')
-            if (checkbox) produtoId = checkbox.getAttribute('value') || null
-
-            // Seletor primário: nome do produto no card "Interesse do comprador" (texto longo
-            // com word-break para não quebrar o layout). Fallback: qualquer [title] dentro do
-            // card que pareça um nome de produto (texto longo, não preço/contagem/avaliação).
-            let nomeEl = stationRoot.querySelector('[title][style*="word-break"]')
-            if (!nomeEl) {
-                nomeEl = Array.from(stationRoot.querySelectorAll('[title]')).find((el) => {
-                    const t = (el.getAttribute('title') || '').trim()
-                    return t.length > 15 && !/^R\$/.test(t) && !/dispon[íi]vel|vendido/i.test(t)
-                }) || null
-            }
-            if (nomeEl) produtoNome = (nomeEl.getAttribute('title') || nomeEl.textContent || '').trim().substring(0, 200) || null
-
-            const precoEl = stationRoot.querySelector('[title^="R$"]')
-            if (precoEl) produtoPreco = (precoEl.getAttribute('title') || '').trim() || null
-        }
-
-        // Prazo de envio: NÃO fica no cabeçalho do nome do cliente (apesar do que o comentário
-        // antigo dizia) — fica no card de resumo do pedido, logo no INÍCIO da área de mensagens
-        // ("Você está conversando sobre este pedido" / "Você está falando com o cliente sobre
-        // esse pedido"), no formato "Enviar até: DD/MM/AAAA". Por isso buscamos no card inteiro
-        // da conversa (sem excluir a área de chat) e exigimos o padrão de data para não pegar
-        // só o rótulo "A Enviar" sem a data junto.
-        let prazoEnvio = null
-        const detalheConversa = document.querySelector('[data-cy="webchat-conversation-detail"]')
-        if (detalheConversa) {
-            const candidatos = Array.from(detalheConversa.querySelectorAll('div, span'))
-            const alvo = candidatos.find((el) => {
-                if (el.children.length > 0) return false
-                const txt = (el.textContent || '').trim()
-                return /enviar\s+at[ée]\s*:?\s*\d{2}\/\d{2}\/\d{4}/i.test(txt) && txt.length < 150
-            })
-            if (alvo) {
-                const dataMatch = alvo.textContent.match(/(\d{2}\/\d{2}\/\d{4})/)
-                prazoEnvio = dataMatch ? dataMatch[1] : alvo.textContent.replace(/\s+/g, ' ').trim()
-            }
-        }
-
-        return { produtoId, produtoNome, produtoPreco, prazoEnvio }
-    }).catch(() => ({ produtoId: null, produtoNome: null, produtoPreco: null, prazoEnvio: null }))
-
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_historico.png') }).catch(() => {})
-    console.log(`📖 [Zyon/chat] Conversa lida: ${mensagens.length} mensagens | Produto: ${metadados.produtoNome || '(não identificado)'}${metadados.produtoId ? ` (#${metadados.produtoId})` : ''} | Prazo de envio: ${metadados.prazoEnvio || '(não encontrado)'}`)
-    return { mensagens, ...metadados }
-}
-
-// Digita e envia uma mensagem no campo de texto da conversa atualmente aberta.
-// O campo real é [data-cy="webchat-conversation-detail-input"] > #inputField > textarea
-// (placeholder "Insira uma mensagem aqui", Enter envia / Shift+Enter quebra linha) — confirmado
-// no HTML estático. A causa raiz do "campo não encontrado" não era o seletor, e sim a página
-// estar na URL errada: extrairInfoProduto navegava a MESMA aba do chat para a lista de produtos
-// e, se falhasse no meio do caminho, nunca voltava — então enviarMensagemNoChat procurava o
-// campo do chat numa página de cadastro de produtos. Isso foi corrigido fazendo extrairInfoProduto
-// rodar numa aba separada (browser.newPage), então a aba do chat nunca sai da conversa aberta.
-// Mantemos aqui várias variantes de seletor + checagem de visibilidade real e tentativas
-// espaçadas como segurança extra contra timing, e salvamos HTML/screenshot se mesmo assim falhar.
-async function localizarCampoMensagem(page, tentativas = 6, intervaloMs = 1500) {
-    const candidatos = [
-        '[data-cy="webchat-conversation-detail-input"] textarea',
-        '#inputField textarea',
-        'textarea[placeholder="Insira uma mensagem aqui"]',
-        '[data-cy="webchat-conversation-detail-input"] [contenteditable="true"]',
-        '#inputField [contenteditable="true"]',
-        '[data-cy="webchat-conversation-detail-input"] [contenteditable]',
-    ]
-    for (let tentativa = 0; tentativa < tentativas; tentativa++) {
-        for (const seletor of candidatos) {
-            const visivel = await page.evaluate((sel) => {
-                const el = document.querySelector(sel)
-                if (!el) return false
-                const rect = el.getBoundingClientRect()
-                return rect.width > 0 && rect.height > 0
-            }, seletor)
-            if (visivel) return seletor
-        }
-        await new Promise(r => setTimeout(r, intervaloMs))
-    }
-    return null
-}
-
-async function enviarMensagemNoChat(page, texto) {
-    const seletorCampo = await localizarCampoMensagem(page)
-    if (!seletorCampo) {
-        console.error('❌ [Zyon/chat] Campo de digitação da conversa não encontrado — salvando HTML/screenshot para inspeção')
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_campo_nao_encontrado.png') })
-        await salvarHtmlDebug(page, 'chat_campo_nao_encontrado')
-        throw new Error('campo de digitação da conversa não encontrado')
-    }
-
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_antes_enviar.png') })
-    const caixaTexto = await page.evaluate((sel) => {
-        const el = document.querySelector(sel)
-        if (!el) return null
-        const r = el.getBoundingClientRect()
-        return { x: Math.floor(r.left + r.width / 2), y: Math.floor(r.top + r.height / 2) }
-    }, seletorCampo)
-    if (caixaTexto) await humanMouseMove(page, caixaTexto.x, caixaTexto.y)
-    await page.click(seletorCampo)
-    await randomDelay(1000, 2500)
-    await page.type(seletorCampo, texto, { delay: 70 + Math.floor(Math.random() * 60) })
-    await randomDelay()
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_digitado.png') })
-    await page.keyboard.press('Enter')
-    await randomDelay()
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'chat_enviado.png') })
-    console.log(`📤 [Zyon/chat] Mensagem enviada via "${seletorCampo}" (${texto.length} chars)`)
-}
-
-// Retorna o primeiro elemento de uma lista de ElementHandles que esteja realmente visível
-// (bounding box > 0). Evita o erro do Puppeteer "Node is either not clickable or not an
-// Element", que ocorre ao chamar .click() num handle escondido/sem layout (offsetParent null).
 async function primeiroVisivel(handles) {
     for (const handle of handles) {
         const visivel = await handle.evaluate((el) => {
@@ -807,13 +352,6 @@ async function primeiroVisivel(handles) {
     return null
 }
 
-// Localiza o produto pelo nome na aba de Cadastro de Produtos, abre o menu de "3 pontinhos"
-// da linha correspondente e clica em "Visualizar página do produto" (sem editar o anúncio),
-// extraindo título, preço e descrição da página pública.
-//
-// Roda numa ABA SEPARADA (browser.newPage), nunca na `page` do chat: assim, mesmo que essa
-// extração falhe no meio do caminho (ex: menu "3 pontinhos" não abre), a aba do chat continua
-// intacta na conversa aberta e enviarMensagemNoChat não corre o risco de rodar na página errada.
 async function extrairInfoProduto(page, nomeProduto) {
     const paginaLista = await page.browser().newPage()
     try {
@@ -822,23 +360,19 @@ async function extrairInfoProduto(page, nomeProduto) {
         await randomDelay()
 
         if (paginaLista.url().includes('/account/login')) {
-            throw new Error('Sessão Shopee expirada. Execute: node shopee-login.js')
+            throw new Error('Sessão Shopee expirada.')
         }
 
         const termoBusca = (nomeProduto || '').substring(0, 60).trim()
         const camposBusca = await paginaLista.$$('input[placeholder*="roduto"], input[placeholder*="esquisar"], input[type="search"]')
         const campoBusca = await primeiroVisivel(camposBusca)
         if (campoBusca && termoBusca) {
-            const boxBusca = await campoBusca.boundingBox()
-            if (boxBusca) await humanMouseMove(paginaLista, Math.floor(boxBusca.x + boxBusca.width / 2), Math.floor(boxBusca.y + boxBusca.height / 2))
             await campoBusca.click({ clickCount: 3 })
             await randomDelay(500, 1000)
             await campoBusca.type(termoBusca, { delay: 60 + Math.floor(Math.random() * 50) })
             await paginaLista.keyboard.press('Enter')
             await randomDelay()
         }
-        await paginaLista.screenshot({ path: path.join(DEBUG_DIR, 'produto_busca.png') })
-        console.log(`📸 [Zyon/produto] Screenshot: debug_shopee/produto_busca.png (busca: "${termoBusca}")`)
 
         const menuAberto = await paginaLista.evaluate(() => {
             const botoes = Array.from(document.querySelectorAll('[class*="more"], [class*="ellipsis"], [class*="dropdown-trigger"], button[class*="action"], [class*="operation"] button'))
@@ -846,10 +380,8 @@ async function extrairInfoProduto(page, nomeProduto) {
             if (btn) { btn.click(); return true }
             return false
         })
-        if (!menuAberto) {
-            console.log('⚠️  [Zyon/produto] Menu de "3 pontinhos" não encontrado na lista de produtos')
-            return null
-        }
+        if (!menuAberto) return null
+
         await randomDelay(1500, 3000)
 
         const novaAbaPromise = new Promise((resolve) => {
@@ -869,17 +401,12 @@ async function extrairInfoProduto(page, nomeProduto) {
             if (alvo) { alvo.click(); return true }
             return false
         })
-        if (!clicado) {
-            console.log('⚠️  [Zyon/produto] Opção "Visualizar página do produto" não encontrada no menu')
-            return null
-        }
+        if (!clicado) return null
 
         let paginaProduto = await novaAbaPromise
         const abriuNovaAba = !!paginaProduto
         if (!paginaProduto) paginaProduto = paginaLista
         await randomDelay()
-        await paginaProduto.screenshot({ path: path.join(DEBUG_DIR, 'produto_pagina.png') })
-        console.log('📸 [Zyon/produto] Screenshot: debug_shopee/produto_pagina.png')
 
         const info = await paginaProduto.evaluate(() => {
             document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
@@ -895,8 +422,6 @@ async function extrairInfoProduto(page, nomeProduto) {
         const produtoId = matchId ? matchId[1] : null
 
         if (abriuNovaAba) await paginaProduto.close().catch(() => {})
-        if (!produtoId) console.log(`⚠️  [Zyon/produto] Não foi possível extrair o ID do produto da URL: ${urlProduto}`)
-
         return {
             produtoId,
             titulo: info.titulo,
@@ -910,23 +435,389 @@ async function extrairInfoProduto(page, nomeProduto) {
     }
 }
 
-// ───────────────────────── Pedidos em aberto sem arte ─────────────────────────
+// ────────────────────────────── Pedidos A Enviar (detalhado) ─────────────────────────────
 
-// Acessa "A Enviar — Em aberto" e retorna TODOS os pedidos da seção, independente do
-// nome do produto — não há como saber pela listagem se o cliente precisa enviar arte,
-// então essa decisão é feita depois, lendo a conversa de cada um no chat. A extração
-// usa o texto "ID do Pedido <ID>" como âncora (igual a verificarNovosPedidos) e sobe pelo
-// DOM em busca, no mesmo cartão, do nome do produto e do nome do comprador.
-// Seletores genéricos/best-effort: se a Shopee mudar o layout e os campos vierem vazios,
-// inspecionar debug_shopee/pedidos_personalizacao.html e ajustar (mesmo processo usado
-// para corrigir os seletores do webchat).
+// Adiciona prazo de despacho (5 dias corridos a partir da data de confirmação).
+// Classifica cada pedido como 'hoje', 'amanha' ou 'outros'.
+function calcularPrazoDespacho(dataConfirmacaoStr) {
+    if (!dataConfirmacaoStr) return null
+    const match = dataConfirmacaoStr.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/)
+    if (!match) return null
+    const dia = parseInt(match[1]), mes = parseInt(match[2]) - 1
+    const ano = match[3] ? (match[3].length === 2 ? 2000 + parseInt(match[3]) : parseInt(match[3])) : new Date().getFullYear()
+    const confirmacao = new Date(ano, mes, dia)
+    const prazo = new Date(confirmacao)
+    prazo.setDate(prazo.getDate() + 5)
+    return prazo
+}
+
+function classificarUrgencia(prazo) {
+    if (!prazo) return 'outros'
+    const hoje = new Date(); hoje.setHours(0, 0, 0, 0)
+    const amanha = new Date(hoje); amanha.setDate(amanha.getDate() + 1)
+    const p = new Date(prazo); p.setHours(0, 0, 0, 0)
+    if (p <= hoje) return 'hoje'
+    if (p.getTime() === amanha.getTime()) return 'amanha'
+    return 'outros'
+}
+
+async function coletarPedidosAEnviar() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+
+        await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 15000))
+        await verificarAutenticacaoPendente(page, ORDERS_TOSHIP_URL)
+
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'pedidos_aenviar.png') })
+
+        const pedidos = await page.evaluate(() => {
+            const resultado = []
+            const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
+            const marcadores = folhas.filter(el => /ID do Pedido\s+[A-Z0-9]{6,20}/i.test(el.textContent || ''))
+
+            for (const marcador of marcadores) {
+                const idMatch = (marcador.textContent || '').match(/ID do Pedido\s+([A-Z0-9]{6,20})/i)
+                if (!idMatch) continue
+                const orderId = idMatch[1]
+                if (resultado.some(p => p.orderId === orderId)) continue
+
+                let produtoNome = null, comprador = null, dataConfirmacao = null
+                let container = marcador
+                for (let i = 0; i < 12 && container; i++) {
+                    if (!produtoNome) {
+                        const el = container.querySelector('[class*="item-name"]')
+                        const t = (el?.textContent || '').trim()
+                        if (t.length > 3) produtoNome = t.substring(0, 200)
+                    }
+                    if (!comprador) {
+                        const el = container.querySelector('[class*="buyer-username"]')
+                        const t = (el?.textContent || '').trim()
+                        if (t.length > 1 && t.length < 60) comprador = t
+                    }
+                    if (!dataConfirmacao) {
+                        // busca padrão de data "DD/MM/AAAA" ou "DD/MM" num elemento folha dentro do container
+                        const candidatos = Array.from(container.querySelectorAll('*')).filter(el => el.children.length === 0)
+                        for (const c of candidatos) {
+                            const txt = (c.textContent || '').trim()
+                            if (/Confirmad|Pago em|Data de confirm/i.test(txt) && /\d{2}\/\d{2}/.test(txt)) {
+                                const m = txt.match(/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/)
+                                if (m) { dataConfirmacao = m[1]; break }
+                            }
+                        }
+                    }
+                    if (produtoNome && comprador) break
+                    container = container.parentElement
+                }
+                if (!produtoNome) continue
+                resultado.push({ orderId, produtoNome, comprador, dataConfirmacao })
+            }
+            return resultado
+        })
+
+        const pedidosComPrazo = pedidos.map(p => {
+            const prazo = calcularPrazoDespacho(p.dataConfirmacao)
+            return {
+                ...p,
+                prazoDespacho: prazo ? prazo.toLocaleDateString('pt-BR') : null,
+                urgencia: classificarUrgencia(prazo),
+            }
+        })
+
+        // Ordena por prazo mais antigo primeiro
+        pedidosComPrazo.sort((a, b) => {
+            const ua = a.urgencia === 'hoje' ? 0 : a.urgencia === 'amanha' ? 1 : 2
+            const ub = b.urgencia === 'hoje' ? 0 : b.urgencia === 'amanha' ? 1 : 2
+            return ua - ub
+        })
+
+        const hoje = pedidosComPrazo.filter(p => p.urgencia === 'hoje')
+        const amanha = pedidosComPrazo.filter(p => p.urgencia === 'amanha')
+        const outros = pedidosComPrazo.filter(p => p.urgencia === 'outros')
+
+        console.log(`📦 [Zyon] Pedidos A Enviar — HOJE: ${hoje.length}, AMANHÃ: ${amanha.length}, Outros: ${outros.length}`)
+        return { hoje, amanha, outros, total: pedidosComPrazo.length }
+    } finally {
+        await browser.close()
+    }
+}
+
+// ────────────────────────────────── Anúncios / Boost ─────────────────────────────────────
+
+async function impulsionarAnuncios() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+
+        await page.goto(PRODUTOS_LIST_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 12000))
+        await verificarAutenticacaoPendente(page, PRODUTOS_LIST_URL)
+        await randomDelay()
+
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'boost_antes.png') })
+
+        // Tenta clicar em todos os botões de boost/impulsionar disponíveis
+        const impulsionados = await page.evaluate(() => {
+            const textosBotao = ['Impulsionar', 'Boost', 'Impuls', 'Promover']
+            const botoes = Array.from(document.querySelectorAll('button, a, span, div'))
+            const alvos = botoes.filter(el => {
+                if (el.offsetParent === null) return false
+                const txt = (el.textContent || '').trim()
+                return textosBotao.some(t => txt.startsWith(t)) && txt.length < 20
+            })
+            const clicados = []
+            for (const btn of alvos) {
+                try { btn.click(); clicados.push(btn.textContent.trim()) } catch {}
+            }
+            return clicados
+        })
+
+        await randomDelay(3000, 6000)
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'boost_depois.png') })
+
+        const bodyText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').substring(0, 3000))
+        const boostedCount = (bodyText.match(/Impulsionado|Boosted|Em destaque/gi) || []).length
+
+        console.log(`🚀 [Zyon/boost] ${impulsionados.length} botão(ões) clicado(s) | ${boostedCount} produto(s) em destaque detectados`)
+        return { clicados: impulsionados.length, emDestaque: boostedCount, timestamp: new Date().toISOString() }
+    } finally {
+        await browser.close()
+    }
+}
+
+// ──────────────────────────────────── Shopee Ads ──────────────────────────────────────────
+
+async function verificarSaldoAds() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+
+        const respostasApi = []
+        page.on('response', response => {
+            const url = response.url()
+            if (!url.includes('shopee.com')) return
+            const ct = response.headers()['content-type'] || ''
+            if (!ct.includes('json')) return
+            response.text().then(text => {
+                try { respostasApi.push({ url: url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, ''), json: JSON.parse(text) }) } catch {}
+            }).catch(() => {})
+        })
+
+        await page.goto(ADS_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 12000))
+        await verificarAutenticacaoPendente(page, ADS_URL)
+        await randomDelay()
+
+        try {
+            await page.waitForSelector('input[type="password"]', { timeout: 5000, visible: true })
+            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 })
+            await page.keyboard.press('Enter')
+            await randomDelay()
+        } catch (_) {}
+
+        await randomDelay()
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'ads_saldo.png') })
+
+        const bodyText = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 5000))
+        console.log(`📊 [Zyon/ads] Body preview: ${bodyText.substring(0, 400)}`)
+
+        // Tenta extrair saldo de APIs interceptadas
+        let saldo = null, gastoDia = null
+        for (const { url, json } of respostasApi) {
+            if (/ads|credit|wallet|balance/i.test(url)) {
+                const v = json?.data?.credit_balance ?? json?.result?.balance ?? json?.balance
+                if (typeof v === 'number' && saldo === null) saldo = v / 100  // geralmente em centavos
+                const g = json?.data?.today_cost ?? json?.result?.today_spend
+                if (typeof g === 'number' && gastoDia === null) gastoDia = g / 100
+            }
+        }
+
+        // Fallback: extrai do texto da página
+        if (saldo === null) {
+            const matchSaldo = bodyText.match(/(?:Saldo|Crédit[o]?|Balance)[^\d]*R?\$?\s*([\d.,]+)/i)
+            if (matchSaldo) saldo = parseFloat(matchSaldo[1].replace(/\./g, '').replace(',', '.')) || null
+        }
+
+        console.log(`💳 [Zyon/ads] Saldo: ${saldo !== null ? `R$ ${saldo.toFixed(2)}` : 'não encontrado'} | Gasto hoje: ${gastoDia !== null ? `R$ ${gastoDia.toFixed(2)}` : 'não encontrado'}`)
+        return { saldo, gastoDia, saldoBaixo: saldo !== null && saldo < 5, timestamp: new Date().toISOString() }
+    } finally {
+        await browser.close()
+    }
+}
+
+// ────────────────────────────────── Minha Renda ──────────────────────────────────────────
+
+async function coletarRenda() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+
+        await page.goto(INCOME_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 12000))
+        await verificarAutenticacaoPendente(page, INCOME_URL)
+
+        try {
+            await page.waitForSelector('input[type="password"]', { timeout: 5000, visible: true })
+            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 })
+            await page.keyboard.press('Enter')
+            await randomDelay()
+        } catch (_) {}
+
+        await randomDelay()
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'renda.png') })
+
+        const bodyText = await page.evaluate(() => {
+            document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
+            return document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 6000)
+        })
+        console.log(`💰 [Zyon/renda] ${bodyText.substring(0, 400)}`)
+
+        // Extrai valores principais com regex best-effort
+        const matchPendente = bodyText.match(/(?:Renda Pendente|Pending Income|A receber)[^\d]*R?\$?\s*([\d.,]+)/i)
+        const matchSemana = bodyText.match(/(?:esta semana|this week|7 dias)[^\d]*R?\$?\s*([\d.,]+)/i)
+        const matchMes = bodyText.match(/(?:este m[eê]s|this month|30 dias)[^\d]*R?\$?\s*([\d.,]+)/i)
+        const matchUltimoPedido = bodyText.match(/ID do Pedido\s+([A-Z0-9]{6,20})/i)
+        const matchValorUltimoPedido = bodyText.match(/R?\$?\s*([\d.,]+)/)
+
+        const toFloat = m => m ? parseFloat(m[1].replace(/\./g, '').replace(',', '.')) || null : null
+
+        return {
+            rendaPendente: toFloat(matchPendente),
+            rendaSemana: toFloat(matchSemana),
+            rendaMes: toFloat(matchMes),
+            ultimoPedidoId: matchUltimoPedido ? matchUltimoPedido[1] : null,
+            timestamp: new Date().toISOString(),
+        }
+    } finally {
+        await browser.close()
+    }
+}
+
+// ──────────────────────────────── Saldo Carteira ─────────────────────────────────────────
+
+async function coletarSaldoCarteira() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+
+        await page.goto(WALLET_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await new Promise(r => setTimeout(r, 12000))
+        await verificarAutenticacaoPendente(page, WALLET_URL)
+
+        try {
+            await page.waitForSelector('input[type="password"]', { timeout: 5000, visible: true })
+            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 })
+            await page.keyboard.press('Enter')
+            await randomDelay()
+        } catch (_) {}
+
+        await randomDelay()
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'carteira.png') })
+
+        const bodyText = await page.evaluate(() => {
+            document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
+            return document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 4000)
+        })
+
+        const matchSaldo = bodyText.match(/(?:Saldo|Balance|ShopeePay)[^\d]*R?\$?\s*([\d.,]+)/i)
+        const saldo = matchSaldo ? parseFloat(matchSaldo[1].replace(/\./g, '').replace(',', '.')) || null : null
+
+        const retiradaAtiva = /retirada autom[aá]tica ativada|automatic withdrawal enabled/i.test(bodyText)
+
+        console.log(`💳 [Zyon/carteira] Saldo: ${saldo !== null ? `R$ ${saldo.toFixed(2)}` : 'não encontrado'} | Retirada automática: ${retiradaAtiva ? 'Ativa' : 'Inativa/Desconhecida'}`)
+        return { saldo, retiradaAutomatica: retiradaAtiva, timestamp: new Date().toISOString() }
+    } finally {
+        await browser.close()
+    }
+}
+
+// ──────────────────────────── Métricas completas (Datacenter) ────────────────────────────
+
+async function coletarMetricasCompletas() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+
+        const respostasApi = []
+        page.on('response', response => {
+            const url = response.url()
+            if (!url.includes('shopee.com')) return
+            const ct = response.headers()['content-type'] || ''
+            if (!ct.includes('json')) return
+            response.text().then(text => {
+                try {
+                    const json = JSON.parse(text)
+                    respostasApi.push({ url: url.replace(/^https?:\/\/[^/]+/, '').replace(/\?.*$/, ''), json })
+                } catch {}
+            }).catch(() => {})
+        })
+
+        await page.goto(DATACENTER_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+        await randomDelay()
+        await verificarAutenticacaoPendente(page, DATACENTER_URL)
+
+        try {
+            await page.waitForSelector('input[type="password"]', { timeout: 5000, visible: true })
+            await page.type('input[type="password"]', process.env.SHOPEE_PASSWORD || '', { delay: 70 })
+            await page.keyboard.press('Enter')
+            await randomDelay()
+        } catch (_) {}
+
+        await randomDelay(5000, 8000)
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'metricas.png') })
+
+        const bodyText = await page.evaluate(() => {
+            document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
+            return document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 8000)
+        })
+
+        // Extrai dados das APIs interceptadas
+        let fatDia = null, fatMes = null, totalPedidosMes = null, taxaConversao = null
+        for (const { url, json } of respostasApi) {
+            if (url.includes('/mydata/') && url.includes('/key-metric')) {
+                const paid = json?.result?.paid_gmv
+                if (paid != null && typeof paid.value === 'number') fatDia = paid.value
+                const orders = json?.result?.paid_orders
+                if (orders != null && typeof orders.value === 'number') totalPedidosMes = orders.value
+                const cvr = json?.result?.conversion_rate
+                if (cvr != null && typeof cvr.value === 'number') taxaConversao = cvr.value
+            }
+            if (!fatDia && url.includes('/traffic-source')) {
+                const s = json?.result?.overview?.total_sales
+                if (typeof s === 'number') fatDia = s
+            }
+        }
+
+        console.log(`📊 [Zyon/metricas] Dia: ${fatDia || '?'} | Pedidos mês: ${totalPedidosMes || '?'} | Conversão: ${taxaConversao || '?'}%`)
+
+        return {
+            fatDia: fatDia !== null ? formatarBRL(fatDia) : null,
+            fatMes: fatMes !== null ? formatarBRL(fatMes) : null,
+            totalPedidosMes,
+            taxaConversao,
+            resumoTexto: bodyText.substring(0, 2000),
+            timestamp: new Date().toISOString(),
+        }
+    } finally {
+        await browser.close()
+    }
+}
+
+// ─────────────────────────── Pedidos em aberto (listagem) ────────────────────────────────
+
 async function listarPedidosEmAberto(page) {
     await page.goto(ORDERS_TOSHIP_URL, { waitUntil: 'networkidle2', timeout: 30000 })
     await new Promise(r => setTimeout(r, 15000))
     await verificarAutenticacaoPendente(page, ORDERS_TOSHIP_URL)
 
     await page.screenshot({ path: path.join(DEBUG_DIR, 'pedidos_personalizacao.png') })
-    await salvarHtmlDebug(page, 'pedidos_personalizacao')
 
     const pedidos = await page.evaluate(() => {
         const resultado = []
@@ -939,15 +830,7 @@ async function listarPedidosEmAberto(page) {
             const orderId = idMatch[1]
             if (resultado.some(p => p.orderId === orderId)) continue
 
-            // Sobe pelos containers até achar um "cartão" que tenha tanto o nome do
-            // produto quanto o nome do comprador — ambos costumam estar no mesmo bloco.
-            // O nome do produto fica em [class*="item-name"] (ex: "Camisa Camiseta Polo...")
-            // e o nome do comprador em [class*="buyer-username"] — confirmado inspecionando
-            // debug_shopee/pedidos_personalizacao.html (não são links com /product//buyer/
-            // nem têm atributo [title], como a versão antiga deste seletor assumia — por
-            // isso a função vinha retornando 0 pedidos).
-            let produtoNome = null
-            let comprador = null
+            let produtoNome = null, comprador = null
             let container = marcador
             for (let i = 0; i < 10 && container; i++) {
                 if (!produtoNome) {
@@ -969,77 +852,12 @@ async function listarPedidosEmAberto(page) {
         return resultado
     })
 
-    console.log(`🎨 [Zyon/arte] ${pedidos.length} pedido(s) lido(s) em "A Enviar — Em aberto"`)
+    console.log(`📦 [Zyon/arte] ${pedidos.length} pedido(s) lido(s) em "A Enviar — Em aberto"`)
     return pedidos
 }
 
-// Abre o chat do comprador diretamente pelo ícone de chat no card do pedido, na própria
-// listagem "A Enviar — Em aberto" (botão com data-testid="buyer-chat-action", ao lado do
-// nome do comprador — confirmado em debug_shopee/pedidos_personalizacao.html). Isso é bem
-// mais confiável que buscar pelo nome dentro do chat (a busca pode não achar a conversa,
-// abrir a pessoa errada em caso de nomes parecidos, etc).
-// A página precisa já estar na listagem de pedidos (ORDERS_TOSHIP_URL) ao chamar esta função.
-// O clique pode tanto abrir o chat numa aba nova quanto trocar a própria aba para o
-// new-webchat — os dois casos são tratados, e o retorno indica qual aba usar e se ela
-// precisa ser fechada depois (aba nova) ou não (mesma aba, basta navegar de volta).
-async function abrirChatDoPedido(page, browser, orderId) {
-    await humanMouseMove(page, 400 + Math.floor(Math.random() * 300), 200 + Math.floor(Math.random() * 300))
-    await randomDelay(3000, 5000)
-    const clicou = await page.evaluate((orderId) => {
-        const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
-        const marcador = folhas.find(el => (el.textContent || '').includes(`ID do Pedido ${orderId}`))
-        if (!marcador) return false
+// ──────────────────────────── Autenticação pendente ──────────────────────────────────────
 
-        let container = marcador
-        for (let i = 0; i < 12 && container; i++) {
-            const botao = container.querySelector('[data-testid="buyer-chat-action"]')
-            if (botao) {
-                botao.scrollIntoView({ block: 'center' })
-                botao.click()
-                return true
-            }
-            container = container.parentElement
-        }
-        return false
-    }, orderId)
-
-    if (!clicou) return null
-
-    // O clique pode abrir uma aba nova com o webchat — espera até 6s para detectar isso
-    const totalAntes = (await browser.pages()).length
-    let novaPagina = null
-    const limite = Date.now() + 6000
-    while (Date.now() < limite && !novaPagina) {
-        const paginas = await browser.pages()
-        if (paginas.length > totalAntes) novaPagina = paginas[paginas.length - 1]
-        else await new Promise(r => setTimeout(r, 300))
-    }
-
-    const paginaChat = novaPagina || page
-    if (novaPagina) {
-        await novaPagina.bringToFront()
-        await configurarPagina(novaPagina)
-    }
-
-    try {
-        await paginaChat.waitForSelector(
-            '[data-cy="webchat-message-receive"], [data-cy="webchat-message-send"], [data-cy="webchat-conversation-detail-input"]',
-            { timeout: 25000 }
-        )
-    } catch {
-        if (novaPagina) await novaPagina.close().catch(() => {})
-        return null
-    }
-
-    await randomDelay()
-    await paginaChat.screenshot({ path: path.join(DEBUG_DIR, 'arte_conversa.png') })
-    return { pagina: paginaChat, abaNova: !!novaPagina }
-}
-
-// Detecta páginas de autenticação/verificação da Shopee e bloqueia o ciclo até que
-// o usuário complete a ação manual (ex: clicar no link de verificação por e-mail).
-// Não navega durante a espera — só observa page.url() e o texto da página a cada 30s.
-// Quando a sessão se estabiliza, renavega para urlRetomar e retorna ao ciclo normal.
 async function verificarAutenticacaoPendente(page, urlRetomar) {
     let avisou = false
     while (true) {
@@ -1067,7 +885,7 @@ async function verificarAutenticacaoPendente(page, urlRetomar) {
         }
 
         if (!avisou) {
-            console.log('⏸️  [Zyon] Verificação manual pendente na Shopee (ex: confirmação por e-mail) — aguardando ação manual. Pausando ciclos automáticos até a sessão ficar estável.')
+            console.log('⏸️  [Zyon] Verificação manual pendente na Shopee — pausando até a sessão ficar estável.')
             avisou = true
         } else {
             console.log('⏸️  [Zyon] Ainda aguardando verificação manual...')
@@ -1076,9 +894,147 @@ async function verificarAutenticacaoPendente(page, urlRetomar) {
     }
 }
 
+// ──────────────────────────── Verificar status de pedidos ────────────────────────────────
+
+async function verificarStatusPedidos(page, orderIds) {
+    await page.goto(ORDERS_ALL_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+    await randomDelay(7000, 11000)
+    await verificarAutenticacaoPendente(page, ORDERS_ALL_URL)
+
+    const SEL_INPUT = [
+        'input[placeholder*="ID do pedido"]',
+        'input[placeholder*="Inserir ID"]',
+        'input[placeholder*="inserir"]',
+        'input[placeholder*="pedido"]',
+    ].join(', ')
+
+    const resultados = []
+
+    for (let i = 0; i < orderIds.length; i++) {
+        const orderId = orderIds[i]
+        console.log(`🔍 [Zyon] Verificando pedido ${orderId}... (${i + 1}/${orderIds.length})`)
+        let itemResultado = { orderId, enviado: false, status: 'desconhecido', motivo: 'status_nao_lido' }
+
+        try {
+            await page.waitForSelector(SEL_INPUT, { visible: true, timeout: 12000 })
+            const searchInput = await page.$(SEL_INPUT)
+            if (!searchInput) throw new Error('Campo de busca por ID não encontrado')
+
+            const [cx, cy] = await page.evaluate(el => {
+                const r = el.getBoundingClientRect()
+                return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]
+            }, searchInput)
+            await humanMouseMove(page, cx, cy)
+            await searchInput.click({ clickCount: 3 })
+            await randomDelay(300, 600)
+            await searchInput.type(orderId, { delay: 80 + Math.floor(Math.random() * 60) })
+            await randomDelay(1200, 2000)
+
+            const clicouSugestao = await page.evaluate((id) => {
+                const sels = '[class*="dropdown"] [class*="item"], [class*="option-item"], [class*="autocomplete"] li, [class*="suggest"] li'
+                for (const el of document.querySelectorAll(sels)) {
+                    if ((el.textContent || '').includes(id)) { el.click(); return true }
+                }
+                return false
+            }, orderId)
+
+            if (!clicouSugestao) {
+                const clicouAplicar = await page.evaluate(() => {
+                    for (const btn of document.querySelectorAll('button')) {
+                        if (/\bAplicar\b/i.test(btn.textContent || '') && !btn.disabled) { btn.click(); return true }
+                    }
+                    return false
+                })
+                if (!clicouAplicar) await page.keyboard.press('Enter')
+            }
+
+            await randomDelay(3000, 5000)
+
+            const dadosPedido = await page.evaluate((id) => {
+                const bodyText = document.body.innerText || ''
+                if (/\b0\s*[Rr]esult|\b0\s+resultado|\b0 pedido/i.test(bodyText)) return { status: '0 Results', motivo: 'nao_encontrado' }
+                const statusConhecidos = ['Enviado', 'A Enviar', 'Não pago', 'Cancelado', 'Devolvido', 'Retornado']
+                const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
+                const marcador = folhas.find(el => { const t = (el.textContent || '').trim(); return t === id || t.includes(id) })
+                if (marcador) {
+                    let container = marcador
+                    for (let j = 0; j < 15 && container; j++) {
+                        const textos = Array.from(container.querySelectorAll('*')).filter(el => el.children.length === 0).map(el => (el.textContent || '').trim())
+                        for (const t of textos) {
+                            if (statusConhecidos.includes(t)) return { status: t }
+                            if (/cancelado|devolvido|retornado/i.test(t)) return { status: t }
+                        }
+                        container = container.parentElement
+                    }
+                }
+                for (const s of statusConhecidos) { if (bodyText.includes(s)) return { status: s } }
+                return { status: 'desconhecido', motivo: 'status_nao_lido' }
+            }, orderId)
+
+            const status = dadosPedido.status || 'desconhecido'
+            let enviado = false, motivo = dadosPedido.motivo || null, codigoRastreamento = null
+
+            if (status === 'Enviado') {
+                enviado = true
+                codigoRastreamento = await page.evaluate(() => {
+                    const folhas = Array.from(document.querySelectorAll('body *')).filter(el => el.children.length === 0)
+                    const el = folhas.find(el => /^[A-Z]{2}\d{8,12}[A-Z]{2}$/.test((el.textContent || '').trim()))
+                    return el ? el.textContent.trim() : null
+                })
+            } else if (status === 'A Enviar') {
+                motivo = 'a_enviar'
+            } else if (/não pago/i.test(status)) {
+                motivo = 'nao_pago'
+            } else if (/cancelado|devolvido|retornado/i.test(status)) {
+                motivo = 'cancelado'
+            } else if (status === '0 Results') {
+                motivo = 'nao_encontrado'
+            }
+
+            itemResultado = { orderId, enviado, status }
+            if (codigoRastreamento) itemResultado.codigoRastreamento = codigoRastreamento
+            if (motivo) itemResultado.motivo = motivo
+
+        } catch (err) {
+            console.error(`❌ [Zyon] Erro ao verificar pedido ${orderId}: ${err.message}`)
+            itemResultado = { orderId, enviado: false, status: 'erro', motivo: 'erro_interno', erro: err.message }
+        }
+
+        resultados.push(itemResultado)
+        console.log(`   → ${orderId}: ${itemResultado.enviado ? '✅ enviado' : '⏳ pendente'} (${itemResultado.status})`)
+
+        if (i < orderIds.length - 1) {
+            try {
+                const reiniciou = await page.evaluate(() => {
+                    for (const btn of document.querySelectorAll('button')) {
+                        if (/\bReiniciar\b/i.test(btn.textContent || '')) { btn.click(); return true }
+                    }
+                    return false
+                })
+                await randomDelay(reiniciou ? 2000 : 4000, reiniciou ? 3500 : 6000)
+                if (!reiniciou) {
+                    await page.reload({ waitUntil: 'networkidle2', timeout: 20000 })
+                    await randomDelay(5000, 8000)
+                    await verificarAutenticacaoPendente(page, ORDERS_ALL_URL)
+                }
+            } catch (err) {
+                try { await page.reload({ waitUntil: 'networkidle2', timeout: 20000 }); await randomDelay(5000, 8000) } catch {}
+            }
+            await randomDelay(2000, 4000)
+        }
+    }
+
+    const totalEnviados = resultados.filter(r => r.enviado).length
+    console.log(`✅ [Zyon] Verificação concluída — ${totalEnviados} enviado(s), ${resultados.length - totalEnviados} pendente(s)`)
+    return resultados
+}
+
 module.exports = {
     coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
+    coletarPedidosAEnviar, impulsionarAnuncios, verificarSaldoAds, coletarRenda,
+    coletarSaldoCarteira, coletarMetricasCompletas,
     launchBrowser, resolverChrome, configurarPagina,
-    abrirChat, abrirProximaConversaNaoRespondida, lerConversaCompleta, enviarMensagemNoChat, extrairInfoProduto,
-    listarPedidosEmAberto, abrirChatDoPedido, ORDERS_TOSHIP_URL,
+    extrairInfoProduto, listarPedidosEmAberto,
+    verificarStatusPedidos, ORDERS_TOSHIP_URL, ORDERS_ALL_URL,
+    verificarAutenticacaoPendente,
 }

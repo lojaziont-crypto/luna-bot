@@ -23,6 +23,23 @@ let reconnectTimer = null
 let ultimoFaturamento = { fatDia: null, fatMes: null, aEnviar: null, atualizadoEm: null }
 const STARTUP_TS = Math.floor(Date.now() / 1000)
 
+// Janela de contexto do Zeon: 30 min após primeira menção "Zeon", mensagens subsequentes
+// do dono vão diretamente ao Zeon sem precisar repetir o prefixo "Zeon"
+let zeonJanelaAtiva = { ativa: false, desde: 0, timer: null }
+const ZEON_JANELA_MS = 30 * 60 * 1000
+
+function ativarJanelaZeon() {
+    if (zeonJanelaAtiva.timer) clearTimeout(zeonJanelaAtiva.timer)
+    zeonJanelaAtiva.ativa = true
+    zeonJanelaAtiva.desde = Date.now()
+    zeonJanelaAtiva.timer = setTimeout(() => {
+        zeonJanelaAtiva.ativa = false
+        zeonJanelaAtiva.timer = null
+        console.log('⚡ [Zaya] Janela de contexto Zeon encerrada')
+    }, ZEON_JANELA_MS)
+    console.log(`⚡ [Zaya] Janela de contexto Zeon ativada (30 min)`)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Listas de Separação (PDFs do grupo Ziont)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -450,7 +467,7 @@ const server = http.createServer((req, res) => {
         req.on('data', chunk => { body += chunk })
         req.on('end', async () => {
             try {
-                const { pedidos } = JSON.parse(body)
+                const payload = JSON.parse(body)
                 if (!activeSock) {
                     console.log('⚠️  [Zaya] /notify-producao-lucas: WhatsApp não conectado')
                     res.writeHead(503, { 'Content-Type': 'application/json' })
@@ -465,24 +482,37 @@ const server = http.createServer((req, res) => {
                     return
                 }
                 const lucasJid = lucasPhone.startsWith('55') ? `${lucasPhone}@s.whatsapp.net` : `55${lucasPhone}@s.whatsapp.net`
-
                 const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
-                const linhas = pedidos.map((p, i) =>
-                    `${i + 1}. *Pedido #${p.orderId}*\n   Produto: ${p.produtoNome}\n   Comprador: ${p.comprador || '(não identificado)'}`
-                ).join('\n\n')
 
-                const mensagem = [
-                    `🎨 *Produção pendente — ${hoje}*`,
-                    ``,
-                    `Lucas, os pedidos abaixo ainda estão em "A Enviar" na Shopee e precisam de arte:`,
-                    ``,
-                    linhas,
-                    ``,
-                    `Total: ${pedidos.length} pedido(s) aguardando.`,
-                ].join('\n')
+                // Suporta payload novo { pedidosHoje, pedidosAmanha } e legado { pedidos }
+                let mensagem
+                if (payload.pedidosHoje !== undefined || payload.pedidosAmanha !== undefined) {
+                    const pedidosHoje = payload.pedidosHoje || []
+                    const pedidosAmanha = payload.pedidosAmanha || []
+                    const total = pedidosHoje.length + pedidosAmanha.length
+                    const linhasHoje = pedidosHoje.map((p, i) =>
+                        `${i + 1}. *#${p.orderId}* — ${p.produtoNome || '?'} (${p.comprador || '?'})`
+                    ).join('\n')
+                    const linhasAmanha = pedidosAmanha.map((p, i) =>
+                        `${i + 1}. *#${p.orderId}* — ${p.produtoNome || '?'} (${p.comprador || '?'})`
+                    ).join('\n')
+
+                    const partes = [`🎨 *Produção pendente — ${hoje}*`, ``, `Lucas, aqui estão os pedidos com prazo próximo:`]
+                    if (pedidosHoje.length > 0) { partes.push(``, `⚠️ *DESPACHAR HOJE (${pedidosHoje.length}):*`, linhasHoje) }
+                    if (pedidosAmanha.length > 0) { partes.push(``, `📅 *DESPACHAR AMANHÃ (${pedidosAmanha.length}):*`, linhasAmanha) }
+                    partes.push(``, `Total urgente: ${total} pedido(s).`)
+                    mensagem = partes.join('\n')
+                } else {
+                    // Payload legado
+                    const pedidos = payload.pedidos || []
+                    const linhas = pedidos.map((p, i) =>
+                        `${i + 1}. *Pedido #${p.orderId}*\n   Produto: ${p.produtoNome}\n   Comprador: ${p.comprador || '(não identificado)'}`
+                    ).join('\n\n')
+                    mensagem = [`🎨 *Produção pendente — ${hoje}*`, ``, `Lucas, pedidos em "A Enviar":`, ``, linhas, ``, `Total: ${pedidos.length} pedido(s).`].join('\n')
+                }
 
                 await activeSock.sendMessage(lucasJid, { text: mensagem })
-                console.log(`🎨 [Zaya] Aviso de produção enviado ao Lucas (${pedidos.length} pedido(s))`)
+                console.log(`🎨 [Zaya] Aviso de produção enviado ao Lucas`)
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: true }))
             } catch (err) {
@@ -515,39 +545,8 @@ const server = http.createServer((req, res) => {
         console.log(`📦 [Zaya/teste] /testar-cobranca-adriano: ${candidatas.length} lista(s) com prazo <= ${hoje}`)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true, listasEncontradas: candidatas.length, prazoReferencia: hoje, listas: candidatas.map(l => ({ id: l.id, prazoEnvio: l.prazoEnvio, pedidos: l.pedidos.length })) }))
-        if (candidatas.length === 0) return
-        ;(async () => {
-            const adrianoPhone = process.env.ADRIANO_PHONE || ''
-            if (!adrianoPhone) { console.log('⚠️  [Zaya/teste] ADRIANO_PHONE não definido'); return }
-            if (!activeSock) { console.log('⚠️  [Zaya/teste] WhatsApp não conectado'); return }
-            const adrianoJid = await obterJidAdriano()
-            if (!adrianoJid) { console.log('⚠️  [Zaya/teste] Não foi possível resolver o JID do Adriano'); return }
-            console.log(`📦 [Zaya/teste] Enviando cobrança para JID: ${adrianoJid}`)
-            for (const lista of candidatas) {
-                const pedidosTexto = lista.pedidos.length > 0
-                    ? lista.pedidos.map(id => `• ${id}`).join('\n')
-                    : '(sem IDs identificados)'
-                const mensagem = [
-                    `📦 *Despacho de hoje — ${new Date().toLocaleDateString('pt-BR')}*`,
-                    ``,
-                    `Adriano, os pedidos da lista de separação com prazo *hoje* já foram postados nos Correios/transportadora?`,
-                    ``,
-                    `Pedidos:`,
-                    pedidosTexto,
-                    ``,
-                    `Responda *"sim"* se já despachados, ou descreva o problema se houver algum impedimento.`,
-                    ``,
-                    `_(ref: ${lista.id})_`,
-                ].join('\n')
-                try {
-                    await activeSock.sendMessage(adrianoJid, { text: mensagem })
-                    adrianoPendente.set(lista.id, Date.now())
-                    console.log(`📦 [Zaya/teste] Cobrança enviada ao Adriano — lista ${lista.id}`)
-                } catch (err) {
-                    console.error(`❌ [Zaya/teste] Erro ao enviar cobrança: ${err.message}`)
-                }
-            }
-        })().catch(err => console.error('❌ [Zaya/teste] Erro na cobrança de teste:', err.message))
+        // Usa o mesmo fluxo de produção: consulta Zyon antes, envia só pendentes, envia no grupo
+        cobrarAdriano(hoje).catch(err => console.error('❌ [Zaya/teste] Erro na cobrança de teste:', err.message))
 
     } else if (req.url === '/health') {
         res.writeHead(200)
@@ -686,11 +685,19 @@ async function connectToWhatsApp() {
                     continue
                 }
 
-                // mensagem prefixada com "zeon" → repassa ao Zeon
+                // mensagem prefixada com "zeon" → ativa janela 30min e repassa ao Zeon
                 if (text && /^zeon\b/i.test(text.trim())) {
                     const conteudo = text.trim().replace(/^zeon[^\w]*/i, '').trim()
                     console.log(`⚡ [Zaya→Zeon] Mensagem do Maurício: ${conteudo}`)
+                    ativarJanelaZeon()
                     enviarMensagemZeon(conteudo)
+                    continue
+                }
+
+                // Dentro da janela de contexto Zeon: repassa sem precisar de prefixo
+                if (text && zeonJanelaAtiva.ativa) {
+                    console.log(`⚡ [Zaya→Zeon] Janela ativa — repassando ao Zeon: ${text.trim()}`)
+                    enviarMensagemZeon(text.trim())
                     continue
                 }
 
@@ -819,6 +826,23 @@ async function tratarMensagemGrupoZiont(sock, msg, from) {
 
     if (ziontGroupJid && from !== ziontGroupJid) return
 
+    // Mensagem de texto: verifica se é o Adriano respondendo a uma cobrança pendente
+    if (adrianoPendente.size > 0) {
+        const participante = msg.key.participant || ''
+        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
+        if (text && participante) {
+            const possiveisJids = new Set()
+            if (contatosJid.adriano) possiveisJids.add(contatosJid.adriano)
+            const adrianoPhone = process.env.ADRIANO_PHONE || ''
+            if (adrianoPhone) jidsBrasileiros(adrianoPhone).forEach(j => possiveisJids.add(j))
+            if (possiveisJids.has(participante)) {
+                const tratou = await tratarRespostaAdriano(sock, participante, text)
+                if (tratou) return
+            }
+        }
+    }
+
+    // Documento: verifica se é PDF de lista de separação
     const docMsg = msg.message?.documentMessage
     if (!docMsg) return
 
@@ -910,58 +934,121 @@ cron.schedule('0 21 * * *', () => {
 // Parte 3 — Cobrar o Adriano nos prazos certos (8h, 13h, 18h)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function cobrarAdriano() {
+// Versão Promise-based de /verificar-pedidos-enviados — aguarda o Zyon antes
+// de decidir o que cobrar, em vez de disparar e esquecer.
+function consultarPedidosZyon(orderIds, listaId) {
+    return new Promise((resolve, reject) => {
+        const zyonUrl = process.env.ZYON_URL || 'http://localhost:3001'
+        const data = JSON.stringify({ orderIds, listaId })
+        let parsedUrl
+        try { parsedUrl = new URL(`${zyonUrl}/verificar-pedidos-enviados`) } catch {
+            return reject(new Error(`ZYON_URL inválida: ${zyonUrl}`))
+        }
+        const lib = parsedUrl.protocol === 'https:' ? https : http
+        const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+        const req = lib.request({
+            hostname: parsedUrl.hostname, port, path: parsedUrl.pathname, method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+        }, res => {
+            let corpo = ''
+            res.on('data', chunk => { corpo += chunk })
+            res.on('end', () => {
+                try { resolve(JSON.parse(corpo)) }
+                catch { reject(new Error(`Resposta inválida do Zyon: ${corpo.slice(0, 100)}`)) }
+            })
+        })
+        req.on('error', reject)
+        req.setTimeout(120000, () => req.destroy(new Error('Timeout consultarPedidosZyon')))
+        req.write(data)
+        req.end()
+    })
+}
+
+async function cobrarAdriano(prazoFiltro) {
     if (!activeSock) {
         console.log('⚠️  [Zaya/Adriano] WhatsApp não conectado — cobrança adiada')
         return
     }
-    const adrianoPhone = process.env.ADRIANO_PHONE || ''
-    if (!adrianoPhone) {
-        console.log('⚠️  [Zaya/Adriano] ADRIANO_PHONE não definido — cobrança ignorada')
+    if (!ziontGroupJid) {
+        console.log('⚠️  [Zaya/Adriano] Grupo Ziont ainda não identificado — cobrança adiada')
         return
     }
     const adrianoJid = await obterJidAdriano()
     if (!adrianoJid) return
-    console.log(`📦 [Zaya/Adriano] Enviando cobrança para JID: ${adrianoJid}`)
+    // Número para a @menção no texto (sem @s.whatsapp.net)
+    const adrianoNumero = adrianoJid.replace('@s.whatsapp.net', '')
 
-    const hoje = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+    const hoje = new Date().toISOString().slice(0, 10)
+    const dataRef = prazoFiltro || hoje
     const listas = carregarListas()
-    const pendentes = listas.filter(l =>
-        l.prazoEnvio === hoje &&
+    const paraProcessar = listas.filter(l =>
+        (prazoFiltro ? l.prazoEnvio <= dataRef : l.prazoEnvio === dataRef) &&
         !l.processado &&
         !l.aguardandoVerificacao &&
         !adrianoPendente.has(l.id)
     )
 
-    if (pendentes.length === 0) {
-        console.log('📦 [Zaya/Adriano] Nenhuma lista com prazo hoje aguardando resposta')
+    if (paraProcessar.length === 0) {
+        console.log(`📦 [Zaya/Adriano] Nenhuma lista com prazo ${prazoFiltro ? '<= ' : ''}${dataRef} aguardando cobrança`)
         return
     }
 
-    for (const lista of pendentes) {
-        const pedidosTexto = lista.pedidos.length > 0
-            ? lista.pedidos.map(id => `• ${id}`).join('\n')
-            : '(sem IDs identificados)'
+    for (const lista of paraProcessar) {
+        if (lista.pedidos.length === 0) {
+            console.log(`⚠️  [Zaya/Adriano] Lista ${lista.id} não tem pedidos identificados — ignorando`)
+            continue
+        }
 
+        // 1. Consulta o Zyon: quais desses pedidos ainda estão em "A Enviar"?
+        let pedidosPendentes = lista.pedidos
+        let pedidosEnviados = []
+        try {
+            console.log(`🔍 [Zaya/Adriano] Consultando Zyon — lista ${lista.id}, ${lista.pedidos.length} pedido(s)...`)
+            const resultado = await consultarPedidosZyon(lista.pedidos, lista.id)
+            pedidosPendentes = resultado.pendentes || lista.pedidos
+            pedidosEnviados = resultado.enviados || []
+            console.log(`🔍 [Zaya/Adriano] Zyon respondeu — enviados: ${pedidosEnviados.length}, pendentes: ${pedidosPendentes.length}`)
+        } catch (err) {
+            console.error(`❌ [Zaya/Adriano] Erro ao consultar Zyon (${err.message}) — cobrando lista inteira como fallback`)
+        }
+
+        // 2. Tudo já enviado → notifica Zeon e marca processado, sem cobrar Adriano
+        if (pedidosPendentes.length === 0) {
+            console.log(`✅ [Zaya/Adriano] Todos os pedidos da lista ${lista.id} já despachados — notificando Zeon`)
+            enviarMensagemZeon([
+                `✅ *Despacho completo — ${new Date().toLocaleDateString('pt-BR')}*`,
+                `Todos os ${pedidosEnviados.length} pedido(s) da lista ${lista.id} já saíram de "A Enviar" na Shopee.`,
+            ].join('\n'))
+            const listas2 = carregarListas()
+            const idx = listas2.findIndex(l => l.id === lista.id)
+            if (idx !== -1) {
+                listas2[idx].processado = true
+                listas2[idx].processadoEm = new Date().toISOString()
+                listas2[idx].resultadoVerificacao = { enviados: pedidosEnviados, pendentes: [] }
+                salvarListas(listas2)
+            }
+            continue
+        }
+
+        // 3. Há pendentes → envia no grupo Ziont com @menção ao Adriano
+        const pedidosTexto = pedidosPendentes.map(id => `• ${id}`).join('\n')
         const mensagem = [
-            `📦 *Despacho de hoje — ${new Date().toLocaleDateString('pt-BR')}*`,
+            `📦 *Despacho pendente — ${new Date().toLocaleDateString('pt-BR')}*`,
             ``,
-            `Adriano, os pedidos da lista de separação com prazo *hoje* já foram postados nos Correios/transportadora?`,
+            `@${adrianoNumero} os pedidos abaixo ainda constam como "A Enviar" na Shopee. Já foram postados?`,
             ``,
-            `Pedidos:`,
             pedidosTexto,
             ``,
-            `Responda *"sim"* se já despachados, ou descreva o problema se houver algum impedimento.`,
-            ``,
+            `Responda *"sim"* se já despachados, ou descreva o problema se houver impedimento.`,
             `_(ref: ${lista.id})_`,
         ].join('\n')
 
         try {
-            await activeSock.sendMessage(adrianoJid, { text: mensagem })
-            adrianoPendente.set(lista.id, Date.now())
-            console.log(`📦 [Zaya/Adriano] Cobrança enviada — lista ${lista.id}, ${lista.pedidos.length} pedido(s)`)
+            await activeSock.sendMessage(ziontGroupJid, { text: mensagem, mentions: [adrianoJid] })
+            adrianoPendente.set(lista.id, { timestamp: Date.now(), pedidosPendentes })
+            console.log(`📦 [Zaya/Adriano] Cobrança enviada no grupo Ziont com @${adrianoNumero} — lista ${lista.id}, ${pedidosPendentes.length} pendente(s)`)
         } catch (err) {
-            console.error(`❌ [Zaya/Adriano] Erro ao enviar cobrança: ${err.message}`)
+            console.error(`❌ [Zaya/Adriano] Erro ao enviar no grupo Ziont: ${err.message}`)
         }
     }
 }
@@ -1061,15 +1148,18 @@ async function tratarRespostaAdriano(sock, from, text) {
     if (!confirmou && !problema) return false
 
     const listas = carregarListas()
-    for (const [listaId] of adrianoPendente) {
+    for (const [listaId, pendInfo] of adrianoPendente) {
         const lista = listas.find(l => l.id === listaId)
         if (!lista) continue
 
+        // Usa só os pedidos que foram cobrados (pode ser subconjunto da lista inteira)
+        const pedidosCobrados = (pendInfo && pendInfo.pedidosPendentes) ? pendInfo.pedidosPendentes : lista.pedidos
+
         if (confirmou) {
-            console.log(`✅ [Zaya/Adriano] Adriano confirmou despacho da lista ${listaId} — iniciando verificação cruzada`)
+            console.log(`✅ [Zaya/Adriano] Adriano confirmou despacho da lista ${listaId} — verificando ${pedidosCobrados.length} pedido(s) no Zyon`)
             lista.aguardandoVerificacao = true
             salvarListas(listas)
-            verificarPedidosComZyon(lista)
+            verificarPedidosComZyon({ ...lista, pedidos: pedidosCobrados })
         } else {
             console.log(`⚠️  [Zaya/Adriano] Adriano reportou problema na lista ${listaId}: "${text}"`)
             const mensagemZeon = [
@@ -1078,7 +1168,7 @@ async function tratarRespostaAdriano(sock, from, text) {
                 `Adriano reportou um problema com os pedidos de hoje:`,
                 `"${text}"`,
                 ``,
-                `Pedidos afetados: ${lista.pedidos.join(', ') || '(não identificados)'}`,
+                `Pedidos afetados: ${pedidosCobrados.join(', ') || '(não identificados)'}`,
                 `Prazo: ${lista.prazoEnvio || '(não definido)'}`,
             ].join('\n')
             enviarMensagemZeon(mensagemZeon)
