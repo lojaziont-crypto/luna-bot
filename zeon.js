@@ -92,6 +92,10 @@ function cacheValido(isoTimestamp, maxMinutos = 30) {
     return (Date.now() - new Date(isoTimestamp).getTime()) < maxMinutos * 60000
 }
 
+// Cooldown entre chamadas espontâneas ao Zyon (salvaguarda anti-loop)
+let ultimaChamadaEspontaneaZyon = 0
+const COOLDOWN_ESPONTANEO_MS = 10 * 60 * 1000  // 10 minutos
+
 // Memória: estratégias, histórico, aprendizados
 let memoria = carregarJSON(MEMORIA_FILE, {
     estrategias: [],          // estratégias que funcionaram
@@ -834,6 +838,204 @@ Se não houver nada urgente, responda apenas: "Tudo sob controle. Monitorando."`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Ciclo analítico autônomo (a cada ~3h30 com variação, das 8h às 22h)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function cicloAnaliticoAutonomo() {
+    const hora = new Date().getHours()
+    if (hora < 8 || hora > 22) {
+        console.log('🧠 [Zeon/ciclo] Fora do horário analítico (8h-22h) — ignorado')
+        return
+    }
+
+    console.log(`\n🧠 [Zeon] Ciclo analítico autônomo — ${new Date().toLocaleTimeString('pt-BR')}`)
+
+    // ── Etapa 1: coleta dados sem abrir browser ─────────────────────────────
+    const [dadosZyon, saudeResp] = await Promise.all([
+        consultarZyon('/dados').catch(() => null),
+        consultarZyon('/saude-conta').catch(() => null),
+    ])
+
+    if (dadosZyon?.fatDia != null) atualizarCacheZyon(dadosZyon)
+    const saudeSalva = saudeResp?.saude || contextoNegocio.saude
+    const dadosParaAnalisar = dadosZyon || contextoNegocio.cacheZyon
+
+    if (!dadosParaAnalisar && !saudeSalva) {
+        console.log('🧠 [Zeon/ciclo] Sem dados disponíveis (Zyon offline + sem cache) — ciclo ignorado')
+        return
+    }
+
+    // ── Etapa 2: monta contexto e decide se algo merece investigação ────────
+    const penalidade = contextoNegocio.penalidadesAtivas?.[0]
+    const temPenalidade = (contextoNegocio.penalidadesAtivas?.length ?? 0) > 0
+
+    const bloco_penalidade = temPenalidade
+        ? `⚠️ PENALIDADE ATIVA (PRIORIDADE MÁXIMA):
+- Tipo: ${penalidade?.tipo || 'desconhecido'}
+- Início: ${penalidade?.inicio || '?'}  Duração: ${penalidade?.duracaoDias || '?'} dias
+- Efeitos: redução de 80% nos pedidos, sem subsídio de frete, sem campanhas
+- Descrição: ${(penalidade?.descricao || '').substring(0, 250)}
+FOCO: qualquer análise deve priorizar o que pode AJUDAR A SAIR dessa penalidade mais rápido.`
+        : 'Sem penalidades ativas conhecidas.'
+
+    const bloco_vendas = dadosParaAnalisar?.fatDia != null
+        ? `Faturamento hoje: R$ ${dadosParaAnalisar.fatDia} | Mês: R$ ${dadosParaAnalisar.fatMes} | A enviar: ${dadosParaAnalisar.aEnviar} pedido(s)
+Dados de: ${dadosParaAnalisar.atualizadoEm ? new Date(dadosParaAnalisar.atualizadoEm).toLocaleTimeString('pt-BR') : '?'}`
+        : 'Dados de faturamento indisponíveis.'
+
+    const bloco_historico = memoria.historico_metas.length > 0
+        ? `Últimos 7 dias: ${memoria.historico_metas.slice(-7).map(m => `${m.data} R$${m.faturamento}${m.bateu ? '✅' : '❌'}`).join(', ')}`
+        : 'Sem histórico de metas.'
+
+    const bloco_ultima_inv = contextoNegocio.ultimaInvestigacao
+        ? `Última investigação: ${contextoNegocio.ultimaInvestigacao}`
+        : 'Nenhuma investigação anterior registrada.'
+
+    let decisao
+    try {
+        decisao = await groq.chat.completions.create({
+            model: 'llama-3.3-70b-versatile',
+            max_tokens: 300,
+            response_format: { type: 'json_object' },
+            messages: [{
+                role: 'system',
+                content: 'Você é Zeon, analista autônomo de uma loja Shopee (camisetas personalizadas, Ziont). Sua PRIORIDADE atual é ajudar a sair de uma penalidade ativa. Seja criterioso — só investigue quando houver real indício de problema ou oportunidade de melhora relevante para a recuperação.',
+            }, {
+                role: 'user',
+                content: `Analise os dados disponíveis e decida se algo merece investigação mais profunda AGORA.
+
+${bloco_penalidade}
+
+DADOS DE VENDAS:
+${bloco_vendas}
+
+HISTÓRICO:
+${bloco_historico}
+
+REFERÊNCIA:
+${bloco_ultima_inv}
+
+Ações de investigação disponíveis (instruções para enviar ao Zyon):
+- "verificar métricas completas: taxa de cancelamento, atraso, conversão" → metricas
+- "verificar saldo e gastos de Shopee Ads" → verificar_ads
+- "listar pedidos a enviar com urgência de hoje e amanhã" → pedidos_aenviar
+- "verificar saúde e penalidades ativas da conta" → saude_conta
+- "verificar renda pendente e saldo da carteira" → renda
+
+Responda APENAS em JSON:
+{"deveChamarZyon": true/false, "instrucaoZyon": "instrução específica" ou null, "motivoAnalise": "raciocínio conciso (máx 80 chars)", "nivelUrgencia": "baixo"|"medio"|"alto"}`,
+            }],
+        }).then(r => JSON.parse(r.choices[0].message.content)).catch(() => null)
+    } catch {}
+
+    if (!decisao) {
+        console.log('🧠 [Zeon/ciclo] Groq falhou na análise — ciclo encerrado')
+        return
+    }
+
+    console.log(`🧠 [Zeon/ciclo] Urgência: ${decisao.nivelUrgencia} | Investigar: ${decisao.deveChamarZyon} — ${decisao.motivoAnalise?.substring(0, 80)}`)
+
+    if (!decisao.deveChamarZyon || !decisao.instrucaoZyon) {
+        contextoNegocio.ultimaInvestigacao = `${new Date().toISOString().substring(0, 16)}: [sem ação] — ${decisao.motivoAnalise}`
+        salvarContexto()
+        return
+    }
+
+    // ── Etapa 3: verifica cooldown (salvaguarda anti-loop) ──────────────────
+    const agora = Date.now()
+    const tempoCooldown = agora - ultimaChamadaEspontaneaZyon
+    if (tempoCooldown < COOLDOWN_ESPONTANEO_MS) {
+        const faltam = Math.ceil((COOLDOWN_ESPONTANEO_MS - tempoCooldown) / 60000)
+        console.log(`⏳ [Zeon/ciclo] Cooldown ativo — próxima chamada espontânea em ${faltam}min`)
+        return
+    }
+
+    // ── Etapa 4: chama o Zyon para investigar ──────────────────────────────
+    ultimaChamadaEspontaneaZyon = agora
+    console.log(`🔎 [Zeon/ciclo] Investigando: "${decisao.instrucaoZyon}"`)
+
+    const respInv = await chamarTarefaZyon(decisao.instrucaoZyon)
+
+    if (!respInv?.ok || respInv.acao === 'nao_identificado') {
+        console.log(`⚠️ [Zeon/ciclo] Zyon não completou investigação — ${respInv?.error || respInv?.acao}`)
+        return
+    }
+
+    // Atualiza contexto com dados frescos da investigação
+    if (respInv.acao === 'saude_conta' && respInv.resultado) atualizarSaudeNegocio(respInv.resultado)
+    if (respInv.acao === 'metricas' && respInv.resultado) {
+        atualizarCacheZyon({ fatDia: respInv.resultado.fatDia, fatMes: respInv.resultado.fatMes })
+    }
+
+    // ── Etapa 5: avalia se o resultado vale notificar Maurício ──────────────
+    const resultadoTexto = JSON.stringify(respInv.resultado || {}).substring(0, 1500)
+
+    let avaliacao
+    try {
+        avaliacao = await groq.chat.completions.create({
+            model: 'llama-3.3-70b-versatile',
+            max_tokens: 700,
+            response_format: { type: 'json_object' },
+            messages: [{
+                role: 'system',
+                content: `Você é Zeon, analista de uma loja Shopee com penalidade ativa (redução 80% pedidos, sem subsídio frete, sem campanhas de marketing). Missão: identificar insights que ajudem a SAIR da penalidade mais rápido e proteger os indicadores da conta.`,
+            }, {
+                role: 'user',
+                content: `Você investigou: "${decisao.instrucaoZyon}"
+
+Resultado:
+${resultadoTexto}
+
+Contexto da penalidade:
+${bloco_penalidade}
+
+Dados de vendas:
+${bloco_vendas}
+
+Notifique o Maurício SOMENTE se:
+(a) Encontrou algo crítico ou anormal (ex: cancelamentos acumulando, atraso no envio, saldo crítico)
+(b) Tem recomendação concreta que ajuda a sair da penalidade mais rápido
+(c) Identificou melhora ou piora SIGNIFICATIVA na situação
+
+Se a conclusão for "tudo normal, nada de novo" — NÃO notifique. Só logue internamente.
+
+Responda APENAS em JSON:
+{
+  "deveNotificar": true/false,
+  "motivoNotificacao": "raciocínio conciso (máx 100 chars)",
+  "mensagem": "análise elaborada para o Maurício (máx 10 linhas) — explica o que foi encontrado, por que importa, e que ação tomar. Comece direto no assunto, SEM 'Zeon:' no início." ou null
+}`,
+            }],
+        }).then(r => JSON.parse(r.choices[0].message.content)).catch(() => null)
+    } catch {}
+
+    const conclusao = `${new Date().toISOString().substring(0, 16)}: "${decisao.instrucaoZyon}" → ${avaliacao?.motivoNotificacao || 'análise concluída'}`
+    contextoNegocio.ultimaInvestigacao = conclusao
+    salvarContexto()
+
+    if (avaliacao?.deveNotificar && avaliacao?.mensagem) {
+        console.log(`📨 [Zeon/ciclo] Notificando Maurício — ${avaliacao.motivoNotificacao?.substring(0, 60)}`)
+        notificarZaya(`*Zeon:* 🔎 ${avaliacao.mensagem}`)
+    } else {
+        console.log(`🔇 [Zeon/ciclo] Sem notificação — ${avaliacao?.motivoNotificacao?.substring(0, 80) || 'avaliação inconclusiva'}`)
+    }
+}
+
+// Agenda o ciclo analítico com variação humanizada (3h30 ± 30min)
+const CICLO_ANALITICO_BASE_MS = 3.5 * 60 * 60 * 1000
+const CICLO_ANALITICO_VAR_MS = 30 * 60 * 1000
+
+function agendarProximoCicloAnalitico() {
+    const delay = CICLO_ANALITICO_BASE_MS + Math.floor((Math.random() * 2 - 1) * CICLO_ANALITICO_VAR_MS)
+    const min = Math.round(delay / 60000)
+    console.log(`🧠 [Zeon] Próximo ciclo analítico em ${min}min`)
+    setTimeout(async () => {
+        await cicloAnaliticoAutonomo().catch(err => console.error('❌ [Zeon/ciclo]:', err.message))
+        agendarProximoCicloAnalitico()
+    }, delay)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Agendamentos (cron)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -993,12 +1195,17 @@ zeonServer.listen(ZEON_PORT, () => {
     console.log(`🚀 Zeon HTTP server escutando na porta ${ZEON_PORT}`)
 })
 
-console.log('⚡ Zeon iniciado — Gestor Operacional da Ziont')
-console.log('📅 Relatório matinal agendado para 7h (Brasília)')
-console.log('🌙 Relatório final agendado para 22h (Brasília)')
-console.log('🔍 Monitoramento intermediário: 8h, 10h, 12h, 14h, 16h, 18h, 20h')
+console.log('⚡ Zeon iniciado — Gestor Operacional da Ziont (modo analítico autônomo)')
+console.log('🧠 Ciclo analítico: a cada ~3h30 (±30min), 8h-22h — investigação sob decisão própria')
+console.log('🔕 Proativas removidas: sem relatório matinal, final ou monitoramento periódico')
+console.log('🚨 Alerta proativo mantido: penalidade nova (via Zyon) + análise crítica (ciclo)')
 console.log(`📡 Zaya URL: ${process.env.ZAYA_URL || '(não configurada — defina ZAYA_URL no .env)'}`)
 console.log(`💰 Fin URL: ${process.env.FIN_URL || 'http://localhost:3002 (padrão)'}`)
 console.log(`🛍️  Zyon URL: ${process.env.ZYON_URL || 'http://localhost:3001 (padrão)'}`)
-console.log('🌐 Pesquisa web: DuckDuckGo API (sem chave — automática)')
 console.log('─────────────────────────────────────────────────────────────────')
+
+// Primeiro ciclo analítico: 10min após boot (dá tempo ao Zyon de inicializar e ter dados)
+setTimeout(() => {
+    cicloAnaliticoAutonomo().catch(err => console.error('❌ [Zeon/ciclo inicial]:', err.message))
+    agendarProximoCicloAnalitico()
+}, 10 * 60 * 1000)
