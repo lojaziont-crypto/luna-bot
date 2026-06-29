@@ -24,6 +24,11 @@ const MEMORIA_FILE = path.join(__dirname, 'zeon_memoria.json')
 const DECISOES_FILE = path.join(__dirname, 'zeon_decisoes.json')
 const PENDENTES_FILE = path.join(__dirname, 'zeon_pendentes.json')
 
+// Contexto persistente do negócio — atualizado pelo Zeon quando coleta dados do Zyon
+const CONTEXTO_FILE = path.join(__dirname, 'zeon_contexto_negocio.json')
+// Perguntas que o Zyon não conseguiu mapear — Zeon tenta resolver nas próximas interações
+const PERGUNTAS_PENDENTES_FILE = path.join(__dirname, 'zeon_perguntas_pendentes.json')
+
 function carregarJSON(arquivo, padrao) {
     try {
         if (fs.existsSync(arquivo)) return JSON.parse(fs.readFileSync(arquivo, 'utf8'))
@@ -32,6 +37,59 @@ function carregarJSON(arquivo, padrao) {
 }
 function salvarJSON(arquivo, dados) {
     fs.writeFileSync(arquivo, JSON.stringify(dados, null, 2))
+}
+
+// ─── Contexto do negócio (atualizado pelo Zeon quando coleta dados do Zyon) ───
+let contextoNegocio = carregarJSON(CONTEXTO_FILE, {
+    penalidadesAtivas: [],
+    saude: null,
+    cacheZyon: null,           // último /dados do Zyon
+    ultimaAtualizacaoSaude: null,
+    ultimaAtualizacaoCache: null,
+})
+function salvarContexto() { salvarJSON(CONTEXTO_FILE, contextoNegocio) }
+
+function atualizarCacheZyon(dados) {
+    contextoNegocio.cacheZyon = dados
+    contextoNegocio.ultimaAtualizacaoCache = new Date().toISOString()
+    salvarContexto()
+}
+
+function atualizarSaudeNegocio(saude) {
+    const penasAntes = contextoNegocio.penalidadesAtivas?.length || 0
+    contextoNegocio.saude = saude
+    contextoNegocio.penalidadesAtivas = saude.penalidadesAtivas || []
+    contextoNegocio.ultimaAtualizacaoSaude = new Date().toISOString()
+    salvarContexto()
+    // Se número de penalidades aumentou, alerta (fallback — Zyon normalmente já alertou)
+    if (saude.temPenalidade && penasAntes === 0) {
+        console.log('⚠️  [Zeon] Contexto atualizado com penalidade nova detectada')
+    }
+}
+
+// ─── Perguntas pendentes (Zyon não mapeou — Zeon tenta resolver depois) ────
+let perguntasPendentes = carregarJSON(PERGUNTAS_PENDENTES_FILE, [])
+function salvarPerguntasPendentes() { salvarJSON(PERGUNTAS_PENDENTES_FILE, perguntasPendentes) }
+
+function adicionarPerguntaPendente(pergunta) {
+    // Evita duplicatas exatas
+    if (!perguntasPendentes.some(p => p.pergunta === pergunta)) {
+        perguntasPendentes.push({ pergunta, tentativas: 1, criadoEm: new Date().toISOString(), ultimaTentativa: new Date().toISOString() })
+        if (perguntasPendentes.length > 20) perguntasPendentes.shift()
+        salvarPerguntasPendentes()
+        console.log(`🗒️  [Zeon] Pergunta salva como pendente: "${pergunta}"`)
+    }
+}
+
+function marcarPerguntaResolvida(pergunta) {
+    perguntasPendentes = perguntasPendentes.filter(p => p.pergunta !== pergunta)
+    salvarPerguntasPendentes()
+}
+
+// ─── Cache helper — checa se dado tem menos de N minutos ───────────────────
+function cacheValido(isoTimestamp, maxMinutos = 30) {
+    if (!isoTimestamp) return false
+    return (Date.now() - new Date(isoTimestamp).getTime()) < maxMinutos * 60000
 }
 
 // Memória: estratégias, histórico, aprendizados
@@ -449,7 +507,13 @@ function registrarEstrategia(estrategia) {
 
 const PALAVRAS_MEMORIA = ['estuda', 'guarda', 'anota', 'lembra', 'estratégia', 'estrategia']
 const PALAVRAS_PESQUISA = ['pesquisa', 'pesquisar', 'busca', 'buscar', 'procura', 'procurar', 'pesquise', 'busque']
-const PALAVRAS_SHOPEE = ['pedido', 'shopee', 'ads', 'anúncio', 'anuncio', 'impulsionar', 'boost', 'renda', 'carteira', 'saldo', 'métricas', 'metricas', 'a enviar', 'despacho', 'dispatch', 'faturamento', 'enviar hoje', 'enviar amanhã']
+const PALAVRAS_SHOPEE = [
+    'pedido', 'shopee', 'ads', 'anúncio', 'anuncio', 'impulsionar', 'boost',
+    'renda', 'carteira', 'saldo', 'métricas', 'metricas', 'a enviar', 'despacho',
+    'dispatch', 'faturamento', 'enviar hoje', 'enviar amanhã',
+    'penalidade', 'penalidades', 'desempenho', 'saúde da conta', 'saude da conta',
+    'restrição', 'restricao', 'suspensão', 'performance', 'conta suspensa',
+]
 
 function chamarTarefaZyon(descricao) {
     return new Promise((resolve) => {
@@ -528,11 +592,45 @@ function formatarResultadoZyon(acao, resultado) {
             return `💳 *Carteira ShopeePay*\nSaldo: ${resultado.saldo != null ? `R$ ${resultado.saldo.toFixed(2)}` : '?'}\nRetirada automática: ${resultado.retiradaAutomatica ? 'Ativa ✅' : 'Inativa/Desconhecida'}`
         case 'metricas':
             return `📊 *Métricas*\nFaturamento dia: ${resultado.fatDia ?? '?'}\nPedidos mês: ${resultado.totalPedidosMes ?? '?'}\nConversão: ${resultado.taxaConversao ?? '?'}%`
+        case 'saude_conta': {
+            if (!resultado.temPenalidade && !resultado.penalidadesAtivas?.length) {
+                return `✅ *Saúde da Conta Shopee*\nNenhuma penalidade ativa detectada.\n${resultado.metricas?.taxaCancelamento != null ? `Cancelamento: ${resultado.metricas.taxaCancelamento}%` : ''}`
+            }
+            const pena = resultado.penalidadesAtivas?.[0]
+            return [
+                `🚨 *Saúde da Conta Shopee — PENALIDADE ATIVA*`,
+                `Tipo: ${pena?.tipo ?? '?'}`,
+                pena?.inicio ? `Início: ${pena.inicio}` : null,
+                pena?.duracaoDias ? `Duração: ${pena.duracaoDias} dias` : null,
+                pena?.fimPrevisto ? `Previsto encerrar: ${pena.fimPrevisto}` : null,
+                ``,
+                `Descrição: ${(pena?.descricao || '').substring(0, 400)}`,
+            ].filter(Boolean).join('\n')
+        }
         case 'verificar_pedido_especifico':
             if (!resultado) return 'Pedido não encontrado.'
             return `🔍 *Pedido #${resultado.orderId}*\nStatus: ${resultado.status ?? '?'}${resultado.codigoRastreamento ? `\nRastreamento: ${resultado.codigoRastreamento}` : ''}`
         default:
             return `Resultado: ${JSON.stringify(resultado).substring(0, 300)}`
+    }
+}
+
+// Tenta resolver perguntas pendentes de sessões anteriores — chama sem notificar caso já resolvido
+async function tentarResolverPendentes() {
+    if (perguntasPendentes.length === 0) return
+    console.log(`🗒️  [Zeon] ${perguntasPendentes.length} pergunta(s) pendente(s) — tentando resolver...`)
+    for (const item of [...perguntasPendentes]) {
+        const resp = await chamarTarefaZyon(item.pergunta)
+        item.ultimaTentativa = new Date().toISOString()
+        item.tentativas = (item.tentativas || 1) + 1
+        if (resp?.ok && resp.acao !== 'nao_identificado') {
+            const texto = formatarResultadoZyon(resp.acao, resp.resultado)
+            notificarZaya(`*Zeon:* 📌 _Resposta atrasada sobre "${item.pergunta.substring(0, 60)}":_\n\n${texto}`)
+            marcarPerguntaResolvida(item.pergunta)
+            console.log(`✅ [Zeon] Pergunta pendente resolvida: "${item.pergunta}"`)
+        } else {
+            salvarPerguntasPendentes()
+        }
     }
 }
 
@@ -547,15 +645,39 @@ async function processarMensagemMauricio(mensagem) {
             registrarEstrategia(mensagem)
         }
 
-        // Detecta pedidos relacionados à Shopee → delega ao Zyon via /executar-tarefa
+        // Tenta resolver pendentes de sessões anteriores (não-bloqueante: fire-and-forget)
+        if (perguntasPendentes.length > 0) {
+            tentarResolverPendentes().catch(err => console.error('❌ [Zeon/pendentes]:', err.message))
+        }
+
+        // ── Pedidos relacionados à Shopee ────────────────────────────────────
         const ehShopee = PALAVRAS_SHOPEE.some(p => mensagemLower.includes(p))
         if (ehShopee) {
             console.log(`🛍️ [Zeon] Pedido Shopee identificado — delegando ao Zyon: ${mensagem}`)
+
+            // a) Checa cache local antes de abrir o browser
+            if (contextoNegocio.cacheZyon && cacheValido(contextoNegocio.ultimaAtualizacaoCache, 20)) {
+                const cache = contextoNegocio.cacheZyon
+                // Verifica se a pergunta pode ser respondida pelo cache (dados básicos)
+                const temFat = cache.fatDia != null && /faturamento|vendas|dia/i.test(mensagemLower)
+                const temPed = cache.aEnviar != null && /pedido|enviar|despacho/i.test(mensagemLower)
+                if (temFat || temPed) {
+                    const respCache = [
+                        temFat ? `💰 Faturamento do dia (cache): R$${cache.fatDia} | Mês: R$${cache.fatMes}` : null,
+                        temPed ? `📦 A Enviar (cache): ${cache.aEnviar} pedido(s)` : null,
+                        `_Dados de ${new Date(contextoNegocio.ultimaAtualizacaoCache).toLocaleTimeString('pt-BR')} — se precisar atualizar, peça "Zeon atualizar dados"._`,
+                    ].filter(Boolean).join('\n')
+                    notificarZaya(`*Zeon:* ${respCache}`)
+                    console.log(`📦 [Zeon] Respondeu com cache local`)
+                    return
+                }
+            }
+
             notificarZaya(`*Zeon:* 🛍️ Consultando o Zyon sobre: _${mensagem}_...`)
 
+            // b) Chama o Zyon
             const respZyon = await chamarTarefaZyon(mensagem)
 
-            // Falha na chamada ao Zyon (conexão recusada, timeout, erro interno)
             if (!respZyon || !respZyon.ok) {
                 const motivo = respZyon?.error || 'sem resposta'
                 console.error(`❌ [Zeon] Zyon não completou a tarefa: ${motivo}`)
@@ -563,31 +685,52 @@ async function processarMensagemMauricio(mensagem) {
                 return
             }
 
-            // Zyon identificou a ação e retornou resultado
+            // Zyon identificou e retornou resultado — atualiza contexto se for saúde ou dados
             if (respZyon.acao !== 'nao_identificado') {
+                if (respZyon.acao === 'saude_conta' && respZyon.resultado) {
+                    atualizarSaudeNegocio(respZyon.resultado)
+                }
+                if (respZyon.acao === 'metricas' && respZyon.resultado) {
+                    atualizarCacheZyon({ fatDia: respZyon.resultado.fatDia, fatMes: respZyon.resultado.fatMes })
+                }
                 console.log(`📨 [Zeon] Enviando resposta final ao Maurício via Zaya`)
                 const texto = formatarResultadoZyon(respZyon.acao, respZyon.resultado)
                 notificarZaya(`*Zeon:* ${texto}`)
                 return
             }
 
-            // Zyon não conseguiu mapear para nenhuma ação conhecida
-            // Usa Groq como fallback com dados do /dados (sem abrir browser)
-            console.log(`⚠️ [Zeon] Zyon não identificou ação — usando Groq como fallback`)
-            const dadosZyon = await consultarZyon('/dados')
-            const contextoZyon = dadosZyon?.fatDia != null
-                ? `Dados Shopee (cache): Dia R$${dadosZyon.fatDia}, Mês R$${dadosZyon.fatMes}, A enviar: ${dadosZyon.aEnviar}.`
-                : 'Dados Shopee não disponíveis no cache.'
-            const resposta = await gerarAnalise(
-                `Maurício perguntou sobre Shopee: "${mensagem}"\n${contextoZyon}`,
-                'Responda de forma direta com base nos dados disponíveis. Máximo 6 linhas.'
-            )
-            console.log(`📨 [Zeon] Enviando resposta final ao Maurício via Zaya`)
-            notificarZaya(`*Zeon:* ${resposta}`)
+            // c) Zyon não mapeou — tenta reformular 1 vez antes de desistir
+            console.log(`⚠️ [Zeon] Zyon não identificou ação — tentando reformulação`)
+            let reformulada = null
+            try {
+                reformulada = await groq.chat.completions.create({
+                    model: 'llama-3.3-70b-versatile',
+                    max_tokens: 80,
+                    messages: [{
+                        role: 'user',
+                        content: `Reformule para um agente Shopee que entende estas ações: pedidos_aenviar, boost_anuncios, verificar_ads, renda, carteira, metricas, saude_conta, verificar_pedido_especifico.\n\nPergunta original: "${mensagem}"\n\nRetorne SOMENTE a versão reformulada, curta e objetiva.`
+                    }]
+                }).then(r => r.choices[0].message.content.trim()).catch(() => null)
+            } catch {}
+
+            if (reformulada && reformulada !== mensagem) {
+                console.log(`🔄 [Zeon] Tentando com reformulação: "${reformulada}"`)
+                const resp2 = await chamarTarefaZyon(reformulada)
+                if (resp2?.ok && resp2.acao !== 'nao_identificado') {
+                    console.log(`📨 [Zeon] Reformulação funcionou — enviando resultado`)
+                    const texto = formatarResultadoZyon(resp2.acao, resp2.resultado)
+                    notificarZaya(`*Zeon:* ${texto}`)
+                    return
+                }
+            }
+
+            // Ainda não funcionou — salva como pendente e avisa Maurício
+            adicionarPerguntaPendente(mensagem)
+            notificarZaya(`*Zeon:* ⚠️ Não consegui mapear essa consulta para uma ação do Zyon agora.\n\nGuardei a pergunta e vou tentar resolver nas próximas interações.`)
             return
         }
 
-        // Detecta intenção de pesquisa na web
+        // ── Pesquisa na web ────────────────────────────────────────────────
         const devePesquisar = PALAVRAS_PESQUISA.some(p => mensagemLower.startsWith(p) || mensagemLower.includes(` ${p} `))
         if (devePesquisar) {
             const query = mensagem.replace(new RegExp(`^(${PALAVRAS_PESQUISA.join('|')})[^\\w]*`, 'i'), '').trim() || mensagem
@@ -599,14 +742,20 @@ async function processarMensagemMauricio(mensagem) {
             }
         }
 
-        // Resposta geral via Groq
+        // ── Resposta geral via Groq (com contexto atualizado) ─────────────
+        // Atualiza o cache do Zyon se estiver desatualizado (sem abrir browser)
         const dadosZyon = await consultarZyon('/dados')
+        if (dadosZyon?.fatDia != null) atualizarCacheZyon(dadosZyon)
+
         const contextoZyon = dadosZyon?.fatDia != null
             ? `Shopee agora: Dia R$${dadosZyon.fatDia}, Mês R$${dadosZyon.fatMes}, A enviar: ${dadosZyon.aEnviar}.`
             : ''
+        const contextoPenalidade = contextoNegocio.penalidadesAtivas?.length > 0
+            ? `\n⚠️ ATENÇÃO: conta com penalidade ativa (${contextoNegocio.penalidadesAtivas[0]?.tipo}).`
+            : ''
 
         const resposta = await gerarAnalise(
-            `Maurício enviou: "${mensagem}"${contextoZyon ? `\n\n${contextoZyon}` : ''}`,
+            `Maurício enviou: "${mensagem}"${contextoZyon ? `\n\n${contextoZyon}` : ''}${contextoPenalidade}`,
             `Responda ao Maurício de forma direta e objetiva. Se for pergunta, responda. Se for instrução, confirme e execute. Máximo 8 linhas.`
         )
 
@@ -685,20 +834,10 @@ Se não houver nada urgente, responda apenas: "Tudo sob controle. Monitorando."`
 // Agendamentos (cron)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Relatório matinal: 7h
-cron.schedule('0 7 * * *', () => {
-    relatorioMatinal()
-}, { timezone: 'America/Sao_Paulo' })
-
-// Relatório final: 22h
-cron.schedule('0 22 * * *', () => {
-    relatorioFinal()
-}, { timezone: 'America/Sao_Paulo' })
-
-// Monitoramento intermediário: a cada 2h (8h, 10h, 12h, 14h, 16h, 18h, 20h)
-cron.schedule('0 8,10,12,14,16,18,20 * * *', () => {
-    monitoramentoIntermediario()
-}, { timezone: 'America/Sao_Paulo' })
+// Notificações proativas de rotina desativadas (Parte 1):
+// relatorioMatinal, relatorioFinal e monitoramentoIntermediario foram removidos.
+// O Zeon agora é reativo — responde ao Maurício quando ele pergunta,
+// e só notifica proativamente para eventos genuinamente críticos (ex: penalidade nova).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Servidor HTTP

@@ -31,6 +31,154 @@ async function humanMouseMove(page, x, y) {
     await new Promise(r => setTimeout(r, 50 + Math.random() * 100))
 }
 
+// ──────────────────────── Navegação humana pela sidebar ──────────────────────────────────
+
+async function comportamentoHumano(page) {
+    await page.evaluate(() => {
+        window.scrollTo({ top: Math.floor(Math.random() * 500), behavior: 'smooth' })
+    }).catch(() => {})
+    await randomDelay(800, 2000)
+    await humanMouseMove(page, 300 + Math.floor(Math.random() * 700), 200 + Math.floor(Math.random() * 400)).catch(() => {})
+    await randomDelay(1000, 2500)
+}
+
+async function tentarNavegacaoMenu(page, textosPai, textosFilho) {
+    const clicouPai = await page.evaluate((textos) => {
+        const sidebar = document.querySelector(
+            '[class*="sidebar"], [class*="nav-menu"], [class*="left-menu"], [class*="shop-sidebar"], [class*="side-nav"]'
+        ) || document.body
+        for (const texto of textos) {
+            const items = Array.from(sidebar.querySelectorAll('a, li, span, div'))
+            const item = items.find(el => {
+                const t = (el.childNodes[0]?.textContent || el.textContent || '').trim()
+                return (t === texto || t.startsWith(texto)) && el.offsetParent !== null
+            })
+            if (item) { item.click(); return texto }
+        }
+        return null
+    }, textosPai)
+
+    if (!clicouPai) return false
+    console.log(`🖱️  [Zyon] Menu clicado: "${clicouPai}"`)
+    await randomDelay(900, 1800)
+
+    if (!textosFilho || textosFilho.length === 0) return true
+
+    const clicouFilho = await page.evaluate((textos) => {
+        for (const texto of textos) {
+            const items = Array.from(document.querySelectorAll('a, li, span'))
+            const item = items.find(el => {
+                const t = (el.childNodes[0]?.textContent || el.textContent || '').trim()
+                return (t === texto || t.startsWith(texto)) && el.offsetParent !== null
+            })
+            if (item) { item.click(); return texto }
+        }
+        return null
+    }, textosFilho)
+
+    if (clicouFilho) console.log(`🖱️  [Zyon] Sub-menu clicado: "${clicouFilho}"`)
+    return !!clicouFilho
+}
+
+const DESTINOS_MENU = {
+    pedidos_aenviar: {
+        url: `${BASE_URL}/portal/sale/order?type=toship&source=to_process&invoice_status=all_type&sort_by=confirmed_date_desc`,
+        paiTextos: ['Pedidos', 'Meus Pedidos', 'Orders'],
+        filhoTextos: ['A Enviar', 'Prepare to Ship'],
+    },
+    pedidos_todos: {
+        url: `${BASE_URL}/portal/sale/order`,
+        paiTextos: ['Pedidos', 'Meus Pedidos', 'Orders'],
+        filhoTextos: ['Todos', 'Todos os Pedidos', 'All Orders'],
+    },
+    produtos: {
+        url: `${BASE_URL}/portal/product/list/all`,
+        paiTextos: ['Produtos', 'Meus Produtos', 'My Products'],
+        filhoTextos: ['Todos os Produtos', 'Todos', 'All Products'],
+    },
+    marketing_ads: {
+        url: `${BASE_URL}/portal/marketing/pas/index`,
+        paiTextos: ['Marketing'],
+        filhoTextos: ['Shopee Ads', 'Ads'],
+    },
+    financas_renda: {
+        url: `${BASE_URL}/portal/finance/income`,
+        paiTextos: ['Finanças', 'Finance'],
+        filhoTextos: ['Minha Renda', 'Renda', 'My Income'],
+    },
+    financas_carteira: {
+        url: `${BASE_URL}/portal/finance/wallet/shopeepay`,
+        paiTextos: ['Finanças', 'Finance'],
+        filhoTextos: ['Carteira', 'ShopeePay', 'Wallet'],
+    },
+    datacenter: {
+        url: `${BASE_URL}/datacenter/overview`,
+        paiTextos: ['Central de Dados', 'Data Center', 'Dados'],
+        filhoTextos: [],
+    },
+    saude_conta: {
+        url: `${BASE_URL}/portal/performance`,
+        paiTextos: ['Desempenho', 'Desempenho da Conta', 'Account Health', 'Performance'],
+        filhoTextos: [],
+    },
+}
+
+async function navegarParaDestino(page, destino) {
+    const config = DESTINOS_MENU[destino]
+    if (!config) throw new Error(`Destino desconhecido: ${destino}`)
+
+    const urlAtual = page.url()
+
+    // Verifica se já está na página certa (incluindo query params relevantes)
+    const jaEstaNaPagina = (() => {
+        try {
+            const alvo = new URL(config.url)
+            const atual = new URL(urlAtual)
+            if (atual.pathname !== alvo.pathname) return false
+            const alvoType = alvo.searchParams.get('type')
+            const atualType = atual.searchParams.get('type')
+            return alvoType === atualType
+        } catch { return false }
+    })()
+
+    if (jaEstaNaPagina) {
+        await comportamentoHumano(page)
+        return
+    }
+
+    // Tenta navegar via menu da sidebar
+    const emShopee = urlAtual.includes('seller.shopee.com.br') && !urlAtual.includes('/login')
+    if (emShopee && config.paiTextos.length > 0) {
+        const navegou = await tentarNavegacaoMenu(page, config.paiTextos, config.filhoTextos)
+        if (navegou) {
+            await randomDelay(5000, 10000)
+            await verificarAutenticacaoPendente(page, config.url)
+            await comportamentoHumano(page)
+            return
+        }
+        console.log(`⚠️  [Zyon] Sidebar não encontrada para "${destino}" — usando URL direta como fallback`)
+    }
+
+    // Fallback: URL direta
+    await page.goto(config.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await randomDelay(4000, 8000)
+    await verificarAutenticacaoPendente(page, config.url)
+    await comportamentoHumano(page)
+}
+
+// Abre a sessão partindo sempre do dashboard — simula entrada humana
+async function iniciarSessaoShopee(page) {
+    console.log('🏠 [Zyon] Abrindo dashboard da Shopee...')
+    await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await randomDelay(3000, 6000)
+    if (page.url().includes('/login')) throw new Error('Sessão Shopee expirada — execute node shopee-login.js')
+    await verificarAutenticacaoPendente(page, `${BASE_URL}/portal/sale/overview`)
+    await comportamentoHumano(page)
+    console.log('✅ [Zyon] Sessão ativa — no dashboard')
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 async function configurarPagina(page) {
@@ -105,13 +253,7 @@ async function coletarDadosShopee() {
         const page = await browser.newPage()
         await configurarPagina(page)
 
-        await page.goto(`${BASE_URL}/portal/sale/overview`, { waitUntil: 'domcontentloaded', timeout: 30000 })
-        await new Promise(r => setTimeout(r, 4000))
-
-        if (page.url().includes('/account/login')) {
-            throw new Error('Sessão Shopee expirada. Execute novamente: node shopee-login.js')
-        }
-        console.log('✅ [Zyon] Sessão ativa')
+        await iniciarSessaoShopee(page)
 
         console.log('📊 [Zyon] Coletando vendas...')
         await page.evaluate(() => window.scrollTo(0, 400))
@@ -1029,10 +1171,105 @@ async function verificarStatusPedidos(page, orderIds) {
     return resultados
 }
 
+// ──────────────────────────── Saúde da Conta / Desempenho ───────────────────────────────
+
+async function coletarSaudeConta() {
+    const browser = await launchBrowser(resolverChrome())
+    try {
+        const page = await browser.newPage()
+        await configurarPagina(page)
+        await iniciarSessaoShopee(page)
+
+        // Tenta via menu; fallback para URL direta e variações conhecidas
+        const navegouPorMenu = await tentarNavegacaoMenu(page,
+            ['Desempenho', 'Desempenho da Conta', 'Account Health', 'Performance'],
+            []
+        )
+        if (!navegouPorMenu) {
+            // Tenta URLs conhecidas até uma funcionar
+            for (const tentativaUrl of [
+                `${BASE_URL}/portal/performance`,
+                `${BASE_URL}/portal/account/performance`,
+                `${BASE_URL}/portal/seller/performance`,
+            ]) {
+                try {
+                    await page.goto(tentativaUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
+                    await randomDelay(3000, 6000)
+                    if (!page.url().includes('/login') && !page.url().includes('/verify')) break
+                } catch {}
+            }
+        } else {
+            await randomDelay(4000, 8000)
+        }
+
+        await verificarAutenticacaoPendente(page, `${BASE_URL}/portal/performance`)
+        await comportamentoHumano(page)
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'saude_conta.png') })
+        console.log(`🏥 [Zyon/saude] URL: ${page.url()} — screenshot salvo`)
+
+        const bodyText = await page.evaluate(() => {
+            document.querySelectorAll('script, style, svg, noscript, iframe').forEach(el => el.remove())
+            return document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 10000)
+        })
+        console.log(`🏥 [Zyon/saude] Texto extraído (${bodyText.length} chars): ${bodyText.substring(0, 500)}`)
+
+        // Detecta penalidades — palavras em PT e EN
+        const temPenalidade = /penalidade|penalty|punição|restricão|restrição|suspensão|sanção|bloqueio|proibido|banido|redução de pedido|bloqueado/i.test(bodyText)
+        const temPenalidadeGrave = /80%|grave|grave viola|proibid|banid|encerramento|21 dias|7 dias/i.test(bodyText)
+
+        // Tenta extrair bloco de texto de penalidade
+        const penalidadesAtivas = []
+        if (temPenalidade) {
+            // Extrai a sentença mais relevante sobre a penalidade
+            const sentencas = bodyText.split(/[.!?]/)
+            const senPenalidade = sentencas.filter(s =>
+                /penalidade|penalty|punição|restricão|restrição|suspensão|sanção|bloqueio|proibido|redução de pedido/i.test(s)
+            ).slice(0, 5)
+
+            // Tenta extrair datas
+            const matchInicio = bodyText.match(/(?:desde|from|iniciou|started|vigente desde|a partir de)[^\d]*(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i)
+            const matchFim = bodyText.match(/(?:até|until|encerra|ends|válido até|terminará)[^\d]*(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/i)
+            const matchDias = bodyText.match(/(\d+)\s*dias?/i)
+
+            penalidadesAtivas.push({
+                tipo: temPenalidadeGrave ? 'grave' : 'moderada',
+                descricao: senPenalidade.join('. ').trim().substring(0, 600) || 'Penalidade detectada — veja screenshot saude_conta.png',
+                inicio: matchInicio?.[1] || null,
+                fimPrevisto: matchFim?.[1] || null,
+                duracaoDias: matchDias ? parseInt(matchDias[1]) : null,
+            })
+        }
+
+        // Extrai métricas numéricas com regex
+        const toFloat = (m) => m ? parseFloat(m[1].replace(',', '.')) : null
+        const metricas = {
+            taxaCancelamento: toFloat(bodyText.match(/(?:cancelamento|cancellation)[^\d]*(\d+(?:[.,]\d+)?)\s*%/i)),
+            taxaAtraso: toFloat(bodyText.match(/(?:atraso|atraso no envio|late shipment|envio atrasado)[^\d]*(\d+(?:[.,]\d+)?)\s*%/i)),
+            taxaNaoEnvio: toFloat(bodyText.match(/(?:não enviado|non-delivery|não despacho)[^\d]*(\d+(?:[.,]\d+)?)\s*%/i)),
+            pontuacao: toFloat(bodyText.match(/(?:pontuação|score|rating)[^\d]*(\d+(?:[.,]\d+)?)/i)),
+            avaliacaoMedia: toFloat(bodyText.match(/(?:avaliação média|average rating)[^\d]*(\d+(?:[.,]\d+)?)/i)),
+        }
+
+        console.log(`🏥 [Zyon/saude] Penalidade: ${temPenalidade} | Grave: ${temPenalidadeGrave} | Metricas: ${JSON.stringify(metricas)}`)
+
+        return {
+            penalidadesAtivas,
+            temPenalidade,
+            temPenalidadeGrave,
+            metricas,
+            urlVisitada: page.url(),
+            resumoTexto: bodyText.substring(0, 3000),
+            timestamp: new Date().toISOString(),
+        }
+    } finally {
+        await browser.close()
+    }
+}
+
 module.exports = {
     coletarDadosShopee, verificarNovosPedidos, coletarStatusPedidos, coletarFaturamentoGerencial,
     coletarPedidosAEnviar, impulsionarAnuncios, verificarSaldoAds, coletarRenda,
-    coletarSaldoCarteira, coletarMetricasCompletas,
+    coletarSaldoCarteira, coletarMetricasCompletas, coletarSaudeConta,
     launchBrowser, resolverChrome, configurarPagina,
     extrairInfoProduto, listarPedidosEmAberto,
     verificarStatusPedidos, ORDERS_TOSHIP_URL, ORDERS_ALL_URL,

@@ -15,7 +15,7 @@ const Groq = require('groq-sdk')
 const {
     verificarNovosPedidos, coletarFaturamentoGerencial, coletarStatusPedidos,
     coletarPedidosAEnviar, impulsionarAnuncios, verificarSaldoAds,
-    coletarRenda, coletarSaldoCarteira, coletarMetricasCompletas,
+    coletarRenda, coletarSaldoCarteira, coletarMetricasCompletas, coletarSaudeConta,
     launchBrowser, resolverChrome, configurarPagina,
     listarPedidosEmAberto, verificarStatusPedidos,
 } = require('./shopee-agent')
@@ -24,6 +24,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 const PEDIDOS_FILE = path.join(__dirname, 'pedidos_vistos.json')
 const BOOST_LOG_FILE = path.join(__dirname, 'zyon_boost_log.json')
+const SAUDE_CONTA_FILE = path.join(__dirname, 'zyon_saude_conta.json')
 let ultimoPedidoVisto = null
 let emColeta = false  // mutex: nunca abre dois browsers ao mesmo tempo
 
@@ -289,6 +290,41 @@ async function verificarAdsEFinanceiro() {
 
 // ────────────── Informações Gerenciais + Resumo IA (~20h-21h) ─────────────────
 
+async function checarSaudeConta() {
+    console.log(`\n🏥 [Zyon] Verificando saúde/desempenho da conta — ${new Date().toLocaleTimeString('pt-BR')}`)
+    try {
+        const saude = await coletarSaudeConta()
+        const anterior = carregarJSON(SAUDE_CONTA_FILE, null)
+
+        // Detecta penalidade NOVA (não existia antes)
+        const penalidadeNova = saude.temPenalidade && (!anterior || !anterior.temPenalidade)
+        if (penalidadeNova) {
+            const descPenalidade = saude.penalidadesAtivas[0]?.descricao || 'Detalhes não extraídos automaticamente'
+            const msg = [
+                `🚨 *[Zyon] PENALIDADE NOVA DETECTADA NA CONTA SHOPEE!*`,
+                ``,
+                `Tipo: ${saude.penalidadesAtivas[0]?.tipo || '?'} | Início: ${saude.penalidadesAtivas[0]?.inicio || '?'} | Duração: ${saude.penalidadesAtivas[0]?.duracaoDias ? `${saude.penalidadesAtivas[0].duracaoDias} dias` : '?'}`,
+                ``,
+                `Descrição: ${descPenalidade.substring(0, 400)}`,
+                ``,
+                `Acesse "Desempenho da Conta" no portal Shopee para ver os detalhes completos.`,
+            ].join('\n')
+            notifyDono(msg)
+            console.log('🚨 [Zyon] Penalidade nova detectada — dono notificado')
+        } else if (saude.temPenalidade) {
+            console.log(`⚠️  [Zyon/saude] Penalidade já conhecida — sem notificação nova`)
+        } else {
+            console.log('✅ [Zyon/saude] Conta sem penalidades detectadas')
+        }
+
+        salvarJSON(SAUDE_CONTA_FILE, saude)
+        return saude
+    } catch (err) {
+        console.error('❌ [Zyon] Erro ao verificar saúde da conta:', err.message)
+        return null
+    }
+}
+
 async function coletarRelatorioGerencial() {
     ultimaExecucao.gerencial = Date.now()
     if (emColeta) {
@@ -300,6 +336,9 @@ async function coletarRelatorioGerencial() {
         console.log(`\n📊 [Zyon] Coletando métricas gerenciais — ${new Date().toLocaleTimeString('pt-BR')}`)
         const metricas = await coletarMetricasCompletas()
         ultimasMetricas = metricas
+
+        // Saúde da conta — roda sequencialmente, dentro do mesmo bloco emColeta
+        await checarSaudeConta()
 
         // Gera resumo via Groq
         const resumo = await groq.chat.completions.create({
@@ -457,8 +496,9 @@ const zyonServer = http.createServer(async (req, res) => {
 
 Pedido: "${descricao}"
 
-Mapeie para UMA das ações: pedidos_aenviar, boost_anuncios, verificar_ads, renda, carteira, metricas, verificar_pedido_especifico, nao_identificado
+Mapeie para UMA das ações: pedidos_aenviar, boost_anuncios, verificar_ads, renda, carteira, metricas, saude_conta, verificar_pedido_especifico, nao_identificado
 
+Use saude_conta para: "saúde da conta", "desempenho da conta", "penalidade", "penalidades", "restricao", "restrição", "suspensão", "performance da conta", "situação da conta".
 Se for "verificar_pedido_especifico", extraia o orderId do texto.
 
 Responda SOMENTE em JSON: {"acao": "...", "orderId": null ou "ID_AQUI", "justificativa": "..."}`
@@ -499,6 +539,10 @@ Responda SOMENTE em JSON: {"acao": "...", "orderId": null ou "ID_AQUI", "justifi
                     case 'metricas':
                         emColeta = true
                         try { resultado = await coletarMetricasCompletas() } finally { emColeta = false }
+                        break
+                    case 'saude_conta':
+                        emColeta = true
+                        try { resultado = await coletarSaudeConta() } finally { emColeta = false }
                         break
                     case 'verificar_pedido_especifico':
                         if (interpretacao.orderId) {
