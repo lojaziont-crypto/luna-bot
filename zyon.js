@@ -528,6 +528,53 @@ Responda SOMENTE em JSON: {"acao": "...", "orderId": null ou "ID_AQUI", "justifi
             }
         })
 
+    // Pedidos A Enviar — solicitado pela Zaya (aviso ao Lucas ~17h)
+    } else if (req.method === 'POST' && req.url === '/pedidos-aenviar') {
+        req.resume()
+        if (emColeta) {
+            res.writeHead(503, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'browser ocupado, tente novamente em alguns minutos' }))
+        } else {
+            emColeta = true
+            try {
+                console.log(`\n📦 [Zyon] /pedidos-aenviar solicitado pela Zaya — ${new Date().toLocaleTimeString('pt-BR')}`)
+                const resultado = await coletarPedidosAEnviar()
+                ultimosPedidosAEnviar = { ...resultado, atualizadoEm: new Date().toISOString() }
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, ...resultado }))
+            } catch (err) {
+                console.error('❌ [Zyon] Erro em /pedidos-aenviar:', err.message)
+                res.writeHead(500, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            } finally {
+                emColeta = false
+            }
+        }
+
+    // Pedidos atrasados (prazo 5 dias expirado) — solicitado pela Zaya (ciclo ~1h)
+    } else if (req.method === 'POST' && req.url === '/pedidos-atrasados') {
+        req.resume()
+        if (emColeta) {
+            res.writeHead(503, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'browser ocupado, tente novamente em alguns minutos' }))
+        } else {
+            emColeta = true
+            try {
+                console.log(`\n⚠️  [Zyon] /pedidos-atrasados solicitado pela Zaya — ${new Date().toLocaleTimeString('pt-BR')}`)
+                const resultado = await coletarPedidosAEnviar()
+                ultimosPedidosAEnviar = { ...resultado, atualizadoEm: new Date().toISOString() }
+                // "hoje" = prazo expirado (confirmação + 5 dias <= hoje) ainda em "A Enviar" = atrasados
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, atrasados: resultado.hoje }))
+            } catch (err) {
+                console.error('❌ [Zyon] Erro em /pedidos-atrasados:', err.message)
+                res.writeHead(500, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            } finally {
+                emColeta = false
+            }
+        }
+
     } else {
         res.writeHead(404)
         res.end()
@@ -619,8 +666,7 @@ agendarProxima('executarBoost', executarBoost, INTERVALO_BOOST_BASE, VARIACAO_BO
 agendarProxima('verificarAdsEFinanceiro', verificarAdsEFinanceiro, INTERVALO_ADS_BASE, VARIACAO_ADS)
 agendarProxima('atualizarPedidosAEnviar', atualizarPedidosAEnviar, INTERVALO_PEDIDOS_BASE, VARIACAO_PEDIDOS)
 
-// Aviso ao Lucas ~17h (16h50-17h15) — diário
-agendarHorario('avisarLucasProducao', avisarLucasProducao, 17, 0, 15)
+// Aviso ao Lucas: agora iniciado pela Zaya (~17h) via /pedidos-aenviar — não agendado aqui
 
 // Métricas gerenciais ~20h30 (±30min) — diário
 agendarHorario('coletarRelatorioGerencial', coletarRelatorioGerencial, 20, 30, 30)

@@ -44,6 +44,15 @@ function ativarJanelaZeon() {
 // Listas de Separação (PDFs do grupo Ziont)
 // ─────────────────────────────────────────────────────────────────────────────
 const LISTAS_FILE = path.join(__dirname, 'zaya_listas_separacao.json')
+const ATRASADOS_FILE = path.join(__dirname, 'zaya_pedidos_atrasados_avisados.json')
+
+function carregarAtrasadosAvisados() {
+    try { if (fs.existsSync(ATRASADOS_FILE)) return JSON.parse(fs.readFileSync(ATRASADOS_FILE, 'utf8')) } catch {}
+    return {}
+}
+function salvarAtrasadosAvisados(dados) {
+    fs.writeFileSync(ATRASADOS_FILE, JSON.stringify(dados, null, 2))
+}
 
 function carregarListas() {
     try {
@@ -379,6 +388,34 @@ async function processarComprovanteImagem(sock, msg, from, legenda) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Notificação ao Lucas — reutilizável pelo endpoint E pelo agendador da Zaya
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function notificarLucasProducao(pedidosHoje, pedidosAmanha) {
+    if (!activeSock) throw new Error('WhatsApp não conectado')
+    const lucasPhone = process.env.LUCAS_PHONE || ''
+    if (!lucasPhone) throw new Error('LUCAS_PHONE não configurado')
+    const lucasJid = lucasPhone.startsWith('55') ? `${lucasPhone}@s.whatsapp.net` : `55${lucasPhone}@s.whatsapp.net`
+    const dataHoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    const total = pedidosHoje.length + pedidosAmanha.length
+
+    const linhasHoje = pedidosHoje.map((p, i) =>
+        `${i + 1}. *#${p.orderId}* — ${p.produtoNome || '?'} (${p.comprador || '?'})`
+    ).join('\n')
+    const linhasAmanha = pedidosAmanha.map((p, i) =>
+        `${i + 1}. *#${p.orderId}* — ${p.produtoNome || '?'} (${p.comprador || '?'})`
+    ).join('\n')
+
+    const partes = [`🎨 *Produção pendente — ${dataHoje}*`, ``, `Lucas, aqui estão os pedidos com prazo próximo:`]
+    if (pedidosHoje.length > 0) partes.push(``, `⚠️ *DESPACHAR HOJE (${pedidosHoje.length}):*`, linhasHoje)
+    if (pedidosAmanha.length > 0) partes.push(``, `📅 *DESPACHAR AMANHÃ (${pedidosAmanha.length}):*`, linhasAmanha)
+    partes.push(``, `Total urgente: ${total} pedido(s).`)
+
+    await activeSock.sendMessage(lucasJid, { text: partes.join('\n') })
+    console.log(`🎨 [Zaya] Aviso de produção enviado ao Lucas — HOJE: ${pedidosHoje.length}, AMANHÃ: ${pedidosAmanha.length}`)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Servidor HTTP
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -468,56 +505,20 @@ const server = http.createServer((req, res) => {
         req.on('end', async () => {
             try {
                 const payload = JSON.parse(body)
-                if (!activeSock) {
-                    console.log('⚠️  [Zaya] /notify-producao-lucas: WhatsApp não conectado')
-                    res.writeHead(503, { 'Content-Type': 'application/json' })
-                    res.end(JSON.stringify({ ok: false, error: 'WhatsApp desconectado' }))
-                    return
-                }
-                const lucasPhone = process.env.LUCAS_PHONE || ''
-                if (!lucasPhone) {
-                    console.log('⚠️  [Zaya] LUCAS_PHONE não definido — aviso de produção não enviado')
-                    res.writeHead(500, { 'Content-Type': 'application/json' })
-                    res.end(JSON.stringify({ ok: false, error: 'LUCAS_PHONE não configurado' }))
-                    return
-                }
-                const lucasJid = lucasPhone.startsWith('55') ? `${lucasPhone}@s.whatsapp.net` : `55${lucasPhone}@s.whatsapp.net`
-                const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
-
                 // Suporta payload novo { pedidosHoje, pedidosAmanha } e legado { pedidos }
-                let mensagem
-                if (payload.pedidosHoje !== undefined || payload.pedidosAmanha !== undefined) {
-                    const pedidosHoje = payload.pedidosHoje || []
-                    const pedidosAmanha = payload.pedidosAmanha || []
-                    const total = pedidosHoje.length + pedidosAmanha.length
-                    const linhasHoje = pedidosHoje.map((p, i) =>
-                        `${i + 1}. *#${p.orderId}* — ${p.produtoNome || '?'} (${p.comprador || '?'})`
-                    ).join('\n')
-                    const linhasAmanha = pedidosAmanha.map((p, i) =>
-                        `${i + 1}. *#${p.orderId}* — ${p.produtoNome || '?'} (${p.comprador || '?'})`
-                    ).join('\n')
-
-                    const partes = [`🎨 *Produção pendente — ${hoje}*`, ``, `Lucas, aqui estão os pedidos com prazo próximo:`]
-                    if (pedidosHoje.length > 0) { partes.push(``, `⚠️ *DESPACHAR HOJE (${pedidosHoje.length}):*`, linhasHoje) }
-                    if (pedidosAmanha.length > 0) { partes.push(``, `📅 *DESPACHAR AMANHÃ (${pedidosAmanha.length}):*`, linhasAmanha) }
-                    partes.push(``, `Total urgente: ${total} pedido(s).`)
-                    mensagem = partes.join('\n')
-                } else {
-                    // Payload legado
-                    const pedidos = payload.pedidos || []
-                    const linhas = pedidos.map((p, i) =>
-                        `${i + 1}. *Pedido #${p.orderId}*\n   Produto: ${p.produtoNome}\n   Comprador: ${p.comprador || '(não identificado)'}`
-                    ).join('\n\n')
-                    mensagem = [`🎨 *Produção pendente — ${hoje}*`, ``, `Lucas, pedidos em "A Enviar":`, ``, linhas, ``, `Total: ${pedidos.length} pedido(s).`].join('\n')
+                let pedidosHoje = payload.pedidosHoje
+                let pedidosAmanha = payload.pedidosAmanha
+                if (pedidosHoje === undefined && pedidosAmanha === undefined) {
+                    // Formato legado: trata tudo como "hoje"
+                    pedidosHoje = payload.pedidos || []
+                    pedidosAmanha = []
                 }
-
-                await activeSock.sendMessage(lucasJid, { text: mensagem })
-                console.log(`🎨 [Zaya] Aviso de produção enviado ao Lucas`)
+                await notificarLucasProducao(pedidosHoje || [], pedidosAmanha || [])
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: true }))
             } catch (err) {
                 console.error('❌ /notify-producao-lucas error:', err.message)
-                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.writeHead(err.message.includes('WhatsApp') ? 503 : 400, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ ok: false, error: err.message }))
             }
         })
@@ -931,6 +932,176 @@ cron.schedule('0 21 * * *', () => {
 }, { timezone: 'America/Sao_Paulo' })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Chamadas ao Zyon — helper genérico (POST, aguarda resposta HTTP)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function chamarZyon(endpoint, dados) {
+    return new Promise((resolve) => {
+        const zyonUrl = process.env.ZYON_URL || 'http://localhost:3001'
+        const data = JSON.stringify(dados || {})
+        let parsedUrl
+        try { parsedUrl = new URL(`${zyonUrl}${endpoint}`) } catch {
+            console.error(`❌ [Zaya] ZYON_URL inválida: ${zyonUrl}`)
+            return resolve(null)
+        }
+        const lib = parsedUrl.protocol === 'https:' ? https : http
+        const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+        const req = lib.request({
+            hostname: parsedUrl.hostname, port, path: parsedUrl.pathname, method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+        }, res => {
+            let corpo = ''
+            res.on('data', chunk => { corpo += chunk })
+            res.on('end', () => {
+                console.log(`📡 [Zaya] Zyon ${endpoint} → HTTP ${res.statusCode}`)
+                try { resolve(JSON.parse(corpo)) } catch { resolve(null) }
+            })
+        })
+        req.setTimeout(180000, () => {
+            req.destroy()
+            console.error(`❌ [Zaya] Timeout aguardando Zyon ${endpoint} (3 min)`)
+            resolve(null)
+        })
+        req.on('error', err => {
+            console.error(`❌ [Zaya] Conexão com Zyon ${endpoint} falhou: ${err.message}`)
+            resolve(null)
+        })
+        req.write(data)
+        req.end()
+    })
+}
+
+// Agendadores humanizados (mesma lógica do Zyon, com variação aleatória)
+function agendarHorarioZaya(nome, fn, horaAlvo, minAlvo, variacaoMinutos) {
+    const agora = new Date()
+    const alvo = new Date(agora)
+    const varMs = Math.floor((Math.random() * 2 - 1) * variacaoMinutos * 60000)
+    alvo.setHours(horaAlvo, minAlvo, 0, 0)
+    alvo.setTime(alvo.getTime() + varMs)
+    if (alvo <= agora) alvo.setDate(alvo.getDate() + 1)
+    const msAte = alvo - agora
+    console.log(`🕐 [Zaya] "${nome}" agendado para ${alvo.toLocaleTimeString('pt-BR')} (em ${Math.round(msAte / 60000)} min)`)
+    setTimeout(async () => {
+        try { await fn() } catch (err) { console.error(`❌ [Zaya/${nome}]:`, err.message) }
+        agendarHorarioZaya(nome, fn, horaAlvo, minAlvo, variacaoMinutos)
+    }, msAte)
+}
+
+function agendarCicloZaya(nome, fn, intervaloBaseMs, variacaoMs) {
+    const delay = Math.max(60000, intervaloBaseMs + Math.floor((Math.random() * 2 - 1) * variacaoMs))
+    setTimeout(async () => {
+        try { await fn() } catch (err) { console.error(`❌ [Zaya/${nome}]:`, err.message) }
+        agendarCicloZaya(nome, fn, intervaloBaseMs, variacaoMs)
+    }, delay)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AJUSTE 1 — Aviso ao Lucas (~17h): Zaya chama Zyon, recebe dados, notifica
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function avisarLucasViaZyon() {
+    console.log(`\n🎨 [Zaya] Solicitando pedidos A Enviar ao Zyon para aviso ao Lucas — ${new Date().toLocaleTimeString('pt-BR')}`)
+    const resp = await chamarZyon('/pedidos-aenviar', {})
+    if (!resp || !resp.ok) {
+        const motivo = resp?.error || 'sem resposta'
+        if (motivo.includes('ocupado')) {
+            console.log('⏳ [Zaya] Browser do Zyon ocupado — Lucas não notificado agora')
+        } else {
+            console.error(`❌ [Zaya] Zyon não retornou pedidos para o Lucas: ${motivo}`)
+        }
+        return
+    }
+    const hoje = resp.hoje || []
+    const amanha = resp.amanha || []
+    if (hoje.length + amanha.length === 0) {
+        console.log('🎨 [Zaya] Nenhum pedido urgente — aviso ao Lucas não necessário')
+        return
+    }
+    try {
+        await notificarLucasProducao(hoje, amanha)
+    } catch (err) {
+        console.error(`❌ [Zaya] Erro ao notificar Lucas: ${err.message}`)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AJUSTE 2 — Monitoramento de pedidos atrasados (~1h, avisa Adriano no grupo)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function verificarPedidosAtrasados() {
+    console.log(`\n⚠️  [Zaya] Verificando pedidos atrasados — ${new Date().toLocaleTimeString('pt-BR')}`)
+    const resp = await chamarZyon('/pedidos-atrasados', {})
+    if (!resp || !resp.ok) {
+        const motivo = resp?.error || 'sem resposta'
+        if (motivo.includes('ocupado')) {
+            console.log('⏳ [Zaya] Browser do Zyon ocupado — verificação de atrasados adiada')
+        } else {
+            console.error(`❌ [Zaya] Erro ao verificar atrasados: ${motivo}`)
+        }
+        return
+    }
+
+    const atrasados = resp.atrasados || []
+    if (atrasados.length === 0) {
+        console.log('✅ [Zaya] Nenhum pedido com prazo expirado no momento')
+        return
+    }
+
+    // Filtra IDs que ainda não foram avisados hoje
+    const hoje = new Date().toISOString().slice(0, 10)
+    const registro = carregarAtrasadosAvisados()
+    const jaAvisadosHoje = new Set(registro[hoje] || [])
+    const novos = atrasados.filter(p => !jaAvisadosHoje.has(p.orderId))
+
+    if (novos.length === 0) {
+        console.log(`ℹ️  [Zaya] ${atrasados.length} atrasado(s) — todos já avisados hoje`)
+        return
+    }
+
+    if (!activeSock || !ziontGroupJid) {
+        console.log('⚠️  [Zaya] WhatsApp ou grupo Ziont indisponível — atrasados não notificados')
+        return
+    }
+
+    const adrianoJid = await obterJidAdriano()
+    if (!adrianoJid) {
+        console.log('⚠️  [Zaya] JID do Adriano não disponível — atrasados não notificados')
+        return
+    }
+
+    const adrianoNumero = adrianoJid.replace('@s.whatsapp.net', '')
+    const listaIds = novos.map(p =>
+        `• ${p.orderId}${p.produtoNome ? ` — ${p.produtoNome.substring(0, 50)}` : ''}`
+    ).join('\n')
+
+    const mensagem = [
+        `⚠️ *Pedido(s) atrasado(s) — ${new Date().toLocaleDateString('pt-BR')}*`,
+        ``,
+        `@${adrianoNumero} os pedidos abaixo já passaram do prazo de despacho (5 dias corridos) e ainda constam como "A Enviar" na Shopee:`,
+        ``,
+        listaIds,
+        ``,
+        `Verifique e despache o quanto antes.`,
+    ].join('\n')
+
+    try {
+        await activeSock.sendMessage(ziontGroupJid, { text: mensagem, mentions: [adrianoJid] })
+
+        // Persiste IDs notificados hoje; limpa entradas > 7 dias
+        registro[hoje] = [...jaAvisadosHoje, ...novos.map(p => p.orderId)]
+        const corte = new Date(); corte.setDate(corte.getDate() - 7)
+        const corteStr = corte.toISOString().slice(0, 10)
+        for (const data of Object.keys(registro)) {
+            if (data < corteStr) delete registro[data]
+        }
+        salvarAtrasadosAvisados(registro)
+        console.log(`⚠️  [Zaya] ${novos.length} pedido(s) atrasado(s) notificado(s) ao Adriano no grupo Ziont`)
+    } catch (err) {
+        console.error(`❌ [Zaya] Erro ao notificar atrasados no grupo: ${err.message}`)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Parte 3 — Cobrar o Adriano nos prazos certos (8h, 13h, 18h)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1178,11 +1349,27 @@ async function tratarRespostaAdriano(sock, from, text) {
     return true
 }
 
+// ─────────────────────────── Agendamentos automáticos ────────────────────────
+
+// Lucas — ~17h (16h50-17h15), Zaya chama Zyon e envia pedidos ao Lucas
+agendarHorarioZaya('avisarLucas', avisarLucasViaZyon, 17, 0, 15)
+
+// Pedidos atrasados — ciclo ~1h (55-65min), avisa Adriano no grupo Ziont se houver novos
+// Primeira execução: 3 min após boot (dá tempo ao Zyon de iniciar)
+setTimeout(() => {
+    verificarPedidosAtrasados().catch(err => console.error('❌ [Zaya/atrasados boot]:', err.message))
+    agendarCicloZaya('verificarAtrasados', verificarPedidosAtrasados, 60 * 60 * 1000, 5 * 60 * 1000)
+}, 3 * 60 * 1000)
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 console.log('⚡ Iniciando Zaya...')
 console.log('📅 Resumo diário Shopee agendado para 21h (Brasília)')
 console.log('⚡ Suporte ao Zeon ativado (endpoint /zeon-notificacao + repasse de decisões)')
 console.log('📋 Monitoramento do grupo Ziont ativado (PDFs "Lista de Separação")')
 console.log('📦 Cobranças ao Adriano: 8h, 13h e 18h (dias com prazo)')
+console.log('🎨 Aviso de produção ao Lucas: ~17h (16h50-17h15) — agendamento Zaya→Zyon')
+console.log('⚠️  Monitoramento de pedidos atrasados: ciclo ~1h — aviso ao Adriano no grupo Ziont')
 console.log(`👷 Lucas: ${process.env.LUCAS_PHONE ? `55${process.env.LUCAS_PHONE}` : '(LUCAS_PHONE não definido)'}`)
 console.log(`👷 Adriano: ${process.env.ADRIANO_PHONE ? `55${process.env.ADRIANO_PHONE}` : '(ADRIANO_PHONE não definido)'}`)
 console.log(`📋 Grupo Ziont JID: ${process.env.ZIONT_GROUP_JID || '(será detectado automaticamente na 1ª mensagem)'}`)
