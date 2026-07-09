@@ -221,25 +221,25 @@ async function fecharModaisPromocionais(page) {
     await esperar(400)
 }
 
-// Detecta se a página está pedindo login (URL /login ou campo de senha visível)
+// Detecta se a página está pedindo login aguardando o SPA montar.
+// Promise.race: quem aparecer primeiro — campo de senha (login) ou elemento do app (logado).
+// Timeout de 10s → fallback pela URL (evita falso-positivo com React ainda carregando).
 async function precisaLogin(page) {
     try {
-        if (/\/login|\/entrar|\/signin/i.test(page.url())) return true
-        return await page.evaluate(() => {
-            if (document.querySelector('input[type="password"]')) return true
-            const t = (document.body?.innerText || '').toLowerCase()
-            // "Entrar"/"Login" só conta como tela de login se NÃO houver conteúdo do app
-            const temApp = document.querySelector('table, [class*="sidebar" i], nav')
-            return !temApp && /\b(entrar|fazer login|acessar sua conta)\b/.test(t)
-        }).catch(() => false)
+        const SEL_LOGIN = 'input[type="password"]'
+        const SEL_APP   = 'table, nav, [class*="sidebar" i], [class*="menu" i], [class*="layout" i]'
+        const resultado = await Promise.race([
+            page.waitForSelector(SEL_LOGIN, { timeout: 10000 }).then(() => true),
+            page.waitForSelector(SEL_APP,   { timeout: 10000 }).then(() => false),
+        ]).catch(() => /\/login|\/entrar|\/signin/i.test(page.url()))
+        return resultado
     } catch { return true }
 }
 
 // Garante que a sessão está logada. Se cair na tela de login, PAUSA e aguarda o dono
 // logar manualmente (timeout de 5 min). onStatus opcional avisa o dono pelo WhatsApp.
 async function garantirLogado(page, onStatus) {
-    await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
-    await esperar(2000)
+    await page.goto(LANCAMENTOS_URL, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {})
     await fecharModaisPromocionais(page)
 
     if (!(await precisaLogin(page))) return
