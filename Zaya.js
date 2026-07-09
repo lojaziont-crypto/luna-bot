@@ -16,6 +16,7 @@ const path = require('path')
 const http = require('http')
 const https = require('https')
 const { PDFParse } = require('pdf-parse')
+const plannerAgent = require('./planner-agent')
 
 let activeSock = null
 let ownerJid = null
@@ -27,6 +28,8 @@ const STARTUP_TS = Math.floor(Date.now() / 1000)
 // do dono vão diretamente ao Zeon sem precisar repetir o prefixo "Zeon"
 let zeonJanelaAtiva = { ativa: false, desde: 0, timer: null }
 const ZEON_JANELA_MS = 30 * 60 * 1000
+let despesaPendente = null // { dados, expiraEm } — aguardando confirmação do dono
+const DESPESA_PENDENTE_TTL = 5 * 60 * 1000
 
 function ativarJanelaZeon() {
     if (zeonJanelaAtiva.timer) clearTimeout(zeonJanelaAtiva.timer)
@@ -388,6 +391,112 @@ async function processarComprovanteImagem(sock, msg, from, legenda) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Planner — despesas do dono via WhatsApp (browser visível, perfil persistente)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const formatarBR = n => Number(n).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+// Pré-filtro leve antes de chamar o Groq: detecta se a mensagem parece uma despesa
+function pareceDespesa(texto) {
+    const lower = texto.toLowerCase()
+    if (!/\d/.test(lower)) return false
+    const keywords = ['gastei', 'paguei', 'comprei', 'despesa', 'lancei', 'gasto', 'recebi', 'recebimento', 'conta de', 'boleto']
+    if (keywords.some(p => lower.includes(p))) return true
+    // "academia 139,90", "internet 130" etc. — categoria + valor decimal
+    if (/\d[,\.]\d/.test(lower)) {
+        const nomes = [
+            ...plannerAgent.CATEGORIAS_DESPESA,
+            ...Object.values(plannerAgent.PLANEJAMENTO).flatMap(v => Object.keys(v.subs)),
+        ]
+        if (nomes.some(n => n.length > 2 && lower.includes(n.toLowerCase()))) return true
+    }
+    return false
+}
+
+async function processarDespesaPlanner(sock, from, texto) {
+    let resultado
+    try {
+        resultado = await plannerAgent.interpretarDespesa(texto)
+    } catch (err) {
+        console.error('❌ [Zaya/Planner] Erro na interpretação:', err.message)
+        await sock.sendMessage(from, { text: `❌ Erro ao interpretar a despesa: ${err.message}` })
+        return
+    }
+
+    if (!resultado.ok && !resultado.dados) {
+        await sock.sendMessage(from, { text: `❌ ${resultado.motivo}` })
+        return
+    }
+
+    if (resultado.precisaConfirmar) {
+        const d = resultado.dados
+        despesaPendente = { dados: d, expiraEm: Date.now() + DESPESA_PENDENTE_TTL }
+        const sub = d.subcategoria ? ` / ${d.subcategoria}` : ''
+        await sock.sendMessage(from, {
+            text: `🤔 ${resultado.motivo}\nVou lançar *R$ ${formatarBR(d.valor)}* em *${d.categoria}${sub}*?\n\nResponda *sim* para confirmar, *não* para cancelar, ou informe a categoria correta.`,
+        })
+        return
+    }
+
+    await sock.sendMessage(from, { text: '⏳ Cadastrando no Planner...' })
+    try {
+        const r = await plannerAgent.cadastrarDespesa(resultado.dados, {
+            onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
+        })
+        await sock.sendMessage(from, { text: plannerAgent.formatarRespostaWhatsApp(r) })
+    } catch (err) {
+        console.error('❌ [Zaya/Planner] Erro ao cadastrar:', err.message)
+        const msgErro = err.message === 'LOGIN_TIMEOUT'
+            ? '⏰ Tempo de login esgotado (5 min). Envie a despesa novamente para eu reabrir o navegador.'
+            : `❌ Erro ao cadastrar a despesa: ${err.message}`
+        await sock.sendMessage(from, { text: msgErro })
+    }
+}
+
+// Retorna true se tratou a mensagem como resposta à confirmação de despesa pendente
+async function tratarConfirmacaoDespesa(sock, from, texto) {
+    if (!despesaPendente || Date.now() > despesaPendente.expiraEm) {
+        despesaPendente = null
+        return false
+    }
+    const lower = texto.toLowerCase().trim()
+
+    if (/^n[aã]o\b|^cancel[ae]r?|^esqueç[ae]|^ignore/.test(lower)) {
+        despesaPendente = null
+        await sock.sendMessage(from, { text: '❌ Lançamento cancelado.' })
+        return true
+    }
+
+    const confirmar = /^s[iî]m\b|^ok\b|^confirma|^isso|^exato|^pode/.test(lower)
+    let dadosFinal = { ...despesaPendente.dados }
+
+    if (!confirmar) {
+        // Tenta interpretar como correção de categoria, preservando o valor original
+        try {
+            const corr = await plannerAgent.interpretarDespesa(`${texto} — valor: ${despesaPendente.dados.valor}`)
+            if (corr.ok || corr.dados?.categoria) {
+                dadosFinal = { ...dadosFinal, ...(corr.dados || {}), valor: despesaPendente.dados.valor }
+            } else {
+                return false // não reconheceu — deixa outros handlers tentarem
+            }
+        } catch { return false }
+    }
+
+    despesaPendente = null
+    await sock.sendMessage(from, { text: '⏳ Cadastrando no Planner...' })
+    try {
+        const r = await plannerAgent.cadastrarDespesa(dadosFinal, {
+            onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
+        })
+        await sock.sendMessage(from, { text: plannerAgent.formatarRespostaWhatsApp(r) })
+    } catch (err) {
+        console.error('❌ [Zaya/Planner] Erro ao cadastrar despesa confirmada:', err.message)
+        await sock.sendMessage(from, { text: `❌ Erro ao cadastrar: ${err.message}` })
+    }
+    return true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Notificação ao Lucas — reutilizável pelo endpoint E pelo agendador da Zaya
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -675,6 +784,12 @@ async function connectToWhatsApp() {
                     continue
                 }
 
+                // Resposta do dono a uma despesa pendente de confirmação (prioridade sobre janela Zeon)
+                if (text && despesaPendente) {
+                    const tratou = await tratarConfirmacaoDespesa(sock, from, text)
+                    if (tratou) continue
+                }
+
                 if (textoLower.includes('meus limites') || textoLower.includes('listar limites')) {
                     await responderLimites(sock, from)
                     continue
@@ -716,8 +831,8 @@ async function connectToWhatsApp() {
                     }
                 }
 
-                if (text && contemPalavraDeLancamento(textoLower)) {
-                    await processarLancamentoTexto(sock, from, text)
+                if (text && pareceDespesa(text)) {
+                    await processarDespesaPlanner(sock, from, text)
                     continue
                 }
             }

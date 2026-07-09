@@ -207,11 +207,14 @@ async function configurarPagina(page) {
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8' })
 }
 
-function launchBrowser(executablePath) {
+// userDataDir/headless são opcionais — por padrão usa o perfil da Shopee (PROFILE_DIR)
+// e headless: false. O Planner reutiliza esta função passando um perfil separado
+// (planner_profile) para não conflitar com a sessão da Shopee.
+function launchBrowser(executablePath, { userDataDir = PROFILE_DIR, headless = false } = {}) {
     return puppeteer.launch({
-        headless: false,
+        headless,
         executablePath,
-        userDataDir: PROFILE_DIR,
+        userDataDir,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
