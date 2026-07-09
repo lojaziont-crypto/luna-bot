@@ -25,7 +25,9 @@ const PLANNER_BASE = 'https://web.meuplannerfinanceiro.com.br'
 const LANCAMENTOS_URL = `${PLANNER_BASE}/controle/lancamentos`
 const BALANCO_MENSAL_URL = `${PLANNER_BASE}/dashboard/mensal`
 
-const PROFILE_DIR = path.join(__dirname, 'planner_profile')
+// Perfil fora do diretório do projeto — Edge não aceita userDataDir dentro de pastas de repositório git
+const PROFILE_DIR = process.env.PLANNER_PROFILE_DIR
+    || path.join(process.env.LOCALAPPDATA || require('os').homedir(), 'MeuPlannerProfile')
 const DEBUG_DIR = path.join(__dirname, 'debug_planner')
 if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR)
 
