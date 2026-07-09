@@ -6,7 +6,7 @@
 // - Navegador SEMPRE visível (headless: false) — o dono acompanha na tela.
 // - Perfil persistente próprio (planner_profile/) — NUNCA reusa o shopee_profile.
 // - Login manual na 1ª vez (e sempre que a sessão expirar). NENHUMA senha no código/.env.
-// - Reaproveita launchBrowser + resolverChrome do shopee-agent.js (não duplica).
+// - Usa puppeteer puro (não extra) — planner não precisa de stealth; resolverChrome vem do shopee-agent.
 // - Browser fica ABERTO entre lançamentos; reabre sozinho se fechar.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -15,7 +15,8 @@ require('dotenv').config()
 const fs = require('fs')
 const path = require('path')
 const Groq = require('groq-sdk')
-const { launchBrowser, resolverChrome } = require('./shopee-agent')
+const rawPuppeteer = require('puppeteer')
+const { resolverChrome } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
@@ -184,8 +185,19 @@ async function abrirPlannerBrowser() {
     plannerBrowser = null
     plannerPage = null
 
-    console.log('🌐 [Planner] Abrindo navegador visível (perfil planner_profile)...')
-    plannerBrowser = await launchBrowser(resolverChrome(), { userDataDir: PROFILE_DIR, headless: false })
+    const chromePath = resolverChrome()
+    console.log(`🌐 [Planner] Abrindo navegador — path: ${chromePath}`)
+    plannerBrowser = await rawPuppeteer.launch({
+        headless: false,
+        executablePath: chromePath,
+        userDataDir: PROFILE_DIR,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--window-size=1366,768',
+            '--lang=pt-BR',
+        ],
+    })
 
     plannerBrowser.on('disconnected', () => {
         console.log('⚠️  [Planner] Navegador fechou — será reaberto no próximo lançamento.')
