@@ -23,7 +23,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const PLANNER_URL = process.env.PLANNER_URL || 'https://web.meuplannerfinanceiro.com.br/login'
 const PLANNER_BASE = 'https://web.meuplannerfinanceiro.com.br'
 const LANCAMENTOS_URL = `${PLANNER_BASE}/controle/lancamentos`
-const BALANCO_MENSAL_URL = `${PLANNER_BASE}/controle/balanco-mensal`
+const BALANCO_MENSAL_URL = `${PLANNER_BASE}/dashboard/mensal`
 
 const PROFILE_DIR = path.join(__dirname, 'planner_profile')
 const DEBUG_DIR = path.join(__dirname, 'debug_planner')
@@ -278,32 +278,27 @@ async function garantirLogado(page, onStatus) {
 
 async function abrirNovoLancamento(page) {
     await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 })
-    await esperar(3000)
-    await fecharModaisPromocionais(page)
     await esperar(2000)
+    await fecharModaisPromocionais(page)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
 
+    // Clica no botão "+" (primeiro botão visível no cabeçalho da tabela)
     const r = await page.evaluate(() => {
-        const cands = [...document.querySelectorAll('button, a, [role="button"]')].filter(el => el.offsetParent !== null)
+        const cands = [...document.querySelectorAll('button, a, [role="button"]')]
+            .filter(el => el.offsetParent !== null)
         const txt = el => (el.textContent || '').trim()
+        // Prioridade 1: botão com texto exato "+"
         let alvo = cands.find(b => /^[+＋]$/.test(txt(b)))
-        if (!alvo) {
-            alvo = cands.find(b => {
-                const c = b.className?.baseVal || b.className || ''
-                const a = b.getAttribute('aria-label') || ''
-                return /add|plus|novo/i.test(c) || /add|plus|novo/i.test(a)
-            })
-        }
+        // Prioridade 2: atributo aria-label de adicionar
+        if (!alvo) alvo = cands.find(b => /add|plus|novo|criar/i.test(b.getAttribute('aria-label') || ''))
+        // Prioridade 3: primeiro botão pequeno no topo da página (área do cabeçalho)
         if (!alvo) {
             alvo = cands.filter(b => {
-                const rect = b.getBoundingClientRect()
-                return rect.top > 0 && rect.top < 250 && rect.left < 400 && rect.width > 0 && rect.height > 0
-            }).sort((a, b2) => {
-                const ra = a.getBoundingClientRect(), rb = b2.getBoundingClientRect()
-                return (ra.top - rb.top) || (ra.left - rb.left)
+                const r = b.getBoundingClientRect()
+                return r.top > 0 && r.top < 200 && r.left < 100 && r.width > 0
             })[0]
         }
-        if (!alvo) return { ok: false, visiveis: cands.slice(0, 25).map(txt).filter(Boolean) }
+        if (!alvo) return { ok: false, visiveis: cands.slice(0, 20).map(txt).filter(Boolean) }
         alvo.scrollIntoView({ block: 'center' })
         alvo.click()
         return { ok: true, texto: txt(alvo) }
@@ -312,137 +307,108 @@ async function abrirNovoLancamento(page) {
     if (!r.ok) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_novo_nao_encontrado.png') }).catch(() => {})
         console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(r.visiveis)}`)
-        throw new Error('Botão "+" de novo lançamento não encontrado (veja debug_planner/antes_clicar_novo.png)')
+        throw new Error('Botão "+" de novo lançamento não encontrado')
     }
-    console.log(`🖱️  [Planner] Cliquei em "${r.texto}" — abrindo linha de lançamento`)
-    await esperar(2000)
+    console.log(`🖱️  [Planner] Cliquei em "${r.texto}" — aguardando linha inline...`)
+
+    // Aguarda a linha inline aparecer (input[type="date"] visível)
+    await page.waitForFunction(
+        () => [...document.querySelectorAll('input[type="date"]')].some(el => el.offsetParent !== null),
+        { timeout: 8000 }
+    ).catch(() => {})
+    await esperar(500)
 }
 
 async function preencherLinhaLancamento(page, dados) {
-    const dataBR = dataParaBR(dados.data)
-    const linha = await page.evaluateHandle(() => document.querySelector('table tbody tr'))
-    const elLinha = linha.asElement()
-    if (!elLinha) {
+    // O TR da linha inline tem input[type="date"] — sobe 3 níveis: input > label > td > tr
+    const elLinha = await page.evaluateHandle(() => {
+        const dateInp = [...document.querySelectorAll('input[type="date"]')]
+            .find(el => el.offsetParent !== null)
+        return dateInp?.parentElement?.parentElement?.parentElement || null
+    })
+    const elLinhaEl = elLinha?.asElement ? elLinha.asElement() : null
+    if (!elLinhaEl) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'linha_nao_encontrada.png') }).catch(() => {})
         throw new Error('Linha inline de lançamento não encontrada (veja debug_planner/linha_nao_encontrada.png)')
     }
-    const celulas = await elLinha.$$('td')
-    if (celulas.length < 8) {
+    const celulas = await elLinhaEl.$$(':scope > td')
+    if (celulas.length < 10) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'linha_celulas_insuficientes.png') }).catch(() => {})
-        throw new Error(`Linha com apenas ${celulas.length} célula(s) — esperado ≥ 8`)
+        throw new Error(`Linha com apenas ${celulas.length} célula(s) — esperado ≥ 10`)
     }
 
-    async function digitar(celula, valor) {
+    // Para inputs React: usa o setter nativo para disparar eventos corretamente
+    async function setarInput(celula, valor) {
         const input = await celula.$('input')
         if (!input) throw new Error('Input não encontrado na célula')
-        await input.click({ clickCount: 3 })
-        await page.keyboard.press('Backspace')
-        await input.type(String(valor), { delay: 50 })
+        await page.evaluate((el, val) => {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+            if (setter) setter.call(el, val); else el.value = val
+            el.dispatchEvent(new Event('input', { bubbles: true }))
+            el.dispatchEvent(new Event('change', { bubbles: true }))
+        }, input, String(valor))
     }
 
     async function selecionar(celula, textoOpcao) {
         const select = await celula.$('select')
-        if (select) {
-            const ok = await page.evaluate((el, texto) => {
-                const opt = [...el.options].find(o => o.textContent.trim().toLowerCase() === texto.toLowerCase())
-                if (!opt) return false
-                el.value = opt.value
-                el.dispatchEvent(new Event('change', { bubbles: true }))
-                return true
-            }, select, textoOpcao)
-            if (!ok) throw new Error(`Opção "${textoOpcao}" não encontrada no <select>`)
-            return
-        }
-        const gatilho = (await celula.$('input, [role="combobox"], [role="button"], div, span')) || celula
-        await gatilho.click()
-        await esperar(600)
-        const ok = await page.evaluate((texto) => {
-            const opcoes = [...document.querySelectorAll('[role="option"], li, [class*="option" i]')].filter(o => o.offsetParent !== null)
-            const opt = opcoes.find(o => o.textContent.trim().toLowerCase() === texto.toLowerCase())
+        if (!select) throw new Error('Select não encontrado na célula')
+        const ok = await page.evaluate((el, texto) => {
+            const opt = [...el.options].find(o => o.textContent.trim().toLowerCase() === texto.toLowerCase())
             if (!opt) return false
-            opt.click()
+            el.value = opt.value
+            el.dispatchEvent(new Event('change', { bubbles: true }))
             return true
-        }, textoOpcao)
-        if (!ok) throw new Error(`Opção "${textoOpcao}" não encontrada no dropdown`)
+        }, select, textoOpcao)
+        if (!ok) throw new Error(`Opção "${textoOpcao}" não encontrada no <select>`)
     }
 
-    // [0] data evento, [1] data efetivação, [2] categoria, [3] subcategoria,
-    // [4] inst. financeira (mantém), [5] descrição, [6] valor, [7] status
-    await digitar(celulas[0], dataBR)
-    await esperar(300)
-    await digitar(celulas[1], dataBR)
-    await esperar(300)
-    await selecionar(celulas[2], dados.categoria)
-    await esperar(800) // subcategorias dependem da categoria
+    // td[0]=checkbox, td[1]=data evento, td[2]=data efetivação, td[3]=categoria,
+    // td[4]=subcategoria, td[5]=inst.financeira(skip), td[6]=cartão(skip),
+    // td[7]=descrição, td[8]=valor, td[9]=status, td[10]=botões
+    await setarInput(celulas[1], dados.data)   // input[type="date"] — formato YYYY-MM-DD
+    await esperar(200)
+    await setarInput(celulas[2], dados.data)
+    await esperar(200)
+    await selecionar(celulas[3], dados.categoria)
+    await esperar(1000)  // React precisa atualizar as subcategorias
     if (dados.subcategoria) {
-        try { await selecionar(celulas[3], dados.subcategoria) } catch (e) {
+        try { await selecionar(celulas[4], dados.subcategoria) } catch (e) {
             console.log(`⚠️  [Planner] Subcategoria "${dados.subcategoria}" não selecionada: ${e.message}`)
         }
         await esperar(300)
     }
-    await digitar(celulas[5], dados.descricao)
+    await setarInput(celulas[7], dados.descricao)
     await esperar(200)
-    await digitar(celulas[6], String(dados.valor.toFixed(2)).replace('.', ','))
+    await setarInput(celulas[8], String(dados.valor.toFixed(2)).replace('.', ','))
     await esperar(200)
-    try { await selecionar(celulas[7], 'Concluído') } catch {}
+    try { await selecionar(celulas[9], 'Concluído') } catch {}
     await page.screenshot({ path: path.join(DEBUG_DIR, 'linha_preenchida.png') }).catch(() => {})
 }
 
 async function salvarLancamento(page) {
-    const r = await page.evaluate(() => {
-        const linha = document.querySelector('table tbody tr')
-        if (!linha) return { ok: false, motivo: 'linha não encontrada' }
-        const cands = [...linha.querySelectorAll('button, a, [role="button"], svg, i')].filter(el => el.offsetParent !== null)
-        const txt = el => (el.textContent || '').trim()
-        let alvo = cands.find(el => /^[✓✔√]$/.test(txt(el)))
-        if (!alvo) {
-            alvo = cands.find(el => {
-                const c = el.className?.baseVal || el.className || ''
-                const a = el.getAttribute('aria-label') || ''
-                return /check|confirm|salvar|success/i.test(c) || /check|confirm|salvar/i.test(a)
-            })
-        }
-        if (!alvo) {
-            const verdes = cands.filter(el => {
-                const cor = getComputedStyle(el).color || ''
-                return /rgb\(\s*\d{1,2}\s*,\s*1[5-9]\d\s*,\s*\d{1,3}\s*\)/.test(cor) || /green/i.test(cor)
-            })
-            alvo = verdes.sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left)[0]
-        }
-        if (!alvo) return { ok: false, motivo: 'botão ✓ não encontrado' }
-        const clic = alvo.closest('button, a, [role="button"]') || alvo
-        clic.scrollIntoView({ block: 'center' })
-        clic.click()
-        return { ok: true }
+    // O botão de salvar é button[type="submit"] dentro do TR de edição
+    const ok = await page.evaluate(() => {
+        const dateInp = [...document.querySelectorAll('input[type="date"]')]
+            .find(el => el.offsetParent !== null)
+        const tr = dateInp?.parentElement?.parentElement?.parentElement
+        if (!tr) return false
+        const btn = [...tr.querySelectorAll('button')].find(b => b.type === 'submit')
+        if (!btn) return false
+        btn.click()
+        return true
     })
-    if (!r.ok) {
+    if (!ok) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_salvar_nao_encontrado.png') }).catch(() => {})
-        throw new Error('Botão "✓" de salvar não encontrado (veja debug_planner/botao_salvar_nao_encontrado.png)')
+        throw new Error('Botão submit de salvar não encontrado (veja debug_planner/botao_salvar_nao_encontrado.png)')
     }
     await esperar(3000)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'apos_salvar.png') }).catch(() => {})
 
-    // Confirma "Lançamento criado com sucesso" (toast) — não bloqueia se não achar
     const sucesso = await page.evaluate(() => {
         const t = (document.body?.innerText || '').toLowerCase()
         return /lançamento (criado|salvo|adicionado)|criado com sucesso|salvo com sucesso/.test(t)
     }).catch(() => false)
     return sucesso
-}
-
-// Lê o valor realizado de uma categoria/subcategoria no Balanço Mensal (best-effort)
-async function lerRealizado(page, nome) {
-    return await page.evaluate((alvo) => {
-        const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase()
-        const linhas = [...document.querySelectorAll('table tbody tr, [class*="row" i]')]
-        const linha = linhas.find(l => norm(l.textContent).includes(norm(alvo)))
-        if (!linha) return null
-        const texto = linha.textContent.replace(/\s+/g, ' ')
-        const vals = [...texto.matchAll(/R?\$?\s*([\d.]{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})/g)]
-            .map(m => Number(m[1].replace(/\./g, '').replace(',', '.')))
-            .filter(Number.isFinite)
-        return vals.length ? vals[0] : null
-    }, nome)
 }
 
 async function lerBalancoMensal(page, categoria, subcategoria) {
@@ -451,8 +417,34 @@ async function lerBalancoMensal(page, categoria, subcategoria) {
     await fecharModaisPromocionais(page)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'balanco_mensal.png') }).catch(() => {})
 
-    const realizadoCat = await lerRealizado(page, categoria)
-    const realizadoSub = subcategoria ? await lerRealizado(page, subcategoria) : null
+    // Lê realizados da seção "DESPESAS: REALIZADO VS PLANEJADO" via innerText
+    // Formato: CATEGORIA\nX.X%\nR$ Y,YY (repetido para cada categoria)
+    const realizados = await page.evaluate(() => {
+        const txt = document.body.innerText || ''
+        const inicio = txt.indexOf('DESPESAS: REALIZADO VS PLANEJADO')
+        const fim = txt.indexOf('GASTOS COM', inicio)
+        if (inicio < 0) return {}
+        const bloco = txt.substring(inicio + 'DESPESAS: REALIZADO VS PLANEJADO'.length, fim > 0 ? fim : undefined)
+        const linhas = bloco.split('\n').map(l => l.trim()).filter(Boolean)
+        const resultado = {}
+        for (let i = 0; i < linhas.length; i++) {
+            const l = linhas[i]
+            if (/^\d+[,.]?\d*%$/.test(l)) continue
+            if (/^R\$/.test(l)) continue
+            // Linha de categoria: próxima deve ser percentual e a seguinte o valor
+            if (i + 2 < linhas.length && /^\d+[,.]?\d*%$/.test(linhas[i + 1])) {
+                const vStr = (linhas[i + 2] || '').replace('R$', '').trim()
+                    .replace(/\./g, '').replace(',', '.')
+                resultado[l.toLowerCase()] = parseFloat(vStr) || 0
+            }
+        }
+        return resultado
+    })
+
+    const norm = s => (s || '').trim().toLowerCase()
+    const realizadoCat = realizados[norm(categoria)] ?? null
+    // Subcategoria: usa o total da categoria como proxy (o dashboard não expõe sub-realizado individualmente)
+    const realizadoSub = subcategoria ? realizadoCat : null
     return { realizadoCat, realizadoSub }
 }
 
