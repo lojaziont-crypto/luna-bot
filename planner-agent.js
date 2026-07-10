@@ -215,24 +215,32 @@ async function abrirPlannerBrowser() {
     return { browser: plannerBrowser, page: plannerPage }
 }
 
-// Fecha modais promocionais que cobrem a tela (mesma lógica validada no finn.js)
+// Fecha modais promocionais (DaisyUI modal-box). Usa page.mouse.click com coordenadas
+// porque btn.click() via JS não dispara os handlers React registrados via event delegation.
 async function fecharModaisPromocionais(page) {
-    for (let i = 0; i < 3; i++) {
-        const fechou = await page.evaluate(() => {
-            const modais = [...document.querySelectorAll('[class*="modal" i], [role="dialog"], [class*="overlay" i]')]
-                .filter(el => el.offsetParent !== null)
-            for (const modal of modais) {
-                const btn = [...modal.querySelectorAll('button, [class*="close" i], svg, span')]
-                    .find(el => /^[x×✕]$/i.test(el.textContent.trim()) || /close|fechar/i.test(el.className?.baseVal || el.className || ''))
-                if (btn) { btn.click(); return true }
-            }
-            return false
-        }).catch(() => false)
-        if (!fechou) break
-        await esperar(700)
+    await esperar(800) // aguarda modais com delay de exibição
+    for (let i = 0; i < 4; i++) {
+        const coord = await page.evaluate(() => {
+            const modalBox = [...document.querySelectorAll('[class*="modal-box"]')]
+                .find(el => {
+                    if (!el.offsetParent) return false
+                    const rect = el.getBoundingClientRect()
+                    return rect.height > 50 && rect.width > 100
+                })
+            if (!modalBox) return null
+            const btn = [...modalBox.querySelectorAll('button')]
+                .find(el => /^[✕✖×x]$/i.test((el.textContent || '').trim()) || /btn-circle/i.test(String(el.className || '')))
+            if (!btn) return null
+            btn.scrollIntoView({ block: 'nearest' })
+            const r = btn.getBoundingClientRect()
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+        }).catch(() => null)
+        if (!coord) break
+        await page.mouse.click(coord.x, coord.y)
+        await esperar(600)
     }
     await page.keyboard.press('Escape').catch(() => {})
-    await esperar(400)
+    await esperar(300)
 }
 
 // Detecta se a página está pedindo login aguardando o SPA montar.
@@ -312,12 +320,37 @@ async function abrirNovoLancamento(page) {
         const cands = [...document.querySelectorAll('button, a, [role="button"]')]
             .filter(el => el.offsetParent !== null)
         const txt = el => (el.textContent || '').trim()
+        // Tenta 1: botão com texto "+"
         let alvo = cands.find(b => /^[+＋]$/.test(txt(b)))
-        if (!alvo) alvo = cands.find(b => /add|plus|novo|criar/i.test(b.getAttribute('aria-label') || ''))
+        // Tenta 2: aria-label com add/plus/novo
+        if (!alvo) alvo = cands.find(b => /add|plus|novo|criar|adicionar/i.test(b.getAttribute('aria-label') || ''))
+        // Tenta 3: botão SVG com ícone "+" (linha vertical L + horizontal H)
+        // NOTA: /H/ não /\bH\b/ — no path "7.41016H12.53" não há word boundary entre dígito e H
+        if (!alvo) {
+            alvo = cands.find(b => {
+                const svg = b.querySelector('svg')
+                if (!svg) return false
+                const paths = [...svg.querySelectorAll('path, line')]
+                if (paths.length < 2 || paths.length > 4) return false
+                const ds = paths.map(p => (p.getAttribute('d') || '').trim())
+                const temH = ds.some(d => /H/.test(d))
+                const temV = ds.some(d => /^M[\d.]+\s+[\d.]+L[\d.]+\s+[\d.]+$/.test(d))
+                return temH && temV
+            })
+        }
+        // Tenta 4: primeiro btn-sm no toolbar (fallback posicional)
+        if (!alvo) {
+            alvo = [...document.querySelectorAll('button.btn-sm')]
+                .find(el => {
+                    if (!el.offsetParent) return false
+                    const r = el.getBoundingClientRect()
+                    return r.y > 80 && r.y < 200 && r.x < 80 && r.width < 60
+                }) || null
+        }
         if (!alvo) return { ok: false, visiveis: cands.slice(0, 20).map(txt).filter(Boolean) }
         alvo.scrollIntoView({ block: 'nearest' })
         const rect = alvo.getBoundingClientRect()
-        return { ok: true, texto: txt(alvo), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        return { ok: true, texto: txt(alvo) || '[SVG]', x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
     })
 
     if (!coord.ok) {
