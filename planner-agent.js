@@ -1,13 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // planner-agent.js — Cadastro de despesas no Meu Planner Financeiro (browser VISÍVEL,
-// perfil persistente, login manual). Usado pela Zaya quando o dono manda uma despesa
-// pelo WhatsApp.
+// perfil persistente, login automático com credenciais do .env).
 //
 // - Navegador SEMPRE visível (headless: false) — o dono acompanha na tela.
-// - Perfil persistente próprio (planner_profile/) — NUNCA reusa o shopee_profile.
-// - Login manual na 1ª vez (e sempre que a sessão expirar). NENHUMA senha no código/.env.
-// - Usa puppeteer puro (não extra) — planner não precisa de stealth; resolverChrome vem do shopee-agent.
-// - Browser fica ABERTO entre lançamentos; reabre sozinho se fechar.
+// - Perfil persistente próprio (MeuPlannerProfile em LOCALAPPDATA).
+// - Login automático se sessão expirar (PLANNER_EMAIL + PLANNER_PASSWORD do .env).
+// - Usa puppeteer puro (não extra). Browser fica ABERTO entre lançamentos.
 // ─────────────────────────────────────────────────────────────────────────────
 
 require('dotenv').config()
@@ -215,10 +213,12 @@ async function abrirPlannerBrowser() {
     return { browser: plannerBrowser, page: plannerPage }
 }
 
-// Fecha modais promocionais (DaisyUI modal-box). Usa ElementHandle.click() do Puppeteer
-// que faz scroll automático + pega coordenadas na hora + dispara via CDP (handlers React ok).
+// Fecha modais promocionais (DaisyUI modal-box). Usa ElementHandle.click() (CDP) para
+// garantir que handlers React disparem. NÃO pressiona Escape sem motivo — alguns SPAs
+// usam Escape para navegação, causando redirect indesejado.
 async function fecharModaisPromocionais(page) {
-    await esperar(800) // aguarda modais com delay de exibição
+    await esperar(600)
+    let fechouAlgo = false
     for (let i = 0; i < 4; i++) {
         const elHandle = await page.evaluateHandle(() => {
             const modalBox = [...document.querySelectorAll('[class*="modal-box"]')]
@@ -233,11 +233,15 @@ async function fecharModaisPromocionais(page) {
         }).catch(() => null)
         const elBtn = elHandle?.asElement ? elHandle.asElement() : null
         if (!elBtn) break
-        await elBtn.click() // ElementHandle.click(): scroll + coords dinâmicas + CDP
+        await elBtn.click()
+        fechouAlgo = true
         await esperar(600)
     }
-    await page.keyboard.press('Escape').catch(() => {})
-    await esperar(300)
+    // Escape só quando algo foi fechado (limpa possíveis sub-modais)
+    if (fechouAlgo) {
+        await page.keyboard.press('Escape').catch(() => {})
+        await esperar(300)
+    }
 }
 
 // Detecta se a página está pedindo login aguardando o SPA montar.
@@ -255,65 +259,108 @@ async function precisaLogin(page) {
     } catch { return true }
 }
 
-// Garante que a sessão está logada. Se cair na tela de login, PAUSA e aguarda o dono
-// logar manualmente (timeout de 5 min). onStatus opcional avisa o dono pelo WhatsApp.
+// Garante que a sessão está logada. Faz login automático com credenciais do .env
+// se a sessão tiver expirado. onStatus notifica o dono pelo WhatsApp.
 async function garantirLogado(page, onStatus) {
-    await page.goto(LANCAMENTOS_URL, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {})
-    await fecharModaisPromocionais(page)
-
-    if (!(await precisaLogin(page))) return
-
-    // Vai para a tela de login para o dono ver e digitar
-    await page.goto(PLANNER_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
-    console.log('⏸️  [Planner] Tela de login detectada — aguardando login manual (até 5 min)...')
-    if (onStatus) onStatus('🔐 Abri o navegador do Planner na tela de login. Faça o login manualmente — assim que entrar, eu continuo o cadastro. (aguardo até 5 min)')
-
-    const inicio = Date.now()
-    while (Date.now() - inicio < TIMEOUT_LOGIN_MS) {
-        await esperar(3000)
-        if (!(await precisaLogin(page))) {
-            console.log('✅ [Planner] Login manual concluído — sessão salva.')
-            await esperar(1500)
-            await fecharModaisPromocionais(page)
-            // Navega direto para lançamentos após login para garantir estado limpo
-            await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
-            await esperar(1500)
-            // Reload se Next.js mostrar erro de cliente na 1ª carga
-            const temErro = await page.evaluate(() =>
-                /application error|client.side exception/i.test(document.body?.innerText || '')
-            ).catch(() => false)
-            if (temErro) {
-                await page.reload({ waitUntil: 'networkidle2', timeout: 40000 })
-                await esperar(1500)
-            }
-            await fecharModaisPromocionais(page)
-            return
-        }
+    // Navega para lançamentos com networkidle2 (React carregado + possíveis redirects resolvidos)
+    if (!page.url().includes('/controle/lancamentos')) {
+        await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
     }
-    throw new Error('LOGIN_TIMEOUT')
+    await fecharModaisPromocionais(page)
+    console.log(`📍 [Planner] URL pós-navegação: ${page.url()}`)
+
+    if (!(await precisaLogin(page))) {
+        console.log('✅ [Planner] Sessão ativa')
+        return
+    }
+
+    // Sessão expirou — tenta login automático com credenciais do .env
+    const email = process.env.PLANNER_EMAIL
+    const senha = process.env.PLANNER_PASSWORD
+    if (email && senha) {
+        console.log('🔑 [Planner] Sessão expirada — fazendo login automático...')
+        if (onStatus) onStatus('🔑 Sessão do Planner expirada — fazendo login automático...')
+
+        if (!page.url().includes('/login')) {
+            await page.goto(PLANNER_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+        }
+        await page.waitForSelector('input[type="password"]', { timeout: 10000 }).catch(() => {})
+
+        // Preenche usando setter nativo do React (controlled inputs)
+        const setReact = async (seletor, valor) => {
+            await page.evaluate((sel, val) => {
+                const el = document.querySelector(sel)
+                if (!el) throw new Error(`Seletor não encontrado: ${sel}`)
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+                if (setter) setter.call(el, val); else el.value = val
+                el.dispatchEvent(new Event('input', { bubbles: true }))
+                el.dispatchEvent(new Event('change', { bubbles: true }))
+            }, seletor, valor)
+        }
+
+        await setReact('input[type="email"], input[name="email"]', email)
+        await esperar(200)
+        await setReact('input[type="password"]', senha)
+        await esperar(300)
+
+        // Clica no botão de entrar via ElementHandle (CDP — dispara handlers React)
+        const elSubmitHandle = await page.evaluateHandle(() => {
+            return document.querySelector('button[type="submit"]')
+                || [...document.querySelectorAll('button')].find(b => /entrar|login|acessar/i.test((b.textContent || '').trim()))
+                || null
+        })
+        const elSubmit = elSubmitHandle?.asElement ? elSubmitHandle.asElement() : null
+        if (!elSubmit) throw new Error('Botão de login não encontrado na tela de login')
+        await elSubmit.click()
+
+        // Aguarda URL sair de /login
+        await page.waitForFunction(
+            () => !window.location.href.includes('/login'),
+            { timeout: 15000 }
+        ).catch(() => {})
+        await esperar(1500)
+        await fecharModaisPromocionais(page)
+
+        if (await precisaLogin(page)) throw new Error('Login automático falhou — verifique PLANNER_EMAIL e PLANNER_PASSWORD no .env')
+
+        console.log('✅ [Planner] Login automático concluído')
+        if (onStatus) onStatus('✅ Login automático no Planner concluído — cadastrando despesa...')
+    } else {
+        // Sem credenciais → login manual (fallback)
+        await page.goto(PLANNER_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+        console.log('⏸️  [Planner] Tela de login — aguardando login manual (até 5 min)...')
+        if (onStatus) onStatus('🔐 Abri o navegador do Planner na tela de login. Faça o login manualmente — assim que entrar, eu continuo o cadastro. (aguardo até 5 min)')
+
+        const inicio = Date.now()
+        while (Date.now() - inicio < TIMEOUT_LOGIN_MS) {
+            await esperar(3000)
+            if (!(await precisaLogin(page))) break
+        }
+        if (await precisaLogin(page)) throw new Error('LOGIN_TIMEOUT')
+        console.log('✅ [Planner] Login manual concluído.')
+        await esperar(1500)
+        await fecharModaisPromocionais(page)
+    }
+
+    // Após login (auto ou manual): navega para lançamentos e lida com Application error
+    await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+    await esperar(1500)
+    const temErro = await page.evaluate(() =>
+        /application error|client.side exception/i.test(document.body?.innerText || '')
+    ).catch(() => false)
+    if (temErro) {
+        console.log('⚠️  [Planner] Application error pós-login — recarregando...')
+        await page.reload({ waitUntil: 'networkidle2', timeout: 40000 })
+        await esperar(1500)
+    }
+    await fecharModaisPromocionais(page)
 }
 
 // ───────────────────────── Fluxo de cadastro (seletores validados no finn.js) ─────────────────────────
 
-async function abrirNovoLancamento(page) {
-    await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 })
-    await esperar(2000)
-
-    // Next.js pode mostrar "Application error" na 1ª carga pós-login — um reload resolve
-    const temErroApp = await page.evaluate(() =>
-        /application error|client.side exception/i.test(document.body?.innerText || '')
-    ).catch(() => false)
-    if (temErroApp) {
-        console.log('⚠️  [Planner] Application error detectado — recarregando...')
-        await page.reload({ waitUntil: 'networkidle2', timeout: 40000 })
-        await esperar(2000)
-    }
-
-    await fecharModaisPromocionais(page)
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
-
-    // Encontra o botão "+" via evaluateHandle — retorna um ElementHandle vivo
-    const elPlusHandle = await page.evaluateHandle(() => {
+// Localiza o botão "+" via evaluateHandle (retorna ElementHandle para click via CDP)
+async function encontrarBotaoNovo(page) {
+    return page.evaluateHandle(() => {
         const cands = [...document.querySelectorAll('button, a, [role="button"]')]
             .filter(el => el.offsetParent !== null)
         const txt = el => (el.textContent || '').trim()
@@ -321,8 +368,8 @@ async function abrirNovoLancamento(page) {
         let alvo = cands.find(b => /^[+＋]$/.test(txt(b)))
         // Tenta 2: aria-label com add/plus/novo
         if (!alvo) alvo = cands.find(b => /add|plus|novo|criar|adicionar/i.test(b.getAttribute('aria-label') || ''))
-        // Tenta 3: SVG com padrão de + (linha vertical L + horizontal H)
-        // NOTA: /H/ não /\bH\b/ — em "7.41016H12.53" não há word boundary entre dígito e H
+        // Tenta 3: SVG com padrão de + (linha vertical ML + horizontal H)
+        // NOTA: /H/ (não /\bH\b/) — em "7.41016H12.53" não há word boundary entre dígito e H
         if (!alvo) {
             alvo = cands.find(b => {
                 const svg = b.querySelector('svg')
@@ -333,7 +380,7 @@ async function abrirNovoLancamento(page) {
                 return ds.some(d => /H/.test(d)) && ds.some(d => /^M[\d.]+\s+[\d.]+L[\d.]+\s+[\d.]+$/.test(d))
             })
         }
-        // Tenta 4: primeiro btn-sm no toolbar (sidebar pode estar expandida — sem restrição de x)
+        // Tenta 4: btn-sm pequeno na toolbar (sidebar pode estar expandida)
         if (!alvo) {
             alvo = [...document.querySelectorAll('button.btn-sm')]
                 .find(el => {
@@ -344,35 +391,80 @@ async function abrirNovoLancamento(page) {
         }
         return alvo || null
     })
-    const elPlus = elPlusHandle?.asElement ? elPlusHandle.asElement() : null
+}
 
-    if (!elPlus) {
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_novo_nao_encontrado.png') }).catch(() => {})
-        const visiveis = await page.evaluate(() =>
-            [...document.querySelectorAll('button')].filter(el => el.offsetParent !== null)
-                .slice(0, 15).map(b => (b.textContent || '').trim() || '[SVG]')
-        ).catch(() => [])
-        console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(visiveis)}`)
-        throw new Error('Botão "+" de novo lançamento não encontrado')
+async function abrirNovoLancamento(page) {
+    // Navega para lançamentos só se não estiver lá (evita reload duplo)
+    if (!page.url().includes('/controle/lancamentos')) {
+        await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 })
+        await esperar(2000)
     }
 
-    // ElementHandle.click() do Puppeteer: scroll automático + coordenadas dinâmicas + CDP
-    console.log('🖱️  [Planner] Clicando "+" via ElementHandle')
-    await elPlus.click()
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'apos_clicar_novo.png') }).catch(() => {})
+    // Trata Application error (Next.js) — até 3 tentativas de reload
+    for (let t = 0; t < 3; t++) {
+        const temErro = await page.evaluate(() =>
+            /application error|client.side exception/i.test(document.body?.innerText || '')
+        ).catch(() => false)
+        if (!temErro) break
+        console.log(`⚠️  [Planner] Application error (tentativa ${t + 1}) — recarregando...`)
+        await page.reload({ waitUntil: 'networkidle2', timeout: 40000 })
+        await esperar(2000)
+    }
 
-    // Aguarda a linha inline aparecer (input[type="date"] DENTRO DE TR — exclui filtros)
-    await page.waitForFunction(
-        () => [...document.querySelectorAll('tr input[type="date"]')].some(el => el.offsetParent !== null),
-        { timeout: 10000 }
-    ).catch(() => console.log('⚠️  [Planner] Timeout aguardando linha inline — continuando mesmo assim'))
+    await fecharModaisPromocionais(page)
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
+    console.log(`📍 [Planner] URL em abrirNovoLancamento: ${page.url()}`)
+
+    // Tenta clicar no "+" até 3 vezes, aguardando a linha inline aparecer
+    for (let tentativa = 1; tentativa <= 3; tentativa++) {
+        const elPlusHandle = await encontrarBotaoNovo(page)
+        const elPlus = elPlusHandle?.asElement ? elPlusHandle.asElement() : null
+
+        if (!elPlus) {
+            if (tentativa < 3) {
+                console.log(`⚠️  [Planner] "+" não encontrado (tentativa ${tentativa}) — aguardando...`)
+                await esperar(2000)
+                continue
+            }
+            await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_novo_nao_encontrado.png') }).catch(() => {})
+            const visiveis = await page.evaluate(() =>
+                [...document.querySelectorAll('button')].filter(el => el.offsetParent !== null)
+                    .slice(0, 15).map(b => (b.textContent || '').trim() || '[SVG]')
+            ).catch(() => [])
+            console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(visiveis)}`)
+            throw new Error('Botão "+" de novo lançamento não encontrado após 3 tentativas')
+        }
+
+        console.log(`🖱️  [Planner] Clicando "+" via ElementHandle (tentativa ${tentativa})`)
+        await elPlus.click()
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'apos_clicar_novo.png') }).catch(() => {})
+
+        // Aguarda linha inline (input[type="date"] DENTRO de TR — exclui filtros do toolbar)
+        const apareceu = await page.waitForFunction(
+            () => [...document.querySelectorAll('tr input[type="date"]')].some(el => el.offsetParent !== null),
+            { timeout: 8000 }
+        ).then(() => true).catch(() => false)
+
+        if (apareceu) {
+            console.log('✅ [Planner] Linha inline aberta')
+            break
+        }
+
+        console.log(`⚠️  [Planner] Linha não apareceu após tentativa ${tentativa}`)
+        if (tentativa === 3) {
+            await page.screenshot({ path: path.join(DEBUG_DIR, 'linha_nao_abriu.png') }).catch(() => {})
+        }
+        await esperar(1000)
+    }
+
     await esperar(500)
 }
 
 async function preencherLinhaLancamento(page, dados) {
     // O TR da linha inline tem input[type="date"] — sobe 3 níveis: input > label > td > tr
+    // Usa "tr input" para excluir os 3 inputs de filtro fora da tabela
     const elLinha = await page.evaluateHandle(() => {
-        const dateInp = [...document.querySelectorAll('input[type="date"]')]
+        const dateInp = [...document.querySelectorAll('tr input[type="date"]')]
             .find(el => el.offsetParent !== null)
         return dateInp?.parentElement?.parentElement?.parentElement || null
     })
@@ -436,21 +528,21 @@ async function preencherLinhaLancamento(page, dados) {
 }
 
 async function salvarLancamento(page) {
-    // O botão de salvar é button[type="submit"] dentro do TR de edição
-    const ok = await page.evaluate(() => {
-        const dateInp = [...document.querySelectorAll('input[type="date"]')]
+    // Localiza button[type="submit"] dentro do TR de edição via ElementHandle (CDP)
+    // para garantir que handlers React do formulário disparem corretamente
+    const elSubmitHandle = await page.evaluateHandle(() => {
+        const dateInp = [...document.querySelectorAll('tr input[type="date"]')]
             .find(el => el.offsetParent !== null)
         const tr = dateInp?.parentElement?.parentElement?.parentElement
-        if (!tr) return false
-        const btn = [...tr.querySelectorAll('button')].find(b => b.type === 'submit')
-        if (!btn) return false
-        btn.click()
-        return true
+        if (!tr) return null
+        return [...tr.querySelectorAll('button')].find(b => b.type === 'submit') || null
     })
-    if (!ok) {
+    const elSubmit = elSubmitHandle?.asElement ? elSubmitHandle.asElement() : null
+    if (!elSubmit) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_salvar_nao_encontrado.png') }).catch(() => {})
         throw new Error('Botão submit de salvar não encontrado (veja debug_planner/botao_salvar_nao_encontrado.png)')
     }
+    await elSubmit.click()
     await esperar(3000)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'apos_salvar.png') }).catch(() => {})
 
