@@ -267,8 +267,20 @@ async function garantirLogado(page, onStatus) {
     while (Date.now() - inicio < TIMEOUT_LOGIN_MS) {
         await esperar(3000)
         if (!(await precisaLogin(page))) {
-            console.log('✅ [Planner] Login manual concluído — sessão salva em planner_profile.')
+            console.log('✅ [Planner] Login manual concluído — sessão salva.')
             await esperar(1500)
+            await fecharModaisPromocionais(page)
+            // Navega direto para lançamentos após login para garantir estado limpo
+            await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+            await esperar(1500)
+            // Reload se Next.js mostrar erro de cliente na 1ª carga
+            const temErro = await page.evaluate(() =>
+                /application error|client.side exception/i.test(document.body?.innerText || '')
+            ).catch(() => false)
+            if (temErro) {
+                await page.reload({ waitUntil: 'networkidle2', timeout: 40000 })
+                await esperar(1500)
+            }
             await fecharModaisPromocionais(page)
             return
         }
@@ -281,6 +293,17 @@ async function garantirLogado(page, onStatus) {
 async function abrirNovoLancamento(page) {
     await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 })
     await esperar(2000)
+
+    // Next.js pode mostrar "Application error" na 1ª carga pós-login — um reload resolve
+    const temErroApp = await page.evaluate(() =>
+        /application error|client.side exception/i.test(document.body?.innerText || '')
+    ).catch(() => false)
+    if (temErroApp) {
+        console.log('⚠️  [Planner] Application error detectado — recarregando...')
+        await page.reload({ waitUntil: 'networkidle2', timeout: 40000 })
+        await esperar(2000)
+    }
+
     await fecharModaisPromocionais(page)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
 
