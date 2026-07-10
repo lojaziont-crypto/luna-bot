@@ -307,40 +307,34 @@ async function abrirNovoLancamento(page) {
     await fecharModaisPromocionais(page)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
 
-    // Clica no botão "+" (primeiro botão visível no cabeçalho da tabela)
-    const r = await page.evaluate(() => {
+    // Encontra o botão "+" e retorna suas coordenadas para usar page.mouse.click (evento real)
+    const coord = await page.evaluate(() => {
         const cands = [...document.querySelectorAll('button, a, [role="button"]')]
             .filter(el => el.offsetParent !== null)
         const txt = el => (el.textContent || '').trim()
-        // Prioridade 1: botão com texto exato "+"
         let alvo = cands.find(b => /^[+＋]$/.test(txt(b)))
-        // Prioridade 2: atributo aria-label de adicionar
         if (!alvo) alvo = cands.find(b => /add|plus|novo|criar/i.test(b.getAttribute('aria-label') || ''))
-        // Prioridade 3: primeiro botão pequeno no topo da página (área do cabeçalho)
-        if (!alvo) {
-            alvo = cands.filter(b => {
-                const r = b.getBoundingClientRect()
-                return r.top > 0 && r.top < 200 && r.left < 100 && r.width > 0
-            })[0]
-        }
         if (!alvo) return { ok: false, visiveis: cands.slice(0, 20).map(txt).filter(Boolean) }
-        alvo.scrollIntoView({ block: 'center' })
-        alvo.click()
-        return { ok: true, texto: txt(alvo) }
+        alvo.scrollIntoView({ block: 'nearest' })
+        const rect = alvo.getBoundingClientRect()
+        return { ok: true, texto: txt(alvo), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
     })
 
-    if (!r.ok) {
+    if (!coord.ok) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_novo_nao_encontrado.png') }).catch(() => {})
-        console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(r.visiveis)}`)
+        console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(coord.visiveis)}`)
         throw new Error('Botão "+" de novo lançamento não encontrado')
     }
-    console.log(`🖱️  [Planner] Cliquei em "${r.texto}" — aguardando linha inline...`)
 
-    // Aguarda a linha inline aparecer (input[type="date"] visível)
+    // Clique com mouse real (coordenadas) — dispara eventos React corretamente
+    console.log(`🖱️  [Planner] Clicando "+" em (${Math.round(coord.x)}, ${Math.round(coord.y)})`)
+    await page.mouse.click(coord.x, coord.y)
+
+    // Aguarda a linha inline aparecer (input[type="date"] visível na página)
     await page.waitForFunction(
         () => [...document.querySelectorAll('input[type="date"]')].some(el => el.offsetParent !== null),
-        { timeout: 8000 }
-    ).catch(() => {})
+        { timeout: 10000 }
+    ).catch(() => console.log('⚠️  [Planner] Timeout aguardando linha inline — continuando mesmo assim'))
     await esperar(500)
 }
 
