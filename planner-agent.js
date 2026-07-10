@@ -215,12 +215,12 @@ async function abrirPlannerBrowser() {
     return { browser: plannerBrowser, page: plannerPage }
 }
 
-// Fecha modais promocionais (DaisyUI modal-box). Usa page.mouse.click com coordenadas
-// porque btn.click() via JS não dispara os handlers React registrados via event delegation.
+// Fecha modais promocionais (DaisyUI modal-box). Usa ElementHandle.click() do Puppeteer
+// que faz scroll automático + pega coordenadas na hora + dispara via CDP (handlers React ok).
 async function fecharModaisPromocionais(page) {
     await esperar(800) // aguarda modais com delay de exibição
     for (let i = 0; i < 4; i++) {
-        const coord = await page.evaluate(() => {
+        const elHandle = await page.evaluateHandle(() => {
             const modalBox = [...document.querySelectorAll('[class*="modal-box"]')]
                 .find(el => {
                     if (!el.offsetParent) return false
@@ -228,15 +228,12 @@ async function fecharModaisPromocionais(page) {
                     return rect.height > 50 && rect.width > 100
                 })
             if (!modalBox) return null
-            const btn = [...modalBox.querySelectorAll('button')]
-                .find(el => /^[✕✖×x]$/i.test((el.textContent || '').trim()) || /btn-circle/i.test(String(el.className || '')))
-            if (!btn) return null
-            btn.scrollIntoView({ block: 'nearest' })
-            const r = btn.getBoundingClientRect()
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+            return [...modalBox.querySelectorAll('button')]
+                .find(el => /^[✕✖×x]$/i.test((el.textContent || '').trim()) || /btn-circle/i.test(String(el.className || ''))) || null
         }).catch(() => null)
-        if (!coord) break
-        await page.mouse.click(coord.x, coord.y)
+        const elBtn = elHandle?.asElement ? elHandle.asElement() : null
+        if (!elBtn) break
+        await elBtn.click() // ElementHandle.click(): scroll + coords dinâmicas + CDP
         await esperar(600)
     }
     await page.keyboard.press('Escape').catch(() => {})
@@ -315,8 +312,8 @@ async function abrirNovoLancamento(page) {
     await fecharModaisPromocionais(page)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
 
-    // Encontra o botão "+" e retorna suas coordenadas para usar page.mouse.click (evento real)
-    const coord = await page.evaluate(() => {
+    // Encontra o botão "+" via evaluateHandle — retorna um ElementHandle vivo
+    const elPlusHandle = await page.evaluateHandle(() => {
         const cands = [...document.querySelectorAll('button, a, [role="button"]')]
             .filter(el => el.offsetParent !== null)
         const txt = el => (el.textContent || '').trim()
@@ -324,8 +321,8 @@ async function abrirNovoLancamento(page) {
         let alvo = cands.find(b => /^[+＋]$/.test(txt(b)))
         // Tenta 2: aria-label com add/plus/novo
         if (!alvo) alvo = cands.find(b => /add|plus|novo|criar|adicionar/i.test(b.getAttribute('aria-label') || ''))
-        // Tenta 3: botão SVG com ícone "+" (linha vertical L + horizontal H)
-        // NOTA: /H/ não /\bH\b/ — no path "7.41016H12.53" não há word boundary entre dígito e H
+        // Tenta 3: SVG com padrão de + (linha vertical L + horizontal H)
+        // NOTA: /H/ não /\bH\b/ — em "7.41016H12.53" não há word boundary entre dígito e H
         if (!alvo) {
             alvo = cands.find(b => {
                 const svg = b.querySelector('svg')
@@ -333,39 +330,40 @@ async function abrirNovoLancamento(page) {
                 const paths = [...svg.querySelectorAll('path, line')]
                 if (paths.length < 2 || paths.length > 4) return false
                 const ds = paths.map(p => (p.getAttribute('d') || '').trim())
-                const temH = ds.some(d => /H/.test(d))
-                const temV = ds.some(d => /^M[\d.]+\s+[\d.]+L[\d.]+\s+[\d.]+$/.test(d))
-                return temH && temV
+                return ds.some(d => /H/.test(d)) && ds.some(d => /^M[\d.]+\s+[\d.]+L[\d.]+\s+[\d.]+$/.test(d))
             })
         }
-        // Tenta 4: primeiro btn-sm no toolbar (fallback posicional)
+        // Tenta 4: primeiro btn-sm no toolbar (sidebar pode estar expandida — sem restrição de x)
         if (!alvo) {
             alvo = [...document.querySelectorAll('button.btn-sm')]
                 .find(el => {
                     if (!el.offsetParent) return false
                     const r = el.getBoundingClientRect()
-                    return r.y > 80 && r.y < 200 && r.x < 80 && r.width < 60
+                    return r.y > 80 && r.y < 200 && r.width < 60
                 }) || null
         }
-        if (!alvo) return { ok: false, visiveis: cands.slice(0, 20).map(txt).filter(Boolean) }
-        alvo.scrollIntoView({ block: 'nearest' })
-        const rect = alvo.getBoundingClientRect()
-        return { ok: true, texto: txt(alvo) || '[SVG]', x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        return alvo || null
     })
+    const elPlus = elPlusHandle?.asElement ? elPlusHandle.asElement() : null
 
-    if (!coord.ok) {
+    if (!elPlus) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'botao_novo_nao_encontrado.png') }).catch(() => {})
-        console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(coord.visiveis)}`)
+        const visiveis = await page.evaluate(() =>
+            [...document.querySelectorAll('button')].filter(el => el.offsetParent !== null)
+                .slice(0, 15).map(b => (b.textContent || '').trim() || '[SVG]')
+        ).catch(() => [])
+        console.log(`🔍 [Planner] Botões visíveis: ${JSON.stringify(visiveis)}`)
         throw new Error('Botão "+" de novo lançamento não encontrado')
     }
 
-    // Clique com mouse real (coordenadas) — dispara eventos React corretamente
-    console.log(`🖱️  [Planner] Clicando "+" em (${Math.round(coord.x)}, ${Math.round(coord.y)})`)
-    await page.mouse.click(coord.x, coord.y)
+    // ElementHandle.click() do Puppeteer: scroll automático + coordenadas dinâmicas + CDP
+    console.log('🖱️  [Planner] Clicando "+" via ElementHandle')
+    await elPlus.click()
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'apos_clicar_novo.png') }).catch(() => {})
 
-    // Aguarda a linha inline aparecer (input[type="date"] visível na página)
+    // Aguarda a linha inline aparecer (input[type="date"] DENTRO DE TR — exclui filtros)
     await page.waitForFunction(
-        () => [...document.querySelectorAll('input[type="date"]')].some(el => el.offsetParent !== null),
+        () => [...document.querySelectorAll('tr input[type="date"]')].some(el => el.offsetParent !== null),
         { timeout: 10000 }
     ).catch(() => console.log('⚠️  [Planner] Timeout aguardando linha inline — continuando mesmo assim'))
     await esperar(500)
