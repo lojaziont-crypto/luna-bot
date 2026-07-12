@@ -81,7 +81,7 @@ const PALAVRAS_INFORMAIS = {
     'Café da Manhã': ['pão', 'café', 'iogurte', 'fruta', 'suco', 'biscoito', 'tapioca', 'cuscuz', 'leite', 'achocolatado', 'mingau', 'bolo de café', 'croissant', 'pão de queijo'],
     'Lanche': ['lanche', 'salgado', 'pastel', 'coxinha', 'esfiha', 'hambúrguer', 'pizza', 'sanduíche', 'açaí', 'sorvete', 'pipoca', 'barra de cereal', 'snack', 'bolinho'],
     'Almoço': ['almoço', 'marmita', 'restaurante', 'self-service', 'prato feito', 'pf', 'comida', 'arroz e feijão', 'buffet'],
-    'Jantar': ['jantar', 'janta', 'comida à noite', 'delivery à noite', 'ifood à noite'],
+    'Jantar': ['jantar', 'janta', 'comida à noite', 'delivery à noite', 'ifood à noite', 'ifood', 'rappi', 'delivery'],
     'Mercado': ['mercado', 'supermercado', 'feira', 'hortifruti', 'açougue', 'padaria', 'sacolão'],
     'Academia': ['academia', 'mensalidade academia', 'gym', 'personal'],
     'Metrô': ['metrô', 'metro', 'bilhete único', 'cartão transporte'],
@@ -1000,7 +1000,9 @@ async function gerarResumoFinanceiroDiario({ onStatus } = {}) {
         const saldoProjetado = receitaTotal - totalDespesasAjustado
         const dica = gerarDica(porItem, saldoProjetado, receitaTotal)
 
-        return { totalGasto: totalDespesasAjustado, receitaTotal, saldoProjetado, dica }
+        // porItem incluído pra quem precisa do detalhamento por categoria/subcategoria
+        // (ex: consultora-financeira.js) além do resumo pronto pro WhatsApp.
+        return { totalGasto: totalDespesasAjustado, receitaTotal, saldoProjetado, dica, porItem }
     } finally {
         ocupado = false
     }
@@ -1023,4 +1025,6 @@ module.exports = {
     CATEGORIAS_DESPESA,
     RECEITAS,
     PALAVRAS_INFORMAIS,
+    RECEITA_BASE_MENSAL,
+    limitesPorItem,
 }

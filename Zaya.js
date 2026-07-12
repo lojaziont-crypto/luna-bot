@@ -17,6 +17,7 @@ const http = require('http')
 const https = require('https')
 const { PDFParse } = require('pdf-parse')
 const plannerAgent = require('./planner-agent')
+const consultoraFinanceira = require('./consultora-financeira')
 
 let activeSock = null
 let ownerJid = null
@@ -529,6 +530,14 @@ async function enviarResumoFinanceiroDiario() {
     }
 }
 
+// Consultora financeira — responde perguntas sobre o orçamento (não lança nada no Planner)
+async function processarConsultaFinanceira(sock, from, texto) {
+    const resposta = await consultoraFinanceira.responderConsultaFinanceira(texto, {
+        onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
+    })
+    await sock.sendMessage(from, { text: resposta })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Notificação ao Lucas — reutilizável pelo endpoint E pelo agendador da Zaya
 // ─────────────────────────────────────────────────────────────────────────────
@@ -864,8 +873,13 @@ async function connectToWhatsApp() {
                     }
                 }
 
-                if (text && pareceDespesa(text)) {
-                    await processarDespesaPlanner(sock, from, text)
+                if (text && (pareceDespesa(text) || consultoraFinanceira.pareceConsultaFinanceira(text))) {
+                    const tipo = await consultoraFinanceira.classificarMensagem(text)
+                    if (tipo === 'consulta') {
+                        await processarConsultaFinanceira(sock, from, text)
+                    } else {
+                        await processarDespesaPlanner(sock, from, text)
+                    }
                     continue
                 }
             }
@@ -1521,6 +1535,7 @@ console.log('📋 Monitoramento do grupo Ziont ativado (PDFs "Lista de Separaç�
 console.log('📦 Cobranças ao Adriano: 8h, 13h e 18h (dias com prazo)')
 console.log('🎨 Aviso de produção ao Lucas: ~17h (16h50-17h15) — agendamento Zaya→Zyon')
 console.log('📊 Resumo financeiro diário agendado para ~8h (7h50-8h10)')
+console.log('🧠 Consultora financeira ativada (Groq classifica consulta vs lançamento, Claude responde com dados reais do mês)')
 console.log('⚠️  Monitoramento de pedidos atrasados: ciclo ~1h — aviso ao Adriano no grupo Ziont')
 console.log(`👷 Lucas: ${process.env.LUCAS_PHONE ? `55${process.env.LUCAS_PHONE}` : '(LUCAS_PHONE não definido)'}`)
 console.log(`👷 Adriano: ${process.env.ADRIANO_PHONE ? `55${process.env.ADRIANO_PHONE}` : '(ADRIANO_PHONE não definido)'}`)
