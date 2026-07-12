@@ -1085,6 +1085,14 @@ async function connectToWhatsApp() {
                 continue
             }
 
+            // Resposta automática fica desativada só pra quem NÃO é o dono (clientes) — pro
+            // dono, nenhuma mensagem pode cair em silêncio, mesmo que nenhum handler acima
+            // tenha reconhecido o que ele quis dizer.
+            if (isOwner) {
+                await sock.sendMessage(from, { text: 'Maurício, não entendi bem — pode explicar melhor?' })
+                continue
+            }
+
             const sender = from.replace('@s.whatsapp.net', '')
             console.log(`⏭️  [${sender}]: resposta automática desativada`)
         }
