@@ -155,6 +155,11 @@ async function interpretarDespesa(texto) {
     if (bruto.subcategoria) {
         subcategoria = casarNome(bruto.subcategoria, subsValidas) || ''
     }
+    // Categorias "catch-all" com subcategoria homônima (ex: Outros/Outros) — o site exige uma
+    // subcategoria selecionada quando a categoria tem opções, então usa a própria categoria.
+    if (!subcategoria && subsValidas.includes(categoria)) {
+        subcategoria = categoria
+    }
 
     const confianca = Number(bruto.confianca)
     const data = /^\d{4}-\d{2}-\d{2}$/.test(bruto.data || '') ? bruto.data : hoje
@@ -220,10 +225,12 @@ async function fecharModaisPromocionais(page) {
     await esperar(600)
     let fechouAlgo = false
     for (let i = 0; i < 4; i++) {
+        // Site usa <dialog open> nativo (DaisyUI 5) — elementos dentro dele têm
+        // offsetParent null (top layer), por isso NÃO filtrar por offsetParent aqui.
+        // Fallback: [class*="modal-box"] com tamanho real, para modais antigos em <div>.
         const elHandle = await page.evaluateHandle(() => {
-            const modalBox = [...document.querySelectorAll('[class*="modal-box"]')]
-                .find(el => {
-                    if (!el.offsetParent) return false
+            const modalBox = document.querySelector('dialog[open] [class*="modal-box"], dialog[open]')
+                || [...document.querySelectorAll('[class*="modal-box"]')].find(el => {
                     const rect = el.getBoundingClientRect()
                     return rect.height > 50 && rect.width > 100
                 })
@@ -251,9 +258,12 @@ async function precisaLogin(page) {
     try {
         const SEL_LOGIN = 'input[type="password"]'
         const SEL_APP   = 'table, nav, [class*="sidebar" i], [class*="menu" i], [class*="layout" i]'
+        // visible: true é essencial — sem isso, waitForSelector resolve assim que o elemento
+        // existe no DOM (mesmo oculto), e um <input type="password"> escondido em algum canto
+        // da página logada (ex: formulário de troca de senha) gera falso positivo de "precisa login".
         const resultado = await Promise.race([
-            page.waitForSelector(SEL_LOGIN, { timeout: 10000 }).then(() => true),
-            page.waitForSelector(SEL_APP,   { timeout: 10000 }).then(() => false),
+            page.waitForSelector(SEL_LOGIN, { visible: true, timeout: 10000 }).then(() => true),
+            page.waitForSelector(SEL_APP,   { visible: true, timeout: 10000 }).then(() => false),
         ]).catch(() => /\/login|\/entrar|\/signin/i.test(page.url()))
         return resultado
     } catch { return true }
@@ -304,13 +314,19 @@ async function garantirLogado(page, onStatus) {
         await esperar(300)
 
         // Clica no botão de entrar via ElementHandle (CDP — dispara handlers React)
+        // IMPORTANTE: filtrar por offsetParent !== null — pode haver button[type=submit]
+        // oculto antes do formulário de login no DOM, causando "Node is either not clickable"
         const elSubmitHandle = await page.evaluateHandle(() => {
-            return document.querySelector('button[type="submit"]')
-                || [...document.querySelectorAll('button')].find(b => /entrar|login|acessar/i.test((b.textContent || '').trim()))
+            const visiveis = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null)
+            return visiveis.find(b => b.type === 'submit')
+                || visiveis.find(b => /entrar|login|acessar/i.test((b.textContent || '').trim()))
                 || null
         })
         const elSubmit = elSubmitHandle?.asElement ? elSubmitHandle.asElement() : null
-        if (!elSubmit) throw new Error('Botão de login não encontrado na tela de login')
+        if (!elSubmit) {
+            await page.screenshot({ path: path.join(DEBUG_DIR, 'login_botao_nao_encontrado.png') }).catch(() => {})
+            throw new Error('Botão de login não encontrado na tela de login')
+        }
         await elSubmit.click()
 
         // Aguarda URL sair de /login
@@ -361,6 +377,10 @@ async function garantirLogado(page, onStatus) {
 // Localiza o botão "+" via evaluateHandle (retorna ElementHandle para click via CDP)
 async function encontrarBotaoNovo(page) {
     return page.evaluateHandle(() => {
+        // Tenta 0: id estável do botão "Criar lançamento" (confirmado via inspeção ao vivo em 2026-07-11)
+        const porId = document.getElementById('create-transaction-btn')
+        if (porId && porId.offsetParent !== null) return porId
+
         const cands = [...document.querySelectorAll('button, a, [role="button"]')]
             .filter(el => el.offsetParent !== null)
         const txt = el => (el.textContent || '').trim()
@@ -415,7 +435,11 @@ async function abrirNovoLancamento(page) {
     await page.screenshot({ path: path.join(DEBUG_DIR, 'antes_clicar_novo.png') }).catch(() => {})
     console.log(`📍 [Planner] URL em abrirNovoLancamento: ${page.url()}`)
 
-    // Tenta clicar no "+" até 3 vezes, aguardando a linha inline aparecer
+    // Tenta clicar no "+" até 3 vezes, aguardando a linha inline aparecer.
+    // NOTA (2026-07-11): confirmado ao vivo que a Conta de Maurício (a usada pela Zaya)
+    // ainda abre uma LINHA INLINE na tabela — não o modal "Inserir um Lançamento" que
+    // outras contas do site já têm (ex: conta da loja). Não assumir o modal aqui.
+    let linhaAbriu = false
     for (let tentativa = 1; tentativa <= 3; tentativa++) {
         const elPlusHandle = await encontrarBotaoNovo(page)
         const elPlus = elPlusHandle?.asElement ? elPlusHandle.asElement() : null
@@ -447,6 +471,7 @@ async function abrirNovoLancamento(page) {
 
         if (apareceu) {
             console.log('✅ [Planner] Linha inline aberta')
+            linhaAbriu = true
             break
         }
 
@@ -455,6 +480,10 @@ async function abrirNovoLancamento(page) {
             await page.screenshot({ path: path.join(DEBUG_DIR, 'linha_nao_abriu.png') }).catch(() => {})
         }
         await esperar(1000)
+    }
+
+    if (!linhaAbriu) {
+        throw new Error('Linha inline de lançamento não abriu após clicar em "+" (veja debug_planner/linha_nao_abriu.png)')
     }
 
     await esperar(500)
@@ -518,6 +547,18 @@ async function preencherLinhaLancamento(page, dados) {
             console.log(`⚠️  [Planner] Subcategoria "${dados.subcategoria}" não selecionada: ${e.message}`)
         }
         await esperar(300)
+    } else {
+        // Se o <select> de subcategoria tem opções reais (além do placeholder), o site exige
+        // uma escolha — sem isso o formulário fica preso em edição e o salvamento falha em
+        // silêncio (looks like sucesso, mas nada é gravado). Falha aqui com erro explícito.
+        const exigeSubcategoria = await page.evaluate(el => {
+            const select = el.querySelector('select')
+            return !!select && [...select.options].some(o => o.value)
+        }, celulas[4])
+        if (exigeSubcategoria) {
+            await page.screenshot({ path: path.join(DEBUG_DIR, 'subcategoria_obrigatoria_faltando.png') }).catch(() => {})
+            throw new Error(`Categoria "${dados.categoria}" exige uma subcategoria e nenhuma foi identificada`)
+        }
     }
     await setarInput(celulas[7], dados.descricao)
     await esperar(200)
