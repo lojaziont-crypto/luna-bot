@@ -36,6 +36,20 @@ let despesaPendente = null // { dados, expiraEm } — aguardando confirmação d
 const DESPESA_PENDENTE_TTL = 5 * 60 * 1000
 let rendaExtraPendente = null // { valor, expiraEm } — aguardando o dono dizer de qual loja veio
 
+// Últimas mensagens de texto do dono (buffer simples, qualquer tipo), independente de
+// classificação — dá contexto pro comando "anote no planner" (ex: "Luz 103,05 vai vencer
+// 16/07 pendente" seguido de "Anote no planner").
+let ultimasMensagensDono = []
+const MAX_MENSAGENS_CONTEXTO_DONO = 5
+
+function registrarMensagemDono(texto) {
+    if (!texto) return
+    ultimasMensagensDono.push(texto)
+    if (ultimasMensagensDono.length > MAX_MENSAGENS_CONTEXTO_DONO) {
+        ultimasMensagensDono = ultimasMensagensDono.slice(-MAX_MENSAGENS_CONTEXTO_DONO)
+    }
+}
+
 function ativarJanelaZeon() {
     if (zeonJanelaAtiva.timer) clearTimeout(zeonJanelaAtiva.timer)
     zeonJanelaAtiva.ativa = true
@@ -552,6 +566,25 @@ async function tratarRendaExtraPendente(sock, from, texto) {
     return true
 }
 
+// "Anote no planner" / "lança no planner" / "registra" / "salva isso" / "cadastra" — usa o
+// CONTEXTO recente (mensagens anteriores do dono, sem a própria mensagem de comando) pra
+// descobrir o que ele quer registrar: despesa, receita ou conta de luz atrasada.
+async function processarComandoRegistrarNoPlanner(sock, from) {
+    const recentes = ultimasMensagensDono.slice(0, -1) // exclui a própria mensagem "anote..."
+    const resultado = await consultoraFinanceira.processarComandoRegistrar(recentes)
+
+    if (resultado.tipo === 'conta_luz') {
+        const msg = consultoraFinanceira.registrarContaLuz(resultado.valorConta, resultado.vencimento)
+        await sock.sendMessage(from, { text: msg })
+        return
+    }
+    if (resultado.tipo === 'despesa' || resultado.tipo === 'receita') {
+        await processarDespesaPlanner(sock, from, resultado.contexto)
+        return
+    }
+    await sock.sendMessage(from, { text: 'Maurício, não achei nada recente pra registrar — me conta o que quer que eu anote?' })
+}
+
 // Resumo financeiro diário — agendado pra 8h (ver agendarHorarioZaya no fim do arquivo).
 // Se o navegador/sessão do Planner não estiver disponível, pula o envio de hoje sem travar
 // os outros agendamentos (o erro só é logado).
@@ -919,6 +952,7 @@ async function connectToWhatsApp() {
                 const imageMsg = msg.message.imageMessage
 
                 if (text) console.log(`📩 [Zaya] Mensagem do dono: ${text}`)
+                if (text) registrarMensagemDono(text)
 
                 if (imageMsg) {
                     await processarComprovanteImagem(sock, msg, from, text)
@@ -980,6 +1014,13 @@ async function connectToWhatsApp() {
                     }
                 }
 
+                // "Anote no planner" / "lança no planner" / "registra" / "salva isso" / "cadastra" —
+                // pede pra registrar algo já mencionado nas mensagens anteriores (contexto recente).
+                if (text && consultoraFinanceira.pareceComandoRegistrar(text)) {
+                    await processarComandoRegistrarNoPlanner(sock, from)
+                    continue
+                }
+
                 // Comandos rápidos (saldo, dashboard, parcelas, prioridades, termômetro,
                 // desafio, [categoria], luz quitada/negociada) — reconhecidos localmente,
                 // sem precisar do Groq.
@@ -1020,6 +1061,7 @@ async function connectToWhatsApp() {
                             break
                         }
                         case 'ignorar':
+                            await sock.sendMessage(from, { text: 'Maurício, não entendi bem — pode explicar melhor?' })
                             break
                         default: // 'despesa' | 'receita'
                             await processarDespesaPlanner(sock, from, text)

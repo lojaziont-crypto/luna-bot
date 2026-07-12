@@ -206,6 +206,34 @@ function pareceConsultaFinanceira(texto) {
     return PALAVRAS_DINHEIRO.some(p => lower.includes(p)) || nomesItem.some(n => n.length > 2 && lower.includes(n.toLowerCase()))
 }
 
+// Frases que pedem explicitamente pra registrar algo já mencionado antes na conversa
+// (ex: "Luz 103,05 vai vencer 16/07 pendente" seguido de "Anote no planner").
+const PALAVRAS_COMANDO_REGISTRAR = [
+    'anota', 'anote', 'anote no planner', 'anota no planner', 'lança no planner', 'lanca no planner',
+    'lança isso', 'lanca isso', 'registra', 'registre', 'salva isso', 'salve isso', 'cadastra', 'cadastre',
+]
+
+function pareceComandoRegistrar(texto) {
+    const lower = texto.toLowerCase().trim().replace(/[?!.]+$/, '')
+    return PALAVRAS_COMANDO_REGISTRAR.some(p => new RegExp(`(^|\\s)${p}(\\s|$)`).test(lower))
+}
+
+// Usa o contexto recente (mensagens anteriores do dono, SEM a própria mensagem "anote...")
+// pra descobrir o que ele quer registrar, reaproveitando classificarMensagem sobre o texto
+// concatenado. Se vier "despesa"/"receita", quem chama ainda precisa extrair os campos reais
+// via plannerAgent.interpretarDespesa(contexto) — aqui só decidimos o quê registrar.
+// Retorna { tipo: 'despesa'|'receita'|'conta_luz'|'nenhum', contexto?, valorConta?, vencimento? }
+async function processarComandoRegistrar(mensagensRecentes) {
+    const contexto = (mensagensRecentes || []).filter(Boolean).join('\n').trim()
+    if (!contexto) return { tipo: 'nenhum' }
+    const classificacao = await classificarMensagem(contexto)
+    if (classificacao.tipo === 'conta_luz') return classificacao
+    if (classificacao.tipo === 'despesa' || classificacao.tipo === 'receita') {
+        return { tipo: classificacao.tipo, contexto }
+    }
+    return { tipo: 'nenhum' }
+}
+
 // ───────────────────────── Cálculos financeiros ─────────────────────────
 
 // Formulas pedidas: limite diário, gasto esperado até hoje, saldo de ritmo, quanto dá
@@ -304,6 +332,10 @@ Se BARATO (cabe folgado): diga que cabe, em 1 mensagem de até 2 linhas. Ponto.
 Se cabe mas compromete o ritmo: 1 mensagem de até 2 linhas dizendo que cabe + 1 sugestão curta de micro-economia pra moto.
 Se CARO (estoura a categoria): no MÁXIMO 3 mensagens curtas (separadas por uma linha só "---"): (1) que passa do disponível, (2) se compensa cortando de não essenciais, (3) parcelamento se couber na folga sem comprometer prioridades, ou um "não" claro com alternativa. NUNCA mais que 3 mensagens nesse caso, e cada uma com no máximo 2 linhas.
 Conecte à prioridade (luz → reserva → moto) só quando for realmente relevante — não force a conexão toda hora.
+
+REGRA CRÍTICA AO SUGERIR CORTE EM OUTRA CATEGORIA: sempre cite o saldo DISPONÍVEL daquela categoria nesse mês (o "disponível no mês" que já vem pronto nos dados reais abaixo) — NUNCA diga que vai mudar, reduzir ou alterar o limite/planejamento dela. Mudar um limite é uma ação diferente que só acontece se ele pedir isso explicitamente.
+Frase CORRETA: "Você ainda tem R$ 38,00 em Lavanderia esse mês — dá pra economizar aí."
+Frase ERRADA (nunca use algo assim): "vou reduzir seu limite de Lavanderia" ou "posso cortar o orçamento de Lavanderia".
 
 ═══ TOM E FORMATO — REGRAS RÍGIDAS (NÃO NEGOCIÁVEIS) ═══
 - Comece SEMPRE com "Maurício,"
@@ -878,6 +910,8 @@ async function verificarAlertasProativos({ onStatus } = {}) {
 module.exports = {
     classificarMensagem,
     pareceConsultaFinanceira,
+    pareceComandoRegistrar,
+    processarComandoRegistrar,
     detectarComandoRapido,
     processarComandoRapido,
     responderConsultaFinanceira,
