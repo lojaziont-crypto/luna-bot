@@ -60,6 +60,20 @@ const CATEGORIAS_DESPESA = Object.keys(PLANEJAMENTO)
 // Categorias sem limite definido — nunca sugeridas como "tem folga" no insight de estouro
 const CATEGORIAS_SEM_LIMITE_PARA_SUGESTAO = ['Dízimo', 'Farmácia', 'Eletrodomésticos, Móveis e Etc.', 'Outros']
 
+// ───────────────────────── Resumo financeiro diário (fonte única) ─────────────────────────
+// Receita fixa mensal: Salário R$3.000 + Vale-Alimentação R$200 + Vale-Transporte R$280.
+// Renda Extra lançada no mês é somada a isso (ver lerLancamentosDoMesAtual).
+const RECEITA_BASE_MENSAL = 3480.00
+// Pagas pela loja — nunca entram no total gasto pessoal do resumo diário
+const CATEGORIAS_IGNORAR_RESUMO = ['Eletrodomésticos, Móveis e Etc.', 'Outros']
+
+// Classificação por item (nome de subcategoria, ou de categoria quando ela não tem subs) — usada
+// só na dica do resumo diário. Itens sem limite definido em PLANEJAMENTO (ex: Uber, 99, Farmácia)
+// nunca aparecem na dica, pois não dá pra calcular "saldo disponível" sem um limite pra comparar.
+const CATEGORIAS_ESSENCIAIS = ['Aluguel', 'Água', 'Luz', 'Gás', 'Internet', 'Mercado', 'Metrô', 'Ônibus', 'Academia', 'Animal de Estimação', 'Ração']
+const CATEGORIAS_SEMI_ESSENCIAIS = ['Almoço', 'Lanche', 'Café da Manhã', 'Jantar', 'Farmácia', 'Cuidados Pessoais', 'Lavanderia']
+const CATEGORIAS_NAO_ESSENCIAIS = ['Lazer', 'Viagem', 'Vestuário', 'Uber', '99']
+
 // Guia de palavras informais → subcategoria/categoria (chave = nome EXATO já usado em PLANEJAMENTO).
 // Serve tanto de referência pro prompt do Groq quanto de pré-filtro em pareceDespesa (Zaya.js) —
 // não é exaustivo, o Groq deve inferir casos parecidos pelo contexto.
@@ -722,6 +736,144 @@ function sugerirCategoriasComFolga(realizadosTodos, categoriaEstourada) {
         .slice(0, 2)
 }
 
+// Varre TODAS as páginas de /controle/lancamentos somando despesas e Renda Extra do mês atual,
+// agrupadas por item (subcategoria, ou categoria quando não há subcategoria). Necessário porque
+// o Balanço Mensal só expõe realizado por CATEGORIA inteira (lerBalancoMensalCompleto) — não dá
+// pra isolar, por exemplo, quanto de "Transporte" foi Uber/99 (não essencial) vs Metrô/Ônibus
+// (essencial) sem ler os lançamentos individuais.
+async function lerLancamentosDoMesAtual(page) {
+    if (!page.url().includes('/controle/lancamentos')) {
+        await page.goto(LANCAMENTOS_URL, { waitUntil: 'networkidle2', timeout: 40000 })
+        await esperar(1500)
+    }
+    await fecharModaisPromocionais(page)
+
+    const [anoAtual, mesAtual] = hojeBR().split('-')
+
+    let totalDespesasAjustado = 0
+    let receitaExtra = 0
+    const porItem = {}
+    let linhasNoMes = 0
+
+    for (let pagina = 0; pagina < 10; pagina++) {
+        const resultado = await page.evaluate((mesAtual, anoAtual, categoriasIgnorar, categoriasReceita) => {
+            const linhas = [...document.querySelectorAll('tr')]
+            let totalPag = 0, receitaExtraPag = 0, contagemPag = 0
+            const porItemPag = {}
+            for (const tr of linhas) {
+                const tds = [...tr.querySelectorAll(':scope > td')]
+                if (tds.length < 9) continue
+                const dataEvento = (tds[1]?.innerText || '').trim()
+                const m = dataEvento.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+                if (!m || m[2] !== mesAtual || m[3] !== anoAtual) continue
+                const categoria = (tds[3]?.innerText || '').trim()
+                const subcategoria = (tds[4]?.innerText || '').trim()
+                const valorMatch = (tds[8]?.innerText || '').match(/([\d.]+,\d{2})/)
+                if (!valorMatch) continue
+                const valor = parseFloat(valorMatch[1].replace(/\./g, '').replace(',', '.'))
+                if (!Number.isFinite(valor)) continue
+                contagemPag++
+
+                if (categoria === 'Renda Extra') { receitaExtraPag += valor; continue }
+                if (categoriasReceita.includes(categoria)) continue // Salário/VA/VT: já embutidos na receita base fixa
+                if (categoriasIgnorar.includes(categoria)) continue // pagas pela loja
+
+                totalPag += valor
+                const item = subcategoria || categoria
+                porItemPag[item] = (porItemPag[item] || 0) + valor
+            }
+            return { totalPag, receitaExtraPag, porItemPag, contagemPag }
+        }, mesAtual, anoAtual, CATEGORIAS_IGNORAR_RESUMO, RECEITAS)
+
+        totalDespesasAjustado += resultado.totalPag
+        receitaExtra += resultado.receitaExtraPag
+        linhasNoMes += resultado.contagemPag
+        for (const [item, valor] of Object.entries(resultado.porItemPag)) {
+            porItem[item] = (porItem[item] || 0) + valor
+        }
+
+        const avancou = await page.evaluate(() => {
+            const paginaEl = [...document.querySelectorAll('*')]
+                .find(e => e.children.length === 0 && /^Página \d+\/\d+$/.test((e.textContent || '').trim()))
+            if (!paginaEl) return false
+            const [, atual, total] = paginaEl.textContent.trim().match(/^Página (\d+)\/(\d+)$/) || []
+            if (!atual || atual === total) return false // última página
+            let container = paginaEl.closest('div')
+            for (let up = 0; up < 4 && container; up++) {
+                const btns = [...container.querySelectorAll('button')].filter(b => b.offsetParent !== null)
+                if (btns.length >= 2) {
+                    const proximo = btns[btns.length - 1]
+                    if (proximo.disabled) return false
+                    proximo.click()
+                    return true
+                }
+                container = container.parentElement
+            }
+            return false
+        })
+        if (!avancou) break
+        await esperar(1200)
+    }
+
+    if (linhasNoMes === 0) {
+        console.log('⚠️  [Planner] Nenhum lançamento do mês atual encontrado — verifique se o filtro de datas da tabela cobre o mês corrente')
+    }
+
+    return { totalDespesasAjustado, receitaExtra, porItem }
+}
+
+function classificarItem(item) {
+    if (CATEGORIAS_NAO_ESSENCIAIS.includes(item)) return 'nao-essencial'
+    if (CATEGORIAS_SEMI_ESSENCIAIS.includes(item)) return 'semi-essencial'
+    if (CATEGORIAS_ESSENCIAIS.includes(item)) return 'essencial'
+    return null
+}
+
+// Limite planejado por item (subcategoria, ou categoria quando ela não tem subs) — achata
+// PLANEJAMENTO pra granularidade de item, ignorando itens sem limite definido.
+function limitesPorItem() {
+    const mapa = {}
+    for (const [cat, info] of Object.entries(PLANEJAMENTO)) {
+        if (CATEGORIAS_IGNORAR_RESUMO.includes(cat)) continue
+        const subs = Object.entries(info.subs)
+        if (subs.length) {
+            for (const [sub, limite] of subs) {
+                if (limite != null) mapa[sub] = limite
+            }
+        } else if (info.limite != null) {
+            mapa[cat] = info.limite
+        }
+    }
+    return mapa
+}
+
+// Monta a dica do resumo diário (req. lógica da dica)
+function gerarDica(porItem, saldoProjetado, receitaTotal) {
+    const candidatos = Object.entries(limitesPorItem())
+        .map(([item, limite]) => ({ item, disponivel: limite - (porItem[item] || 0), classe: classificarItem(item) }))
+        .filter(c => c.disponivel > 0 && c.classe)
+
+    const naoEssenciais = candidatos.filter(c => c.classe === 'nao-essencial').sort((a, b) => b.disponivel - a.disponivel)
+    if (naoEssenciais.length) {
+        return `Economize em ${naoEssenciais[0].item} — ainda restam R$ ${formatarBR(naoEssenciais[0].disponivel)} disponíveis.`
+    }
+
+    const semiEssenciais = candidatos.filter(c => c.classe === 'semi-essencial').sort((a, b) => b.disponivel - a.disponivel)
+    if (semiEssenciais.length) {
+        return `Reduza gastos em ${semiEssenciais[0].item} — ainda restam R$ ${formatarBR(semiEssenciais[0].disponivel)} disponíveis.`
+    }
+
+    if (saldoProjetado < 0) {
+        return '⚠️ Atenção: no ritmo atual, você pode fechar o mês no negativo. Evite gastos não essenciais.'
+    }
+
+    if (receitaTotal > 0 && saldoProjetado > receitaTotal * 0.2) {
+        return 'Você está no caminho certo! Continue registrando seus gastos para manter o controle.'
+    }
+
+    return 'Continue de olho nos gastos pra fechar o mês tranquilo.'
+}
+
 // ───────────────────────── Orquestração ─────────────────────────
 
 // Cadastra a despesa/receita já interpretada. onStatus(msg) opcional avisa o dono pelo WhatsApp
@@ -832,11 +984,40 @@ function formatarInsightEstouro(r) {
     return msg
 }
 
+// Lê os lançamentos do mês atual e monta os números do resumo financeiro diário.
+// onStatus(msg) opcional avisa o dono pelo WhatsApp durante etapas longas (ex: login manual).
+// Lança erro se o navegador/sessão não estiver disponível — quem chama decide se pula o envio.
+async function gerarResumoFinanceiroDiario({ onStatus } = {}) {
+    if (ocupado) throw new Error('Navegador do Planner ocupado com outro lançamento — tente novamente mais tarde.')
+    ocupado = true
+    try {
+        const { page } = await abrirPlannerBrowser()
+        await garantirLogado(page, onStatus)
+
+        const { totalDespesasAjustado, receitaExtra, porItem } = await lerLancamentosDoMesAtual(page)
+
+        const receitaTotal = RECEITA_BASE_MENSAL + receitaExtra
+        const saldoProjetado = receitaTotal - totalDespesasAjustado
+        const dica = gerarDica(porItem, saldoProjetado, receitaTotal)
+
+        return { totalGasto: totalDespesasAjustado, receitaTotal, saldoProjetado, dica }
+    } finally {
+        ocupado = false
+    }
+}
+
+// Monta a mensagem de WhatsApp do resumo financeiro diário
+function formatarResumoDiario(r) {
+    return `🌅 Bom dia, Maurício!\n\nEste mês você já gastou *R$ ${formatarBR(r.totalGasto)}* de *R$ ${formatarBR(r.receitaTotal)}*.\n\n📈 Projeção para o fim do mês: sobram *R$ ${formatarBR(r.saldoProjetado)}*\n\n💡 ${r.dica}`
+}
+
 module.exports = {
     interpretarDespesa,
     cadastrarDespesa,
     formatarRespostaWhatsApp,
     formatarInsightEstouro,
+    gerarResumoFinanceiroDiario,
+    formatarResumoDiario,
     abrirPlannerBrowser,
     PLANEJAMENTO,
     CATEGORIAS_DESPESA,

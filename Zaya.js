@@ -510,6 +510,25 @@ async function tratarConfirmacaoDespesa(sock, from, texto) {
     return true
 }
 
+// Resumo financeiro diário — agendado pra 8h (ver agendarHorarioZaya no fim do arquivo).
+// Se o navegador/sessão do Planner não estiver disponível, pula o envio de hoje sem travar
+// os outros agendamentos (o erro só é logado).
+async function enviarResumoFinanceiroDiario() {
+    if (!activeSock) {
+        console.log('⚠️  [Zaya/Planner] WhatsApp não conectado — pulando resumo diário')
+        return
+    }
+    console.log('📊 [Zaya/Planner] Enviando resumo diário...')
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        const r = await plannerAgent.gerarResumoFinanceiroDiario()
+        await activeSock.sendMessage(ownerJidToSend, { text: plannerAgent.formatarResumoDiario(r) })
+        console.log('📊 [Zaya/Planner] Resumo diário enviado')
+    } catch (err) {
+        console.error('❌ [Zaya/Planner] Erro ao gerar resumo diário — pulando hoje:', err.message)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Notificação ao Lucas — reutilizável pelo endpoint E pelo agendador da Zaya
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1483,6 +1502,9 @@ async function tratarRespostaAdriano(sock, from, text) {
 // Lucas — ~17h (16h50-17h15), Zaya chama Zyon e envia pedidos ao Lucas
 agendarHorarioZaya('avisarLucas', avisarLucasViaZyon, 17, 0, 15)
 
+// Resumo financeiro diário — ~8h (7h50-8h10)
+agendarHorarioZaya('resumoFinanceiroDiario', enviarResumoFinanceiroDiario, 8, 0, 10)
+
 // Pedidos atrasados — ciclo ~1h (55-65min), avisa Adriano no grupo Ziont se houver novos
 // Primeira execução: 3 min após boot (dá tempo ao Zyon de iniciar)
 setTimeout(() => {
@@ -1498,6 +1520,7 @@ console.log('⚡ Suporte ao Zeon ativado (endpoint /zeon-notificacao + repasse d
 console.log('📋 Monitoramento do grupo Ziont ativado (PDFs "Lista de Separação")')
 console.log('📦 Cobranças ao Adriano: 8h, 13h e 18h (dias com prazo)')
 console.log('🎨 Aviso de produção ao Lucas: ~17h (16h50-17h15) — agendamento Zaya→Zyon')
+console.log('📊 Resumo financeiro diário agendado para ~8h (7h50-8h10)')
 console.log('⚠️  Monitoramento de pedidos atrasados: ciclo ~1h — aviso ao Adriano no grupo Ziont')
 console.log(`👷 Lucas: ${process.env.LUCAS_PHONE ? `55${process.env.LUCAS_PHONE}` : '(LUCAS_PHONE não definido)'}`)
 console.log(`👷 Adriano: ${process.env.ADRIANO_PHONE ? `55${process.env.ADRIANO_PHONE}` : '(ADRIANO_PHONE não definido)'}`)
