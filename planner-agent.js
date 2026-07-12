@@ -753,6 +753,12 @@ async function lerLancamentosDoMesAtual(page) {
     let totalDespesasAjustado = 0
     let receitaExtra = 0
     const porItem = {}
+    // porDia: 'DD/MM/AAAA' -> total gasto naquele dia. transacoes: lista crua {data, item, valor}.
+    // Alimentam os alertas proativos (gasto alto num dia, possível duplicado) — a varredura
+    // da tabela já acontece pro cálculo de porItem, então agregar essas 2 dimensões a mais
+    // não custa um round-trip extra ao navegador.
+    const porDia = {}
+    const transacoes = []
     let linhasNoMes = 0
 
     for (let pagina = 0; pagina < 10; pagina++) {
@@ -760,6 +766,8 @@ async function lerLancamentosDoMesAtual(page) {
             const linhas = [...document.querySelectorAll('tr')]
             let totalPag = 0, receitaExtraPag = 0, contagemPag = 0
             const porItemPag = {}
+            const porDiaPag = {}
+            const transacoesPag = []
             for (const tr of linhas) {
                 const tds = [...tr.querySelectorAll(':scope > td')]
                 if (tds.length < 9) continue
@@ -781,8 +789,10 @@ async function lerLancamentosDoMesAtual(page) {
                 totalPag += valor
                 const item = subcategoria || categoria
                 porItemPag[item] = (porItemPag[item] || 0) + valor
+                porDiaPag[dataEvento] = (porDiaPag[dataEvento] || 0) + valor
+                transacoesPag.push({ data: dataEvento, item, valor })
             }
-            return { totalPag, receitaExtraPag, porItemPag, contagemPag }
+            return { totalPag, receitaExtraPag, porItemPag, porDiaPag, transacoesPag, contagemPag }
         }, mesAtual, anoAtual, CATEGORIAS_IGNORAR_RESUMO, RECEITAS)
 
         totalDespesasAjustado += resultado.totalPag
@@ -791,6 +801,10 @@ async function lerLancamentosDoMesAtual(page) {
         for (const [item, valor] of Object.entries(resultado.porItemPag)) {
             porItem[item] = (porItem[item] || 0) + valor
         }
+        for (const [data, valor] of Object.entries(resultado.porDiaPag)) {
+            porDia[data] = (porDia[data] || 0) + valor
+        }
+        transacoes.push(...resultado.transacoesPag)
 
         const avancou = await page.evaluate(() => {
             const paginaEl = [...document.querySelectorAll('*')]
@@ -819,7 +833,7 @@ async function lerLancamentosDoMesAtual(page) {
         console.log('⚠️  [Planner] Nenhum lançamento do mês atual encontrado — verifique se o filtro de datas da tabela cobre o mês corrente')
     }
 
-    return { totalDespesasAjustado, receitaExtra, porItem }
+    return { totalDespesasAjustado, receitaExtra, porItem, porDia, transacoes }
 }
 
 function classificarItem(item) {
@@ -831,7 +845,9 @@ function classificarItem(item) {
 
 // Limite planejado por item (subcategoria, ou categoria quando ela não tem subs) — achata
 // PLANEJAMENTO pra granularidade de item, ignorando itens sem limite definido.
-function limitesPorItem() {
+// overrides (opcional): { item: novoLimite } — usado pela revisão de planejamento da
+// consultora financeira pra ajustar limites sem precisar editar PLANEJAMENTO no código.
+function limitesPorItem(overrides = {}) {
     const mapa = {}
     for (const [cat, info] of Object.entries(PLANEJAMENTO)) {
         if (CATEGORIAS_IGNORAR_RESUMO.includes(cat)) continue
@@ -844,7 +860,7 @@ function limitesPorItem() {
             mapa[cat] = info.limite
         }
     }
-    return mapa
+    return { ...mapa, ...overrides }
 }
 
 // Monta a dica do resumo diário (req. lógica da dica)
@@ -994,15 +1010,15 @@ async function gerarResumoFinanceiroDiario({ onStatus } = {}) {
         const { page } = await abrirPlannerBrowser()
         await garantirLogado(page, onStatus)
 
-        const { totalDespesasAjustado, receitaExtra, porItem } = await lerLancamentosDoMesAtual(page)
+        const { totalDespesasAjustado, receitaExtra, porItem, porDia, transacoes } = await lerLancamentosDoMesAtual(page)
 
         const receitaTotal = RECEITA_BASE_MENSAL + receitaExtra
         const saldoProjetado = receitaTotal - totalDespesasAjustado
         const dica = gerarDica(porItem, saldoProjetado, receitaTotal)
 
-        // porItem incluído pra quem precisa do detalhamento por categoria/subcategoria
-        // (ex: consultora-financeira.js) além do resumo pronto pro WhatsApp.
-        return { totalGasto: totalDespesasAjustado, receitaTotal, saldoProjetado, dica, porItem }
+        // porItem/porDia/transacoes incluídos pra quem precisa do detalhamento (ex:
+        // consultora-financeira.js) além do resumo pronto pro WhatsApp.
+        return { totalGasto: totalDespesasAjustado, receitaTotal, saldoProjetado, dica, porItem, porDia, transacoes }
     } finally {
         ocupado = false
     }
@@ -1027,4 +1043,9 @@ module.exports = {
     PALAVRAS_INFORMAIS,
     RECEITA_BASE_MENSAL,
     limitesPorItem,
+    lerLancamentosDoMesAtual,
+    CATEGORIAS_ESSENCIAIS,
+    CATEGORIAS_SEMI_ESSENCIAIS,
+    CATEGORIAS_NAO_ESSENCIAIS,
+    CATEGORIAS_IGNORAR_RESUMO,
 }

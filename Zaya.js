@@ -18,6 +18,9 @@ const https = require('https')
 const { PDFParse } = require('pdf-parse')
 const plannerAgent = require('./planner-agent')
 const consultoraFinanceira = require('./consultora-financeira')
+const memoriaStore = require('./zaya-memoria')
+
+const esperar = ms => new Promise(r => setTimeout(r, ms))
 
 let activeSock = null
 let ownerJid = null
@@ -31,6 +34,7 @@ let zeonJanelaAtiva = { ativa: false, desde: 0, timer: null }
 const ZEON_JANELA_MS = 30 * 60 * 1000
 let despesaPendente = null // { dados, expiraEm } — aguardando confirmação do dono
 const DESPESA_PENDENTE_TTL = 5 * 60 * 1000
+let rendaExtraPendente = null // { valor, expiraEm } — aguardando o dono dizer de qual loja veio
 
 function ativarJanelaZeon() {
     if (zeonJanelaAtiva.timer) clearTimeout(zeonJanelaAtiva.timer)
@@ -457,6 +461,7 @@ async function processarDespesaPlanner(sock, from, texto) {
         await sock.sendMessage(from, { text: plannerAgent.formatarRespostaWhatsApp(r) })
         const insight = plannerAgent.formatarInsightEstouro(r)
         if (insight) await sock.sendMessage(from, { text: insight })
+        await verificarRendaExtra(sock, from, r)
     } catch (err) {
         console.error('❌ [Zaya/Planner] Erro ao cadastrar:', err.message)
         const msgErro = err.message === 'LOGIN_TIMEOUT'
@@ -504,10 +509,46 @@ async function tratarConfirmacaoDespesa(sock, from, texto) {
         await sock.sendMessage(from, { text: plannerAgent.formatarRespostaWhatsApp(r) })
         const insight = plannerAgent.formatarInsightEstouro(r)
         if (insight) await sock.sendMessage(from, { text: insight })
+        await verificarRendaExtra(sock, from, r)
     } catch (err) {
         console.error('❌ [Zaya/Planner] Erro ao cadastrar despesa confirmada:', err.message)
         await sock.sendMessage(from, { text: `❌ Erro ao cadastrar: ${err.message}` })
     }
+    return true
+}
+
+// Renda Extra registrada → pergunta de qual loja veio (fluxo de estado pendente, mesmo
+// padrão de despesaPendente). Ao responder, grava em memória e encadeia despesaPendente
+// pro dízimo (10%) — cai direto no fluxo de confirmação já existente.
+async function verificarRendaExtra(sock, from, r) {
+    if (r.tipo !== 'receita' || r.categoria !== 'Renda Extra') return
+    rendaExtraPendente = { valor: r.valorLancado, expiraEm: Date.now() + DESPESA_PENDENTE_TTL }
+    await sock.sendMessage(from, { text: 'De qual loja veio esse valor: *Loja 1*, *Loja 2*, ou *outro*?' })
+}
+
+// Retorna true se tratou a mensagem como resposta à pergunta "de qual loja veio"
+async function tratarRendaExtraPendente(sock, from, texto) {
+    if (!rendaExtraPendente || Date.now() > rendaExtraPendente.expiraEm) {
+        rendaExtraPendente = null
+        return false
+    }
+    const lower = texto.toLowerCase().trim()
+    let loja = null
+    if (/loja\s*1|primeira loja/.test(lower)) loja = 'loja1'
+    else if (/loja\s*2|segunda loja/.test(lower)) loja = 'loja2'
+    else if (/outro/.test(lower)) loja = 'outros'
+    if (!loja) return false
+
+    const { valor } = rendaExtraPendente
+    rendaExtraPendente = null
+    await sock.sendMessage(from, { text: consultoraFinanceira.registrarRendaExtra(loja, valor) })
+
+    const dizimo = Math.round(valor * 0.10 * 100) / 100
+    despesaPendente = {
+        dados: { valor: dizimo, categoria: 'Dízimo', subcategoria: '', descricao: 'Dízimo', data: consultoraFinanceira.hojeISO() },
+        expiraEm: Date.now() + DESPESA_PENDENTE_TTL,
+    }
+    await sock.sendMessage(from, { text: `Quer que eu já lance *10%* (R$${formatarBR(dizimo)}) como *Dízimo*? Responda sim ou não.` })
     return true
 }
 
@@ -523,19 +564,75 @@ async function enviarResumoFinanceiroDiario() {
     const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
     try {
         const r = await plannerAgent.gerarResumoFinanceiroDiario()
-        await activeSock.sendMessage(ownerJidToSend, { text: plannerAgent.formatarResumoDiario(r) })
+        const mem = memoriaStore.carregarMemoria()
+        await activeSock.sendMessage(ownerJidToSend, { text: consultoraFinanceira.formatarResumoDiarioCompleto(r, mem) })
         console.log('📊 [Zaya/Planner] Resumo diário enviado')
     } catch (err) {
         console.error('❌ [Zaya/Planner] Erro ao gerar resumo diário — pulando hoje:', err.message)
     }
 }
 
-// Consultora financeira — responde perguntas sobre o orçamento (não lança nada no Planner)
+// Envia o calendário do dia 1, a oferta de revisão de planejamento (dia 1) e o relatório
+// de fechamento (último dia do mês) — dedup via mem.ultimoXEnviadoEm, sobrevive a restarts.
+async function verificarEventosFinanceirosMensais() {
+    if (!activeSock) return
+    const mem = memoriaStore.carregarMemoria()
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    const hoje = new Date()
+    const diaHoje = hoje.getDate()
+    const ultimoDiaMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate()
+    const mes = consultoraFinanceira.mesAtual()
+
+    if (diaHoje === 1 && mem.ultimoCalendarioEnviadoEm !== mes) {
+        await activeSock.sendMessage(ownerJidToSend, { text: consultoraFinanceira.gerarCalendarioMensal(mem) })
+        mem.ultimoCalendarioEnviadoEm = mes
+        memoriaStore.salvarMemoria(mem)
+        await esperar(500)
+    }
+    if (diaHoje === 1 && mem.ultimaRevisaoOferecidaEm !== mes) {
+        await activeSock.sendMessage(ownerJidToSend, { text: consultoraFinanceira.ofertarRevisaoPlanejamento() })
+        mem.ultimaRevisaoOferecidaEm = mes
+        memoriaStore.salvarMemoria(mem)
+    }
+    if (diaHoje === ultimoDiaMes && mem.ultimoRelatorioEnviadoEm !== mes) {
+        try {
+            const relatorio = await consultoraFinanceira.gerarRelatorioMensal(mem)
+            await activeSock.sendMessage(ownerJidToSend, { text: relatorio })
+            mem.ultimoRelatorioEnviadoEm = mes
+            memoriaStore.salvarMemoria(mem)
+        } catch (err) {
+            console.error('❌ [Zaya/Consultora] Erro no relatório mensal — pulando hoje:', err.message)
+        }
+    }
+}
+
+// Consultora financeira — responde perguntas sobre o orçamento (não lança nada no Planner).
+// responderConsultaFinanceira retorna um ARRAY (pode vir em várias mensagens curtas
+// separadas por "---" quando é sobre um gasto caro) — envia uma de cada vez.
 async function processarConsultaFinanceira(sock, from, texto) {
-    const resposta = await consultoraFinanceira.responderConsultaFinanceira(texto, {
+    const respostas = await consultoraFinanceira.responderConsultaFinanceira(texto, {
         onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
     })
-    await sock.sendMessage(from, { text: resposta })
+    for (const msg of respostas) {
+        await sock.sendMessage(from, { text: msg })
+        if (respostas.length > 1) await esperar(300 + Math.random() * 500)
+    }
+}
+
+// Alertas proativos — conta vencendo, categoria zerada/a estourar, gasto alto/duplicado no
+// dia, endividamento. Dedup em mem.alertasEnviados, cada alerta só é enviado uma vez.
+async function enviarAlertasProativos() {
+    if (!activeSock) return
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        const alertas = await consultoraFinanceira.verificarAlertasProativos()
+        for (const msg of alertas) {
+            await activeSock.sendMessage(ownerJidToSend, { text: msg })
+            await esperar(400)
+        }
+    } catch (err) {
+        console.error('❌ [Zaya/Consultora] Erro ao verificar alertas proativos:', err.message)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -821,11 +918,19 @@ async function connectToWhatsApp() {
                 const textoLower = (text || '').toLowerCase().trim()
                 const imageMsg = msg.message.imageMessage
 
-                if (text) console.log(`[Zaya/debug] Mensagem do dono recebida: ${text}`)
+                if (text) console.log(`📩 [Zaya] Mensagem do dono: ${text}`)
 
                 if (imageMsg) {
                     await processarComprovanteImagem(sock, msg, from, text)
                     continue
+                }
+
+                // Resposta do dono a "de qual loja veio essa renda extra?" (antes da despesa
+                // pendente, já que o próprio fluxo de renda extra encadeia num despesaPendente
+                // de dízimo em seguida — precisa resolver a loja primeiro)
+                if (text && rendaExtraPendente) {
+                    const tratou = await tratarRendaExtraPendente(sock, from, text)
+                    if (tratou) continue
                 }
 
                 // Resposta do dono a uma despesa pendente de confirmação (prioridade sobre janela Zeon)
@@ -875,16 +980,50 @@ async function connectToWhatsApp() {
                     }
                 }
 
+                // Comandos rápidos (saldo, dashboard, parcelas, prioridades, termômetro,
+                // desafio, [categoria], luz quitada/negociada) — reconhecidos localmente,
+                // sem precisar do Groq.
                 if (text) {
-                    console.log(`[Zaya/debug] pareceDespesa=${pareceDespesa(text)} pareceConsultaFinanceira=${consultoraFinanceira.pareceConsultaFinanceira(text)}`)
+                    const comandoRapido = consultoraFinanceira.detectarComandoRapido(text)
+                    if (comandoRapido) {
+                        const mensagens = await consultoraFinanceira.processarComandoRapido(comandoRapido, {
+                            onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
+                        })
+                        for (const m of mensagens || []) {
+                            await sock.sendMessage(from, { text: m })
+                            await esperar(300 + Math.random() * 500)
+                        }
+                        continue
+                    }
                 }
+
                 if (text && (pareceDespesa(text) || consultoraFinanceira.pareceConsultaFinanceira(text))) {
-                    const tipo = await consultoraFinanceira.classificarMensagem(text)
-                    console.log(`[Zaya/debug] Classificação Groq: ${tipo}`)
-                    if (tipo === 'consulta') {
-                        await processarConsultaFinanceira(sock, from, text)
-                    } else {
-                        await processarDespesaPlanner(sock, from, text)
+                    const classificacao = await consultoraFinanceira.classificarMensagem(text)
+                    console.log(`💬 [Zaya/Consultora] Classificação: ${classificacao.tipo}`)
+                    switch (classificacao.tipo) {
+                        case 'consulta':
+                            await processarConsultaFinanceira(sock, from, text)
+                            break
+                        case 'ajuste_limite': {
+                            const msg = consultoraFinanceira.aplicarAjusteLimite(classificacao.categoria, classificacao.novoValor)
+                            await sock.sendMessage(from, { text: msg })
+                            break
+                        }
+                        case 'conta_luz': {
+                            const msg = consultoraFinanceira.registrarContaLuz(classificacao.valorConta, classificacao.vencimento)
+                            await sock.sendMessage(from, { text: msg })
+                            break
+                        }
+                        case 'parcela': {
+                            const msg = consultoraFinanceira.registrarParcela(classificacao.descricaoParcela, classificacao.valorParcela, classificacao.parcelasTotal)
+                            await sock.sendMessage(from, { text: msg })
+                            break
+                        }
+                        case 'ignorar':
+                            break
+                        default: // 'despesa' | 'receita'
+                            await processarDespesaPlanner(sock, from, text)
+                            break
                     }
                     continue
                 }
@@ -1525,6 +1664,18 @@ agendarHorarioZaya('avisarLucas', avisarLucasViaZyon, 17, 0, 15)
 // Resumo financeiro diário — ~8h (7h50-8h10)
 agendarHorarioZaya('resumoFinanceiroDiario', enviarResumoFinanceiroDiario, 8, 0, 10)
 
+// Calendário do mês / oferta de revisão (dia 1) / relatório de fechamento (último dia) —
+// ~8h30 (7h50-8h10 do resumo diário + 30min, pra não competir pelo mutex do planner-agent)
+agendarHorarioZaya('eventosFinanceirosMensais', verificarEventosFinanceirosMensais, 8, 30, 10)
+
+// Alertas proativos — ciclo ~3h (2h40-3h20), avisa sobre categoria zerada/a estourar,
+// gasto alto/duplicado no dia, endividamento, conta vencendo
+// Primeira execução: 5 min após boot
+setTimeout(() => {
+    enviarAlertasProativos().catch(err => console.error('❌ [Zaya/alertas boot]:', err.message))
+    agendarCicloZaya('alertasProativos', enviarAlertasProativos, 3 * 60 * 60 * 1000, 20 * 60 * 1000)
+}, 5 * 60 * 1000)
+
 // Pedidos atrasados — ciclo ~1h (55-65min), avisa Adriano no grupo Ziont se houver novos
 // Primeira execução: 3 min após boot (dá tempo ao Zyon de iniciar)
 setTimeout(() => {
@@ -1541,7 +1692,9 @@ console.log('📋 Monitoramento do grupo Ziont ativado (PDFs "Lista de Separaç�
 console.log('📦 Cobranças ao Adriano: 8h, 13h e 18h (dias com prazo)')
 console.log('🎨 Aviso de produção ao Lucas: ~17h (16h50-17h15) — agendamento Zaya→Zyon')
 console.log('📊 Resumo financeiro diário agendado para ~8h (7h50-8h10)')
-console.log('🧠 Consultora financeira ativada (Groq classifica consulta vs lançamento, Claude responde com dados reais do mês)')
+console.log('📅 Calendário/revisão (dia 1) e relatório mensal (último dia) agendados para ~8h30')
+console.log('⚠️  Alertas proativos financeiros: ciclo ~3h')
+console.log('🧠 Consultora financeira ativada (Groq classifica despesa/receita/ajuste/consulta, Claude responde com dados reais do mês)')
 console.log('⚠️  Monitoramento de pedidos atrasados: ciclo ~1h — aviso ao Adriano no grupo Ziont')
 console.log(`👷 Lucas: ${process.env.LUCAS_PHONE ? `55${process.env.LUCAS_PHONE}` : '(LUCAS_PHONE não definido)'}`)
 console.log(`👷 Adriano: ${process.env.ADRIANO_PHONE ? `55${process.env.ADRIANO_PHONE}` : '(ADRIANO_PHONE não definido)'}`)
