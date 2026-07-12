@@ -485,6 +485,33 @@ async function processarDespesaPlanner(sock, from, texto) {
     }
 }
 
+// Conta FUTURA (qualquer categoria, exceto luz que é sempre conta_luz): reaproveita
+// plannerAgent.interpretarDespesa só pra resolver categoria/subcategoria/valor a partir do
+// texto original — a data e o status vêm sobrescritos pelo vencimento informado dentro de
+// registrarContaFutura. Só pergunta a categoria se realmente não deu pra identificar nada
+// (dados ausente); se veio algo (mesmo com confiança baixa), segue direto — ele já informou
+// a categoria na mensagem, não faz sentido perguntar de novo.
+async function processarContaFuturaPlanner(sock, from, texto, vencimento) {
+    let resultado
+    try {
+        resultado = await plannerAgent.interpretarDespesa(texto)
+    } catch (err) {
+        console.error('❌ [Zaya/Planner] Erro na interpretação da conta futura:', err.message)
+        await sock.sendMessage(from, { text: `❌ Erro ao interpretar a conta: ${err.message}` })
+        return
+    }
+    if (!resultado.dados) {
+        await sock.sendMessage(from, { text: 'Maurício, não consegui identificar a categoria dessa conta — pode me dizer de novo com a categoria?' })
+        return
+    }
+
+    await sock.sendMessage(from, { text: '⏳ Lançando no Planner...' })
+    const msg = await consultoraFinanceira.registrarContaFutura(resultado.dados, vencimento, {
+        onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+    })
+    await sock.sendMessage(from, { text: msg })
+}
+
 // Retorna true se tratou a mensagem como resposta à confirmação de despesa pendente
 async function tratarConfirmacaoDespesa(sock, from, texto) {
     if (!despesaPendente || Date.now() > despesaPendente.expiraEm) {
@@ -1064,6 +1091,9 @@ async function connectToWhatsApp() {
                             await sock.sendMessage(from, { text: msg })
                             break
                         }
+                        case 'conta_futura':
+                            await processarContaFuturaPlanner(sock, from, text, classificacao.vencimento)
+                            break
                         case 'parcela': {
                             const msg = consultoraFinanceira.registrarParcela(classificacao.descricaoParcela, classificacao.valorParcela, classificacao.parcelasTotal)
                             await sock.sendMessage(from, { text: msg })

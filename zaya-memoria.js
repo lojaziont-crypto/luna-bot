@@ -18,6 +18,10 @@ function memoriaPadrao() {
         parcelas: [],
         // { id, descricao, valor, vencimentoOriginal, status: 'atrasada'|'negociada'|'quitada', criadoEm, atualizadoEm }
         contasAtrasadas: [],
+        // { id, descricao, categoria, subcategoria, valor, vencimento (AAAA-MM-DD), status: 'pendente'|'paga', criadoEm }
+        // Contas com data de vencimento FUTURA (mês diferente do atual) — ex: "5 no cartão do
+        // Thiago em outros, vai vir dia 01/08". Diferente de contasAtrasadas (que é só luz).
+        contasFuturas: [],
         // { item: novoLimite } — ajustes aprovados na revisão de planejamento, mesclados
         // por cima de PLANEJAMENTO via plannerAgent.limitesPorItem(overrides).
         limitesOverride: {},

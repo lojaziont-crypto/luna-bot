@@ -78,6 +78,16 @@ function mesAtual() {
     return hojeISO().slice(0, 7) // 'AAAA-MM'
 }
 
+const NOMES_MES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro']
+
+function nomeMes(mesAAAAMM) {
+    return NOMES_MES[Number(mesAAAAMM.slice(5, 7)) - 1]
+}
+
+function dataParaBRTxt(dataISO) {
+    return `${dataISO.slice(8, 10)}/${dataISO.slice(5, 7)}`
+}
+
 // ───────────────────────── Modo economia / estresse emocional ─────────────────────────
 
 const PALAVRAS_STRESS = [
@@ -131,14 +141,15 @@ const PROMPT_CLASSIFICACAO = `Classifique a mensagem do dono de uma loja em EXAT
 - "RECEITA": relatando um recebimento JÁ FEITO, com valor, pra REGISTRAR (ex: "recebi 3000 de salário", "recebi 500 da loja 1", "vendi um produto por 80").
 - "AJUSTE_LIMITE": pedindo pra MUDAR um limite/orçamento planejado de uma categoria (ex: "muda o limite do mercado pra 600", "aumenta o lanche pra 100", "diminui vestuário pra 20"). Extraia "categoria" (nome exato da categoria/subcategoria) e "novoValor" (número).
 - "CONTA_LUZ": relatando uma conta de luz ATRASADA, pendente ou a pagar (ainda NÃO paga). NUNCA use se ele disser que já pagou — isso é "DESPESA" normal. Ex: "a luz de abril tá em 320, venceu dia 10", "ainda devo 200 de luz", "tenho uma conta de luz atrasada de 180". Extraia "valorConta" (número) e "vencimento" (string como foi escrita, ex: "10/04" ou "dia 10" — ou null se não mencionado).
+- "CONTA_FUTURA": relatando um gasto/cobrança que AINDA VAI ACONTECER numa data futura específica — ainda não é despesa de hoje, é algo que vai vencer/chegar depois. NUNCA use se for sobre luz (isso é sempre "CONTA_LUZ") nem se o gasto já aconteceu (isso é "DESPESA"). Ex: "5 no cartão de crédito do Thiago em outros, vai vir dia 01/08", "vai chegar uma fatura de internet de 130 dia 10", "vou ter que pagar 200 de aluguel dia 5". Extraia "vencimento" (data como foi escrita, ex: "01/08" ou "dia 10").
 - "PARCELA": relatando uma compra PARCELADA, com quantas vezes. Ex: "comprei uma geladeira parcelada em 10x de 150", "parcelei o celular em 6x de 200". Extraia "descricaoParcela" (nome curto do item), "valorParcela" (número, valor de CADA parcela) e "parcelasTotal" (inteiro, número de parcelas).
-- "CONSULTA_FINANCEIRA": pergunta ou intenção sobre gastar, comprar, pagar, economizar, situação financeira, ou expressão de estresse financeiro — mesmo sem forma de pergunta e mesmo sem valor definido (ex: "quanto posso gastar hoje?", "quero comprar um sorvete", "vou pegar um uber", "preciso de um tênis novo", "tô no limite", "tá apertado esse mês").
+- "CONSULTA_FINANCEIRA": pergunta ou intenção sobre gastar, comprar, pagar, economizar, situação financeira, ou expressão de estresse financeiro — mesmo sem forma de pergunta e mesmo sem valor definido (ex: "quanto posso gastar hoje?", "quero comprar um sorvete", "vou pegar um uber", "preciso de um tênis novo", "tô no limite", "tá apertado esse mês"). Também use pra perguntas de acompanhamento sobre algo já dito antes (ex: "não está aparecendo como pendente", "foi lançado?").
 - "IGNORAR": mensagem sem relação nenhuma com dinheiro, gastos ou orçamento.
 
-REGRA: se a mensagem NÃO menciona um valor em dinheiro, NUNCA é "DESPESA", "RECEITA", "CONTA_LUZ" ou "PARCELA" — é "CONSULTA_FINANCEIRA".
+REGRA: se a mensagem NÃO menciona um valor em dinheiro, NUNCA é "DESPESA", "RECEITA", "CONTA_LUZ", "CONTA_FUTURA" ou "PARCELA" — é "CONSULTA_FINANCEIRA".
 
 Responda EXCLUSIVAMENTE em JSON:
-{"tipo": "DESPESA"|"RECEITA"|"AJUSTE_LIMITE"|"CONTA_LUZ"|"PARCELA"|"CONSULTA_FINANCEIRA"|"IGNORAR", "categoria": "..." (só AJUSTE_LIMITE), "novoValor": 0.00 (só AJUSTE_LIMITE), "valorConta": 0.00 (só CONTA_LUZ), "vencimento": "..." (só CONTA_LUZ), "descricaoParcela": "..." (só PARCELA), "valorParcela": 0.00 (só PARCELA), "parcelasTotal": 0 (só PARCELA)}`
+{"tipo": "DESPESA"|"RECEITA"|"AJUSTE_LIMITE"|"CONTA_LUZ"|"CONTA_FUTURA"|"PARCELA"|"CONSULTA_FINANCEIRA"|"IGNORAR", "categoria": "..." (só AJUSTE_LIMITE), "novoValor": 0.00 (só AJUSTE_LIMITE), "valorConta": 0.00 (só CONTA_LUZ), "vencimento": "..." (CONTA_LUZ ou CONTA_FUTURA), "descricaoParcela": "..." (só PARCELA), "valorParcela": 0.00 (só PARCELA), "parcelasTotal": 0 (só PARCELA)}`
 
 // Retorna { tipo: 'despesa'|'receita'|'ajuste_limite'|'conta_luz'|'parcela'|'consulta'|'ignorar', ...campos extraídos }
 // Em caso de erro, assume 'despesa' (mais seguro que arriscar não registrar um gasto real).
@@ -157,7 +168,8 @@ async function classificarMensagem(texto) {
         const bruto = JSON.parse(resp.choices[0].message.content)
         const mapaTipo = {
             DESPESA: 'despesa', RECEITA: 'receita', AJUSTE_LIMITE: 'ajuste_limite',
-            CONTA_LUZ: 'conta_luz', PARCELA: 'parcela', CONSULTA_FINANCEIRA: 'consulta', IGNORAR: 'ignorar',
+            CONTA_LUZ: 'conta_luz', CONTA_FUTURA: 'conta_futura', PARCELA: 'parcela',
+            CONSULTA_FINANCEIRA: 'consulta', IGNORAR: 'ignorar',
         }
         const tipo = mapaTipo[bruto.tipo] || 'despesa'
         if (tipo === 'ajuste_limite') {
@@ -169,6 +181,10 @@ async function classificarMensagem(texto) {
             const valorConta = Number(String(bruto.valorConta).replace(',', '.'))
             if (!Number.isFinite(valorConta) || valorConta <= 0) return { tipo: 'consulta' }
             return { tipo, valorConta, vencimento: bruto.vencimento || null }
+        }
+        if (tipo === 'conta_futura') {
+            if (!bruto.vencimento) return { tipo: 'despesa' } // sem data futura clara, trata como despesa normal
+            return { tipo, vencimento: bruto.vencimento }
         }
         if (tipo === 'parcela') {
             const valorParcela = Number(String(bruto.valorParcela).replace(',', '.'))
@@ -271,7 +287,9 @@ function montarSystemPrompt(mem, economia) {
         ? mem.contasAtrasadas.map(c => `${c.descricao || 'Conta de luz'}: R$${formatarBR((c.valor ?? 0))} (venceu ${c.vencimentoOriginal || '?'}, status: ${c.status})`).join('; ')
         : 'nenhuma conta de luz atrasada registrada ainda — se ele mencionar valores e datas, pergunte os detalhes que faltarem e depois ela é registrada automaticamente'
 
-    return `Você é a consultora financeira pessoal do Maurício, falando com ele direto pelo WhatsApp através da Zaya. Aja como uma amiga consultora de confiança, nunca como um sistema.
+    return `REGRA ABSOLUTA: MÁXIMO 2 LINHAS POR MENSAGEM. NUNCA ULTRAPASSAR. SE PRECISAR DE MAIS, DIVIDIR EM MENSAGENS SEPARADAS (usando "---" só no caso "gasto CARO" descrito mais abaixo). Essa regra vale ANTES de qualquer outra coisa neste prompt — nenhum contexto, dado ou pendência justifica escrever um parágrafo longo.
+
+Você é a consultora financeira pessoal do Maurício, falando com ele direto pelo WhatsApp através da Zaya. Aja como uma amiga consultora de confiança, nunca como um sistema.
 
 ═══ RECEITA ═══
 Receita fixa mensal: R$ 3.480,00 (Salário R$3.000 + Vale-Alimentação R$200 + Vale-Transporte R$280 — tratados como valor único, sem controle separado).
@@ -316,6 +334,10 @@ REGRA CRÍTICA AO SUGERIR CORTE EM OUTRA CATEGORIA: sempre cite o saldo DISPONÍ
 Frase CORRETA: "Você ainda tem R$ 38,00 em Lavanderia esse mês — dá pra economizar aí."
 Frase ERRADA (nunca use algo assim): "vou reduzir seu limite de Lavanderia" ou "posso cortar o orçamento de Lavanderia".
 
+═══ MANTER O FOCO DO ASSUNTO ═══
+A checagem obrigatória de pendências (regra acima) vale SÓ pra perguntas sobre gasto/compra ("posso comprar X?", "quero gastar em Y"). Fora desse caso, responda EXATAMENTE sobre o que ele perguntou, sem desviar pra outras pendências não relacionadas.
+Se ele perguntar sobre um assunto ESPECÍFICO (ex: "não está aparecendo como pendente no dia 01/08", "foi lançado?", "por que a conta X ainda não venceu?"), responda só sobre AQUILO — nunca puxe pra luz atrasada, outras contas ou qualquer outra pendência que não tem relação direta com a pergunta.
+
 ═══ SAUDAÇÕES E MENSAGENS SOCIAIS ═══
 Se a mensagem for SÓ uma saudação/social ("oi", "oi Zaya", "tudo bem?", "bom dia", etc.) — SEM pergunta e SEM menção a gasto/dinheiro/compra — responda APENAS com uma saudação curta e humana, 1 linha, sem emendar saldo, contas atrasadas, resumo ou qualquer dado financeiro que ele não pediu. Pendências continuam existindo, mas cumprimento social não é o momento de trazer isso à tona — só entram na resposta quando ele perguntar algo financeiro (ver regra de gasto acima).
 Nesse caso específico (só cumprimento), não precisa começar com "Maurício," se soar mais natural sem.
@@ -328,6 +350,7 @@ Errado: responder ao cumprimento com análise de saldo, contas atrasadas ou qual
 - NUNCA ofereça análise, resumo ou informação financeira que ele não pediu explicitamente. Responda exatamente o que foi perguntado, nem mais nem menos — a única exceção é a checagem obrigatória de pendências ao avaliar um gasto (regra acima), que não é "oferecer informação extra", é parte da própria resposta à pergunta dele.
 - Separador "---" (linha sozinha) só é permitido no caso "gasto CARO" acima, e no máximo 3 mensagens. Fora desse caso específico, SEMPRE 1 mensagem só. Não use "---" pra dividir uma explicação longa em pedaços — se está tentado a fazer isso, é sinal de que precisa cortar conteúdo, não dividir.
 - Não faça perguntas múltiplas nem ofereça mais de 2 opções numeradas. Uma sugestão direta vale mais que um menu de escolhas.
+- Nunca pergunte a categoria de um gasto se ele já informou (ex: "em outros", "no cartão de crédito"). Só pergunte categoria quando ela genuinamente não foi mencionada e não dá pra inferir pelo contexto.
 - Formatação do WhatsApp (não é Markdown!): negrito é *um asterisco* de cada lado — NUNCA use **dois asteriscos**. Use negrito raramente, só pra 1 número-chave por mensagem, no máximo.
 - Tom humano, direto, como um amigo consultor financeiro — nunca linguagem de extrato bancário, nunca robótica, nunca lista enumerada de opções.
 - NÃO use emojis de status (🔴🟢🟡) na resposta — só 1 emoji temático relacionado ao assunto, no final da última mensagem, de forma natural (ex: 🏍️ moto, 🍦 doce, 🚌 transporte, 💡 luz).
@@ -361,6 +384,11 @@ function montarContextoDados(resumo, mem) {
     const parcelasTxt = mem.parcelas.length
         ? mem.parcelas.map(p => `${p.descricao}: R$${formatarBR(p.valorParcela)}/mês, ${p.parcelasRestantes} parcela(s) restante(s)`).join('; ')
         : 'nenhuma parcela ativa registrada'
+    const contasFuturasTxt = (mem.contasFuturas || []).filter(c => c.status !== 'paga').length
+        ? mem.contasFuturas.filter(c => c.status !== 'paga')
+            .map(c => `${c.descricao} (${c.categoria}${c.subcategoria && c.subcategoria !== c.categoria ? '/' + c.subcategoria : ''}): R$${formatarBR(c.valor)}, vence ${dataParaBRTxt(c.vencimento)}`)
+            .join('; ')
+        : 'nenhuma conta futura pendente registrada'
 
     return `DADOS REAIS DE HOJE (dia ${dia} de ${ultimoDia}, faltam ${diasRestantes} dias pro fim do mês):
 Total gasto no mês: R$ ${formatarBR(resumo.totalGasto)}
@@ -374,7 +402,8 @@ ${linhas.join('\n')}
 Meta moto: R$${formatarBR(moto.valorAtual)} guardados de R$${formatarBR(moto.valorAlvoMin)} (faltam R$${formatarBR(moto.faltamMin)}). Gasto com Uber este mês: R$${formatarBR(moto.gastoUberMes)} (projeção anual: R$${formatarBR(moto.gastoUberProjecaoAno)}).${moto.mesesParaComprar ? ` No ritmo atual de economia, faltam ~${moto.mesesParaComprar} meses pra comprar a moto.` : ''}
 
 Parcelas ativas: ${parcelasTxt}
-Contas de luz atrasadas: ${mem.contasAtrasadas.length ? mem.contasAtrasadas.map(c => `R$${formatarBR((c.valor ?? 0))} (${c.status})`).join(', ') : 'nenhuma registrada ainda'}`
+Contas de luz atrasadas: ${mem.contasAtrasadas.length ? mem.contasAtrasadas.map(c => `R$${formatarBR((c.valor ?? 0))} (${c.status})`).join(', ') : 'nenhuma registrada ainda'}
+Contas futuras pendentes (já lançadas no Planner com a data de vencimento, ainda não pagas): ${contasFuturasTxt}`
 }
 
 // ───────────────────────── Histórico curto (em memória) ─────────────────────────
@@ -538,6 +567,47 @@ async function registrarContaLuz(valorConta, vencimento, { onStatus } = {}) {
         return `✅ Despesa registrada!\n\n💡 R$ ${formatarBR(valorConta)} em Luz\n\n⚠️ Conta atrasada — não afeta o limite do mês atual, mas é prioridade pra quitar.`
     }
     return plannerAgent.formatarRespostaWhatsApp(resultado)
+}
+
+// Lança uma conta FUTURA (qualquer categoria — cartão, fatura, aluguel, etc. — desde que não
+// seja luz, que é sempre CONTA_LUZ) no Planner de verdade, com a DATA INFORMADA e status
+// Pendente. `dados` já vem resolvido (valor/categoria/subcategoria/descricao) via
+// plannerAgent.interpretarDespesa, chamado por quem invoca esta função. Se o vencimento cai
+// num mês diferente do atual, isso naturalmente não conta no Balanço Mensal do mês corrente
+// (mesmo princípio de registrarContaLuz) — a mensagem avisa isso; se cai no mês atual, usa o
+// formato padrão de despesa (conta normalmente pro limite do mês).
+async function registrarContaFutura(dados, vencimento, { onStatus } = {}) {
+    const dataISO = vencimentoParaISO(vencimento) || dados.data || hojeISO()
+    let resultado
+    try {
+        resultado = await plannerAgent.cadastrarDespesa({ ...dados, data: dataISO, status: 'Pendente' }, { onStatus })
+    } catch (err) {
+        console.error('❌ [Consultora] Erro ao lançar conta futura no Planner:', err.message)
+        return err.message === 'LOGIN_TIMEOUT'
+            ? 'Maurício, o login do Planner expirou (5 min) — manda essa conta de novo que eu reabro o navegador.'
+            : `Maurício, não consegui lançar essa conta no Planner agora (${err.message}) — tenta de novo em instantes.`
+    }
+
+    const mem = memoriaStore.carregarMemoria()
+    mem.contasFuturas.push({
+        id: `futura_${Date.now()}`,
+        descricao: resultado.nomeItem,
+        categoria: dados.categoria,
+        subcategoria: dados.subcategoria || null,
+        valor: dados.valor,
+        vencimento: dataISO,
+        status: 'pendente',
+        criadoEm: new Date().toISOString(),
+    })
+    memoriaStore.salvarMemoria(mem)
+
+    const afetaMesAtual = dataISO.slice(0, 7) === mesAtual()
+    if (afetaMesAtual) {
+        invalidarCache()
+        return plannerAgent.formatarRespostaWhatsApp(resultado)
+    }
+    const emoji = plannerAgent.emojiPara(dados.categoria, dados.subcategoria)
+    return `✅ Anotado!\n\n${emoji} R$ ${formatarBR(dados.valor)} em ${resultado.nomeItem} — vence ${dataParaBRTxt(dataISO)}\n\n⚠️ Não afeta o limite de ${nomeMes(mesAtual())}.`
 }
 
 // Registro só em memória — não lança despesa no Planner, porque o valor TOTAL da compra
@@ -887,6 +957,19 @@ async function verificarAlertasProativos({ onStatus } = {}) {
         }
     }
 
+    // 1b) conta futura vencendo em ≤3 dias — vencimento já vem como AAAA-MM-DD (registrado
+    // via registrarContaFutura), não precisa de parseDataBrLivre.
+    for (const cf of (mem.contasFuturas || []).filter(c => c.status !== 'paga')) {
+        const data = new Date(`${cf.vencimento}T00:00:00`)
+        if (isNaN(data)) continue
+        const diasFaltando = Math.ceil((data - new Date()) / 86400000)
+        const chave = `contaFutura_${cf.id}`
+        if (diasFaltando >= 0 && diasFaltando <= 3 && !jaAlertado(mem, chave)) {
+            alertas.push(`Maurício, a conta "${cf.descricao || 'conta'}" (R$${formatarBR(cf.valor || 0)}) vence em ${diasFaltando === 0 ? 'hoje' : diasFaltando + ' dia(s)'}. 📅`)
+            marcarAlertado(mem, chave)
+        }
+    }
+
     // 2) categoria zerada (já bateu ou passou do limite)
     for (const [item, limite] of Object.entries(limites)) {
         const realizado = resumo.porItem[item] || 0
@@ -959,6 +1042,7 @@ module.exports = {
     responderConsultaFinanceira,
     aplicarAjusteLimite,
     registrarContaLuz,
+    registrarContaFutura,
     registrarParcela,
     registrarRendaExtra,
     obterResumoComCache,
