@@ -183,29 +183,6 @@ async function classificarMensagem(texto) {
     }
 }
 
-// Pré-filtro leve: mensagem tem cara de pergunta/intenção/estresse financeiro (independente
-// de conter valor monetário, diferente de pareceDespesa). Roda ANTES do Groq pra evitar
-// chamar a API em toda mensagem qualquer.
-const PALAVRAS_PERGUNTA = [
-    'quanto', 'posso', 'consigo', 'tá', 'ta ', 'como', 'sobrou', 'sobra', 'gastando', 'estourei', 'estourando',
-    'quero', 'queria', 'gostaria', 'pretendo', 'penso em', 'vou comprar', 'vou gastar', 'dá pra', 'da pra',
-]
-const PALAVRAS_DINHEIRO = ['gast', 'orçamento', 'orcamento', 'limite', 'disponív', 'disponiv', 'dinheiro', 'budget', 'saldo']
-
-function pareceConsultaFinanceira(texto) {
-    const lower = texto.toLowerCase()
-    if (detectarEAtualizarStress(texto)) return true // sinal de estresse sempre dispara, mesmo sem palavra-dinheiro
-    const temPergunta = PALAVRAS_PERGUNTA.some(p => lower.includes(p)) || lower.includes('?')
-    if (!temPergunta) return false
-    const nomesItem = [
-        ...plannerAgent.CATEGORIAS_DESPESA,
-        ...Object.values(plannerAgent.PLANEJAMENTO).flatMap(v => Object.keys(v.subs)),
-        ...plannerAgent.RECEITAS,
-        ...Object.values(plannerAgent.PALAVRAS_INFORMAIS).flat(),
-    ]
-    return PALAVRAS_DINHEIRO.some(p => lower.includes(p)) || nomesItem.some(n => n.length > 2 && lower.includes(n.toLowerCase()))
-}
-
 // Frases que pedem explicitamente pra registrar algo já mencionado antes na conversa
 // (ex: "Luz 103,05 vai vencer 16/07 pendente" seguido de "Anote no planner").
 const PALAVRAS_COMANDO_REGISTRAR = [
@@ -481,7 +458,49 @@ function aplicarAjusteLimite(categoria, novoValor) {
 
 // ───────────────────────── Luz, parcelamento, renda extra ─────────────────────────
 
-function registrarContaLuz(valorConta, vencimento) {
+// Converte um vencimento livre ("16/07", "10/04/2026", "dia 10") pra 'AAAA-MM-DD',
+// assumindo o ano/mês corrente quando não informado. Retorna null se não conseguir extrair.
+function vencimentoParaISO(vencimento) {
+    if (!vencimento) return null
+    const hoje = hojeISO().split('-') // [AAAA, MM, DD]
+    const mData = String(vencimento).match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/)
+    if (mData) {
+        const [, d, mo, a] = mData
+        const diaN = Number(d), mesN = Number(mo)
+        if (mesN < 1 || mesN > 12 || diaN < 1 || diaN > 31) return null
+        const ano = a ? (a.length === 2 ? 2000 + Number(a) : Number(a)) : Number(hoje[0])
+        return `${ano}-${String(mesN).padStart(2, '0')}-${String(diaN).padStart(2, '0')}`
+    }
+    const mDia = String(vencimento).match(/dia\s*(\d{1,2})\b/i)
+    if (mDia) {
+        const diaN = Number(mDia[1])
+        if (diaN < 1 || diaN > 31) return null
+        return `${hoje[0]}-${hoje[1]}-${String(diaN).padStart(2, '0')}`
+    }
+    return null
+}
+
+// Lança a conta de luz no Planner DE VERDADE (categoria Casa/Luz, mesma função de cadastro
+// usada pras despesas normais) e só DEPOIS grava em memória — a confirmação ao Maurício só
+// sai se o lançamento real deu certo. Memória local é complementar (alimenta prioridades,
+// alertas e os comandos "luz quitada"/"luz negociada"), nunca substitui o Planner real.
+async function registrarContaLuz(valorConta, vencimento, { onStatus } = {}) {
+    const dataISO = vencimentoParaISO(vencimento) || hojeISO()
+    try {
+        await plannerAgent.cadastrarDespesa({
+            valor: valorConta,
+            categoria: 'Casa',
+            subcategoria: 'Luz',
+            descricao: 'Conta de luz',
+            data: dataISO,
+        }, { onStatus })
+    } catch (err) {
+        console.error('❌ [Consultora] Erro ao lançar conta de luz no Planner:', err.message)
+        return err.message === 'LOGIN_TIMEOUT'
+            ? 'Maurício, o login do Planner expirou (5 min) — manda a conta de luz de novo que eu reabro o navegador.'
+            : `Maurício, não consegui lançar a conta de luz no Planner agora (${err.message}) — tenta de novo em instantes.`
+    }
+
     const mem = memoriaStore.carregarMemoria()
     mem.contasAtrasadas.push({
         id: `luz_${Date.now()}`,
@@ -494,7 +513,8 @@ function registrarContaLuz(valorConta, vencimento) {
     })
     if (mem.metas.luz.status === 'pendente') mem.metas.luz.status = 'em_negociacao'
     memoriaStore.salvarMemoria(mem)
-    return `Maurício, anotei: conta de luz de R$${formatarBR(valorConta)}${vencimento ? ` (venceu ${vencimento})` : ''}. Prioridade #1 pra quitar. 💡`
+    invalidarCache() // o gasto real do mês mudou
+    return `Maurício, lancei no Planner: conta de luz de R$${formatarBR(valorConta)}${vencimento ? ` (venceu ${vencimento})` : ''}. Prioridade #1 pra quitar. 💡`
 }
 
 // Registro só em memória — não lança despesa no Planner, porque o valor TOTAL da compra
@@ -909,7 +929,6 @@ async function verificarAlertasProativos({ onStatus } = {}) {
 
 module.exports = {
     classificarMensagem,
-    pareceConsultaFinanceira,
     pareceComandoRegistrar,
     processarComandoRegistrar,
     detectarComandoRapido,

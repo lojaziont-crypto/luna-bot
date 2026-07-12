@@ -574,7 +574,10 @@ async function processarComandoRegistrarNoPlanner(sock, from) {
     const resultado = await consultoraFinanceira.processarComandoRegistrar(recentes)
 
     if (resultado.tipo === 'conta_luz') {
-        const msg = consultoraFinanceira.registrarContaLuz(resultado.valorConta, resultado.vencimento)
+        await sock.sendMessage(from, { text: '⏳ Lançando a conta de luz no Planner...' })
+        const msg = await consultoraFinanceira.registrarContaLuz(resultado.valorConta, resultado.vencimento, {
+            onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+        })
         await sock.sendMessage(from, { text: msg })
         return
     }
@@ -1038,20 +1041,26 @@ async function connectToWhatsApp() {
                     }
                 }
 
-                if (text && (pareceDespesa(text) || consultoraFinanceira.pareceConsultaFinanceira(text))) {
+                // Só passa pelo classificador Groq (despesa/receita/ajuste_limite/conta_luz/
+                // parcela) quando a mensagem tem cara clara de despesa (número + categoria/
+                // keyword). Qualquer outra coisa vai direto pro Claude via processarConsultaFinanceira
+                // — ele já tem os dados reais + histórico curto pra entender perguntas indiretas
+                // ("Está no Planner?", "você cadastrou?"). O fallback genérico só existe pro caso
+                // do Claude falhar tecnicamente (tratado dentro de responderConsultaFinanceira).
+                if (text && pareceDespesa(text)) {
                     const classificacao = await consultoraFinanceira.classificarMensagem(text)
                     console.log(`💬 [Zaya/Consultora] Classificação: ${classificacao.tipo}`)
                     switch (classificacao.tipo) {
-                        case 'consulta':
-                            await processarConsultaFinanceira(sock, from, text)
-                            break
                         case 'ajuste_limite': {
                             const msg = consultoraFinanceira.aplicarAjusteLimite(classificacao.categoria, classificacao.novoValor)
                             await sock.sendMessage(from, { text: msg })
                             break
                         }
                         case 'conta_luz': {
-                            const msg = consultoraFinanceira.registrarContaLuz(classificacao.valorConta, classificacao.vencimento)
+                            await sock.sendMessage(from, { text: '⏳ Lançando a conta de luz no Planner...' })
+                            const msg = await consultoraFinanceira.registrarContaLuz(classificacao.valorConta, classificacao.vencimento, {
+                                onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+                            })
                             await sock.sendMessage(from, { text: msg })
                             break
                         }
@@ -1060,13 +1069,19 @@ async function connectToWhatsApp() {
                             await sock.sendMessage(from, { text: msg })
                             break
                         }
-                        case 'ignorar':
-                            await sock.sendMessage(from, { text: 'Maurício, não entendi bem — pode explicar melhor?' })
-                            break
-                        default: // 'despesa' | 'receita'
+                        case 'despesa':
+                        case 'receita':
                             await processarDespesaPlanner(sock, from, text)
                             break
+                        default: // 'consulta' | 'ignorar' — deixa o Claude decidir, nunca some
+                            await processarConsultaFinanceira(sock, from, text)
+                            break
                     }
+                    continue
+                }
+
+                if (text) {
+                    await processarConsultaFinanceira(sock, from, text)
                     continue
                 }
             }
