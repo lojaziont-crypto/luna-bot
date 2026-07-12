@@ -202,11 +202,14 @@ REGRAS:
 - confianca: número de 0 a 1 indicando o quão seguro você está da categoria/subcategoria escolhida. Use < 0.6
   se o item mencionado não se encaixar claramente em nenhuma subcategoria (do guia ou por inferência razoável),
   ou se houver ambiguidade real entre duas categorias possíveis.
+- status: "Pendente" se a mensagem indicar que a conta AINDA NÃO foi paga (ex: "pendente", "a pagar", "vence",
+  "venceu", "atrasada"); "Concluído" se indicar que já foi paga (ex: "paguei", "quitei", "já paguei", "pago") ou
+  se não houver nenhuma indicação clara — "Concluído" é o padrão.
 
 Responda EXCLUSIVAMENTE em JSON, sem texto fora do JSON:
-{"valor": 0.00, "categoria": "...", "subcategoria": "...", "data": "AAAA-MM-DD", "confianca": 0.0}`
+{"valor": 0.00, "categoria": "...", "subcategoria": "...", "data": "AAAA-MM-DD", "confianca": 0.0, "status": "Concluído"}`
 
-// Retorna { ok, dados?, motivo? }. dados = { valor, categoria, subcategoria, descricao, data, confianca }
+// Retorna { ok, dados?, motivo? }. dados = { valor, categoria, subcategoria, descricao, data, status, confianca }
 async function interpretarDespesa(texto) {
     const hoje = hojeBR()
     let bruto
@@ -258,7 +261,9 @@ async function interpretarDespesa(texto) {
     // nunca texto livre do Groq ou do dono.
     const descricao = subcategoria || categoria
 
-    const dados = { valor, categoria, subcategoria, descricao, data, confianca: Number.isFinite(confianca) ? confianca : 0.5 }
+    const status = bruto.status === 'Pendente' ? 'Pendente' : 'Concluído'
+
+    const dados = { valor, categoria, subcategoria, descricao, data, status, confianca: Number.isFinite(confianca) ? confianca : 0.5 }
 
     if (dados.confianca < 0.6) {
         return { ok: false, precisaConfirmar: true, dados, motivo: `Fiquei em dúvida se é *${categoria}*${subcategoria ? ` / ${subcategoria}` : ''}.` }
@@ -657,7 +662,9 @@ async function preencherLinhaLancamento(page, dados) {
     await esperar(200)
     await setarInput(celulas[8], String(dados.valor.toFixed(2)).replace('.', ','))
     await esperar(200)
-    try { await selecionar(celulas[9], 'Concluído') } catch {}
+    try { await selecionar(celulas[9], dados.status || 'Concluído') } catch (e) {
+        console.log(`⚠️  [Planner] Status "${dados.status || 'Concluído'}" não selecionado: ${e.message}`)
+    }
     await page.screenshot({ path: path.join(DEBUG_DIR, 'linha_preenchida.png') }).catch(() => {})
 }
 
