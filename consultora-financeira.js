@@ -25,8 +25,10 @@ const HISTORICO_MAX_MENSAGENS = 10 // ~5 trocas (pergunta+resposta)
 // ───────────────────────── Classificação: consulta vs lançamento ─────────────────────────
 
 const PROMPT_CLASSIFICACAO = `Classifique a mensagem do dono de uma loja como:
-- "despesa": ele está relatando um gasto ou recebimento para REGISTRAR (ex: "gastei 20 no lanche", "2 reais pão", "recebi 3000 de salário").
-- "consulta": ele está PERGUNTANDO sobre a situação financeira dele, sem mencionar um novo gasto a registrar (ex: "quanto posso gastar hoje?", "quanto sobrou pra Uber esse mês?", "tô gastando muito em quê?", "posso pedir um ifood hoje?", "como tá meu orçamento?").
+- "despesa": ele está relatando um gasto ou recebimento JÁ FEITO, com um VALOR em dinheiro, para REGISTRAR (ex: "gastei 20 no lanche", "2 reais pão", "recebi 3000 de salário").
+- "consulta": ele está PERGUNTANDO ou expressando intenção/dúvida sobre um gasto FUTURO ou sobre a situação financeira dele, SEM valor em dinheiro definido (ex: "quanto posso gastar hoje?", "quanto sobrou pra Uber esse mês?", "tô gastando muito em quê?", "posso pedir um ifood hoje?", "como tá meu orçamento?", "quero comprar um sorvete", "vou comprar um tênis novo").
+
+REGRA PRINCIPAL: se a mensagem NÃO menciona um valor em dinheiro (R$, reais, ou número decimal), é "consulta" — não dá pra registrar uma despesa sem valor.
 
 Responda EXCLUSIVAMENTE em JSON: {"tipo": "despesa"} ou {"tipo": "consulta"}`
 
@@ -52,10 +54,16 @@ async function classificarMensagem(texto) {
     }
 }
 
-// Pré-filtro leve: mensagem tem cara de pergunta financeira (independente de conter
-// valor monetário, diferente de pareceDespesa). Roda ANTES da classificação Groq pra
-// evitar chamar o Groq em toda mensagem qualquer.
-const PALAVRAS_PERGUNTA = ['quanto', 'posso', 'consigo', 'tá', 'ta ', 'como', 'sobrou', 'sobra', 'gastando', 'estourei', 'estourando']
+// Pré-filtro leve: mensagem tem cara de pergunta/intenção financeira (independente de
+// conter valor monetário, diferente de pareceDespesa). Roda ANTES da classificação Groq
+// pra evitar chamar o Groq em toda mensagem qualquer.
+// Inclui tanto perguntas explícitas ("quanto posso gastar?") quanto afirmações de
+// intenção sem forma de pergunta ("quero comprar um sorvete") — o dono nem sempre
+// fraseia como pergunta, mas a intenção é a mesma: "isso cabe no orçamento?".
+const PALAVRAS_PERGUNTA = [
+    'quanto', 'posso', 'consigo', 'tá', 'ta ', 'como', 'sobrou', 'sobra', 'gastando', 'estourei', 'estourando',
+    'quero', 'queria', 'gostaria', 'pretendo', 'penso em', 'vou comprar', 'vou gastar', 'dá pra', 'da pra',
+]
 const PALAVRAS_DINHEIRO = ['gast', 'orçamento', 'orcamento', 'limite', 'disponív', 'disponiv', 'dinheiro', 'budget', 'saldo']
 
 function pareceConsultaFinanceira(texto) {

@@ -821,6 +821,8 @@ async function connectToWhatsApp() {
                 const textoLower = (text || '').toLowerCase().trim()
                 const imageMsg = msg.message.imageMessage
 
+                if (text) console.log(`[Zaya/debug] Mensagem do dono recebida: ${text}`)
+
                 if (imageMsg) {
                     await processarComprovanteImagem(sock, msg, from, text)
                     continue
@@ -873,8 +875,12 @@ async function connectToWhatsApp() {
                     }
                 }
 
+                if (text) {
+                    console.log(`[Zaya/debug] pareceDespesa=${pareceDespesa(text)} pareceConsultaFinanceira=${consultoraFinanceira.pareceConsultaFinanceira(text)}`)
+                }
                 if (text && (pareceDespesa(text) || consultoraFinanceira.pareceConsultaFinanceira(text))) {
                     const tipo = await consultoraFinanceira.classificarMensagem(text)
+                    console.log(`[Zaya/debug] Classificação Groq: ${tipo}`)
                     if (tipo === 'consulta') {
                         await processarConsultaFinanceira(sock, from, text)
                     } else {
