@@ -396,21 +396,31 @@ async function processarComprovanteImagem(sock, msg, from, legenda) {
 
 const formatarBR = n => Number(n).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-// Pré-filtro leve antes de chamar o Groq: detecta se a mensagem parece uma despesa
+// Nomes de categoria/subcategoria (formais + palavras informais do guia) usados como sinal
+// de "isso parece um item de gasto" no pré-filtro abaixo.
+const NOMES_ITEM_GASTO = [
+    ...plannerAgent.CATEGORIAS_DESPESA,
+    ...Object.values(plannerAgent.PLANEJAMENTO).flatMap(v => Object.keys(v.subs)),
+    ...plannerAgent.RECEITAS,
+    ...Object.values(plannerAgent.PALAVRAS_INFORMAIS).flat(),
+]
+
+// Pré-filtro leve antes de chamar o Groq: detecta se a mensagem parece uma despesa/receita.
+// Não precisa ser preciso — o Groq decide de verdade depois, com "confianca" cobrindo os casos
+// ambíguos (pergunta antes de cadastrar). Aqui só evita chamar o Groq pra qualquer mensagem aleatória.
 function pareceDespesa(texto) {
     const lower = texto.toLowerCase()
     if (!/\d/.test(lower)) return false
+
     const keywords = ['gastei', 'paguei', 'comprei', 'despesa', 'lancei', 'gasto', 'recebi', 'recebimento', 'conta de', 'boleto']
     if (keywords.some(p => lower.includes(p))) return true
-    // "academia 139,90", "internet 130" etc. — categoria + valor decimal
-    if (/\d[,\.]\d/.test(lower)) {
-        const nomes = [
-            ...plannerAgent.CATEGORIAS_DESPESA,
-            ...Object.values(plannerAgent.PLANEJAMENTO).flatMap(v => Object.keys(v.subs)),
-        ]
-        if (nomes.some(n => n.length > 2 && lower.includes(n.toLowerCase()))) return true
-    }
-    return false
+
+    // valor monetário reconhecível: decimal (2,50 / 2.50), "R$"/"reais"/"$" perto de um número,
+    // ou qualquer inteiro curto (ex: "2 lanche") — precisa vir acompanhado de um item reconhecível abaixo
+    const temValor = /\d[,.]\d{1,2}/.test(lower) || /r\$\s*\d/.test(lower) || /\d\s*(reais|r\$|\$)/i.test(lower) || /\b\d{1,4}\b/.test(lower)
+    if (!temValor) return false
+
+    return NOMES_ITEM_GASTO.some(n => n.length > 2 && lower.includes(n.toLowerCase()))
 }
 
 async function processarDespesaPlanner(sock, from, texto) {
@@ -444,6 +454,8 @@ async function processarDespesaPlanner(sock, from, texto) {
             onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
         })
         await sock.sendMessage(from, { text: plannerAgent.formatarRespostaWhatsApp(r) })
+        const insight = plannerAgent.formatarInsightEstouro(r)
+        if (insight) await sock.sendMessage(from, { text: insight })
     } catch (err) {
         console.error('❌ [Zaya/Planner] Erro ao cadastrar:', err.message)
         const msgErro = err.message === 'LOGIN_TIMEOUT'
@@ -489,6 +501,8 @@ async function tratarConfirmacaoDespesa(sock, from, texto) {
             onStatus: msg => sock.sendMessage(from, { text: msg }).catch(() => {}),
         })
         await sock.sendMessage(from, { text: plannerAgent.formatarRespostaWhatsApp(r) })
+        const insight = plannerAgent.formatarInsightEstouro(r)
+        if (insight) await sock.sendMessage(from, { text: insight })
     } catch (err) {
         console.error('❌ [Zaya/Planner] Erro ao cadastrar despesa confirmada:', err.message)
         await sock.sendMessage(from, { text: `❌ Erro ao cadastrar: ${err.message}` })

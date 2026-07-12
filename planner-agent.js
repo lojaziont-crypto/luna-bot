@@ -57,6 +57,57 @@ const RECEITAS = ['Renda Extra', 'Salário', 'Vale-Alimentação', 'Vale-Transpo
 
 const CATEGORIAS_DESPESA = Object.keys(PLANEJAMENTO)
 
+// Categorias sem limite definido — nunca sugeridas como "tem folga" no insight de estouro
+const CATEGORIAS_SEM_LIMITE_PARA_SUGESTAO = ['Dízimo', 'Farmácia', 'Eletrodomésticos, Móveis e Etc.', 'Outros']
+
+// Guia de palavras informais → subcategoria/categoria (chave = nome EXATO já usado em PLANEJAMENTO).
+// Serve tanto de referência pro prompt do Groq quanto de pré-filtro em pareceDespesa (Zaya.js) —
+// não é exaustivo, o Groq deve inferir casos parecidos pelo contexto.
+const PALAVRAS_INFORMAIS = {
+    'Café da Manhã': ['pão', 'café', 'iogurte', 'fruta', 'suco', 'biscoito', 'tapioca', 'cuscuz', 'leite', 'achocolatado', 'mingau', 'bolo de café', 'croissant', 'pão de queijo'],
+    'Lanche': ['lanche', 'salgado', 'pastel', 'coxinha', 'esfiha', 'hambúrguer', 'pizza', 'sanduíche', 'açaí', 'sorvete', 'pipoca', 'barra de cereal', 'snack', 'bolinho'],
+    'Almoço': ['almoço', 'marmita', 'restaurante', 'self-service', 'prato feito', 'pf', 'comida', 'arroz e feijão', 'buffet'],
+    'Jantar': ['jantar', 'janta', 'comida à noite', 'delivery à noite', 'ifood à noite'],
+    'Mercado': ['mercado', 'supermercado', 'feira', 'hortifruti', 'açougue', 'padaria', 'sacolão'],
+    'Academia': ['academia', 'mensalidade academia', 'gym', 'personal'],
+    'Metrô': ['metrô', 'metro', 'bilhete único', 'cartão transporte'],
+    'Ônibus': ['ônibus', 'onibus', 'busão'],
+    '99': ['99', 'noventa e nove', 'corrida 99'],
+    'Uber': ['uber', 'corrida', 'aplicativo de transporte'],
+    'Aluguel': ['aluguel', 'alug'],
+    'Internet': ['internet', 'wi-fi', 'wifi', 'banda larga', 'fibra'],
+    'Água': ['água', 'conta de água', 'sabesp', 'embasa'],
+    'Luz': ['luz', 'energia', 'conta de luz', 'enel', 'cemig'],
+    'Gás': ['gás', 'botijão', 'botijão de gás', 'gás de cozinha'],
+    'Farmácia': ['remédio', 'medicamento', 'farmácia', 'drogaria', 'comprimido', 'pomada', 'vitamina'],
+    'Lavanderia': ['lavanderia', 'lavandaria', 'lavar roupa'],
+    'Corte de Cabelo': ['cabelo', 'barbearia', 'barba', 'corte'],
+    'Produtos': ['shampoo', 'condicionador', 'sabonete', 'desodorante', 'creme', 'maquiagem', 'perfume', 'hidratante'],
+    'Ração': ['ração', 'petshop', 'pet shop', 'veterinário', 'vacina pet'],
+    'Viagem': ['viagem', 'passagem', 'hotel', 'hospedagem', 'airbnb', 'passeio'],
+    'Vestuário': ['roupa', 'camiseta', 'calça', 'tênis', 'sapato', 'meia', 'cueca', 'sutiã', 'vestido', 'blusa'],
+    'Emergência': ['emergência', 'imprevisto', 'urgência'],
+    'Dízimo': ['dízimo', 'dizimo', 'oferta', 'igreja'],
+}
+
+// Emoji fixo por subcategoria/categoria (usado nas mensagens de confirmação)
+const EMOJIS = {
+    'Lanche': '🥪', 'Almoço': '🍽️', 'Café da Manhã': '☕', 'Jantar': '🌙',
+    'Mercado': '🛒', 'Academia': '💪',
+    'Metrô': '🚇', 'Ônibus': '🚌', '99': '🚖', 'Uber': '🚗',
+    'Aluguel': '🏠', 'Internet': '📶', 'Água': '💧', 'Luz': '💡', 'Gás': '🔥',
+    'Farmácia': '💊', 'Lavanderia': '👕', 'Corte de Cabelo': '💈', 'Produtos': '🧴',
+    'Ração': '🐾', 'Animal de Estimação': '🐾',
+    'Viagem': '✈️', 'Lazer': '✈️',
+    'Vestuário': '👔', 'Emergência': '🚨', 'Dízimo': '🙏', 'Outros': '📦',
+    'Renda Extra': '💰', 'Salário': '💼', 'Vale-Alimentação': '🍱', 'Vale-Transporte': '🚍',
+    // categorias-pai sem emoji específico listado — usadas quando não há subcategoria
+    'Alimentação': '🍽️', 'Transporte': '🚌', 'Casa': '🏠', 'Cuidados Pessoais': '🧴',
+}
+function emojiPara(categoria, subcategoria) {
+    return EMOJIS[subcategoria] || EMOJIS[categoria] || '📦'
+}
+
 // Descrição legível das categorias/subcategorias para o prompt do Groq
 function descreverCategorias() {
     const linhas = []
@@ -67,6 +118,12 @@ function descreverCategorias() {
     return linhas.join('\n')
 }
 
+function descreverPalavrasInformais() {
+    return Object.entries(PALAVRAS_INFORMAIS)
+        .map(([sub, palavras]) => `- ${sub}: ${palavras.join(', ')}`)
+        .join('\n')
+}
+
 // ───────────────────────── Utilidades ─────────────────────────
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
@@ -74,6 +131,14 @@ const esperar = ms => new Promise(r => setTimeout(r, ms))
 function dataParaBR(dataISO) {
     const [ano, mes, dia] = dataISO.split('-')
     return `${dia}/${mes}/${ano}`
+}
+
+// Data de hoje no fuso de São Paulo, em AAAA-MM-DD.
+// NUNCA usar new Date().toISOString() aqui — ela usa UTC, e à noite no Brasil (UTC-3)
+// isso "pula" pro dia seguinte (ex: 21h30 em SP = 00h30 UTC do dia seguinte), causando
+// lançamentos com a data errada.
+function hojeBR() {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
 }
 
 function formatarBR(n) {
@@ -98,28 +163,38 @@ function casarNome(entrada, opcoes) {
 
 // ───────────────────────── Interpretação via Groq ─────────────────────────
 
-const PROMPT_DESPESA = `Você interpreta mensagens em texto livre do dono de uma loja, que registra gastos pessoais.
-Extraia os dados da despesa mencionada.
+const PROMPT_DESPESA = `Você interpreta mensagens em texto livre do dono de uma loja, que registra gastos e receitas pessoais pelo WhatsApp.
+Extraia os dados da despesa ou receita mencionada.
+
+A mensagem raramente vem em formato formal. NÃO exija palavras como "gastei" ou "paguei" — trate QUALQUER
+mensagem que combine um valor monetário com algo que pareça um item/categoria de gasto como uma despesa.
+Exemplos válidos, todos devem ser interpretados corretamente:
+"2 em lanche", "2$ em lanche", "R$2 lanche", "2 reais pão", "12,82 alimentação", "academia 139,90", "gastei 50 no mercado".
 
 CATEGORIAS E SUBCATEGORIAS DE DESPESA VÁLIDAS (use EXATAMENTE estes nomes):
 ${descreverCategorias()}
 
-Categorias de RECEITA válidas (só se a mensagem for claramente um recebimento): ${RECEITAS.join(', ')}
+Categorias de RECEITA válidas (só se a mensagem for claramente um recebimento, ex: "recebi 3000 de salário", "recebi 200 vale-alimentação"): ${RECEITAS.join(', ')}
+
+GUIA DE PALAVRAS INFORMAIS → SUBCATEGORIA (use como referência para mapear o item citado; esta lista NÃO é
+exaustiva — infira outros casos parecidos pelo contexto, mesmo que a palavra exata não esteja aqui):
+${descreverPalavrasInformais()}
 
 REGRAS:
-- valor: número decimal com ponto (ex: 12.82). Aceite vírgula ou ponto na entrada.
-- categoria: escolha EXATAMENTE uma da lista acima. Se a palavra citada for uma subcategoria (ex: "lanche", "internet", "uber"), deduza a categoria pai correta.
+- valor: número decimal com ponto (ex: 12.82). Aceite vírgula, ponto, "R$", "$" ou "reais" na entrada.
+- categoria: escolha EXATAMENTE uma da lista acima. Se a palavra citada for uma subcategoria ou um item informal do guia (ex: "pão", "uber", "shampoo"), deduza a categoria pai correta.
 - subcategoria: preencha SOMENTE se a categoria tiver subcategorias e você identificar qual. Caso contrário, "".
-- descricao: breve, baseada na mensagem (ex: "Lanche", "Conta de internet").
 - data: AAAA-MM-DD. Use a data de hoje informada se não houver outra data clara.
-- confianca: número de 0 a 1 indicando o quão seguro você está da categoria. Use < 0.6 se estiver em dúvida sobre a categoria.
+- confianca: número de 0 a 1 indicando o quão seguro você está da categoria/subcategoria escolhida. Use < 0.6
+  se o item mencionado não se encaixar claramente em nenhuma subcategoria (do guia ou por inferência razoável),
+  ou se houver ambiguidade real entre duas categorias possíveis.
 
 Responda EXCLUSIVAMENTE em JSON, sem texto fora do JSON:
-{"valor": 0.00, "categoria": "...", "subcategoria": "...", "descricao": "...", "data": "AAAA-MM-DD", "confianca": 0.0}`
+{"valor": 0.00, "categoria": "...", "subcategoria": "...", "data": "AAAA-MM-DD", "confianca": 0.0}`
 
 // Retorna { ok, dados?, motivo? }. dados = { valor, categoria, subcategoria, descricao, data, confianca }
 async function interpretarDespesa(texto) {
-    const hoje = new Date().toISOString().slice(0, 10)
+    const hoje = hojeBR()
     let bruto
     try {
         const resp = await groq.chat.completions.create({
@@ -162,8 +237,12 @@ async function interpretarDespesa(texto) {
     }
 
     const confianca = Number(bruto.confianca)
+    // data: sempre AAAA-MM-DD (formato exigido pelo <input type=date> do site) — o Groq deve
+    // devolver a data de hoje informada no prompt quando a mensagem não menciona outra data.
     const data = /^\d{4}-\d{2}-\d{2}$/.test(bruto.data || '') ? bruto.data : hoje
-    const descricao = (bruto.descricao || subcategoria || categoria).toString().slice(0, 120)
+    // Descrição SEMPRE é o nome da subcategoria (ou categoria, se não houver subcategoria) —
+    // nunca texto livre do Groq ou do dono.
+    const descricao = subcategoria || categoria
 
     const dados = { valor, categoria, subcategoria, descricao, data, confianca: Number.isFinite(confianca) ? confianca : 0.5 }
 
@@ -594,15 +673,17 @@ async function salvarLancamento(page) {
     return sucesso
 }
 
-async function lerBalancoMensal(page, categoria, subcategoria) {
+// Lê a seção "DESPESAS: REALIZADO VS PLANEJADO" do Balanço Mensal e retorna o mapa completo
+// { categoria_minuscula: valorRealizado }, usado tanto pra categoria do lançamento atual quanto
+// pra sugerir categorias com folga no insight de estouro (precisa comparar TODAS as categorias).
+async function lerBalancoMensalCompleto(page) {
     await page.goto(BALANCO_MENSAL_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
     await esperar(3000)
     await fecharModaisPromocionais(page)
     await page.screenshot({ path: path.join(DEBUG_DIR, 'balanco_mensal.png') }).catch(() => {})
 
-    // Lê realizados da seção "DESPESAS: REALIZADO VS PLANEJADO" via innerText
     // Formato: CATEGORIA\nX.X%\nR$ Y,YY (repetido para cada categoria)
-    const realizados = await page.evaluate(() => {
+    return page.evaluate(() => {
         const txt = document.body.innerText || ''
         const inicio = txt.indexOf('DESPESAS: REALIZADO VS PLANEJADO')
         const fim = txt.indexOf('GASTOS COM', inicio)
@@ -623,21 +704,30 @@ async function lerBalancoMensal(page, categoria, subcategoria) {
         }
         return resultado
     })
+}
 
-    const norm = s => (s || '').trim().toLowerCase()
-    const realizadoCat = realizados[norm(categoria)] ?? null
-    // Subcategoria: usa o total da categoria como proxy (o dashboard não expõe sub-realizado individualmente)
-    const realizadoSub = subcategoria ? realizadoCat : null
-    return { realizadoCat, realizadoSub }
+// Entre as categorias COM limite definido (exclui CATEGORIAS_SEM_LIMITE_PARA_SUGESTAO e a própria
+// categoria estourada), retorna as 2 com mais saldo disponível (planejado - realizado), maior folga primeiro.
+function sugerirCategoriasComFolga(realizadosTodos, categoriaEstourada) {
+    return Object.entries(PLANEJAMENTO)
+        .filter(([cat, info]) => info.limite != null
+            && !CATEGORIAS_SEM_LIMITE_PARA_SUGESTAO.includes(cat)
+            && cat !== categoriaEstourada)
+        .map(([cat, info]) => ({
+            categoria: cat,
+            disponivel: info.limite - (realizadosTodos[cat.toLowerCase()] ?? 0),
+        }))
+        .filter(c => c.disponivel > 0)
+        .sort((a, b) => b.disponivel - a.disponivel)
+        .slice(0, 2)
 }
 
 // ───────────────────────── Orquestração ─────────────────────────
 
-// Cadastra a despesa já interpretada. onStatus(msg) opcional avisa o dono pelo WhatsApp
+// Cadastra a despesa/receita já interpretada. onStatus(msg) opcional avisa o dono pelo WhatsApp
 // durante etapas longas (ex: aguardando login manual).
-// Retorna: { sucesso, valorLancado, categoria, subcategoria, descricao,
-//            realizado, planejado, percentual, limiteRestante,
-//            realizadoSub, planejadoSub, restanteSub }
+// Retorna: { sucesso, tipo, valorLancado, categoria, subcategoria, descricao, nomeItem,
+//            planejado, realizado, percentual, restante, sugestoes }
 async function cadastrarDespesa(dados, { onStatus } = {}) {
     if (ocupado) throw new Error('Já estou cadastrando outra despesa — tente de novo em instantes.')
     ocupado = true
@@ -651,58 +741,93 @@ async function cadastrarDespesa(dados, { onStatus } = {}) {
         const okSucesso = await salvarLancamento(page)
         console.log(`✅ [Planner] Lançado: ${dados.descricao} — R$ ${dados.valor.toFixed(2)} (${dados.categoria}${dados.subcategoria ? '/' + dados.subcategoria : ''})`)
 
+        const tipo = RECEITAS.includes(dados.categoria) ? 'receita' : 'despesa'
         const info = PLANEJAMENTO[dados.categoria] || { limite: null, subs: {} }
-        const planejado = info.limite
+        const planejadoCat = info.limite
         const planejadoSub = dados.subcategoria ? info.subs[dados.subcategoria] : null
 
-        let realizado = null, realizadoSub = null
+        let realizadosTodos = {}
         try {
-            const bal = await lerBalancoMensal(page, dados.categoria, dados.subcategoria)
-            realizado = bal.realizadoCat
-            realizadoSub = bal.realizadoSub
+            realizadosTodos = await lerBalancoMensalCompleto(page)
         } catch (e) {
             console.log(`⚠️  [Planner] Não consegui ler o Balanço Mensal: ${e.message}`)
         }
-
         // Fallback: se o balanço não trouxe o realizado, usa ao menos o valor lançado agora
-        if (realizado == null) realizado = dados.valor
-        if (dados.subcategoria && realizadoSub == null) realizadoSub = dados.valor
+        const realizadoCat = realizadosTodos[dados.categoria.toLowerCase()] ?? dados.valor
+        // Subcategoria: usa o total da categoria como proxy — o dashboard não expõe
+        // realizado por subcategoria individualmente.
+        const realizadoSub = realizadoCat
 
+        // Se a subcategoria tem limite próprio, o status da mensagem é baseado nela;
+        // senão cai pro limite da categoria (ou nenhum, se a categoria também não tiver).
+        const usaSub = planejadoSub != null
+        const planejado = usaSub ? planejadoSub : planejadoCat
+        const realizado = usaSub ? realizadoSub : realizadoCat
         const percentual = (planejado && planejado > 0) ? (realizado / planejado) * 100 : null
-        const limiteRestante = (planejado != null) ? (planejado - realizado) : null
-        const restanteSub = (planejadoSub != null && realizadoSub != null) ? (planejadoSub - realizadoSub) : null
+        const restante = (planejado != null) ? (planejado - realizado) : null
+
+        const sugestoes = (tipo === 'despesa' && percentual != null && percentual >= 100)
+            ? sugerirCategoriasComFolga(realizadosTodos, dados.categoria)
+            : []
 
         return {
             sucesso: true,
             confirmadoToast: okSucesso,
+            tipo,
             valorLancado: dados.valor,
             categoria: dados.categoria,
             subcategoria: dados.subcategoria || null,
             descricao: dados.descricao,
-            realizado, planejado, percentual, limiteRestante,
-            realizadoSub, planejadoSub, restanteSub,
+            nomeItem: dados.subcategoria || dados.categoria,
+            planejado, realizado, percentual, restante, sugestoes,
         }
     } finally {
         ocupado = false
     }
 }
 
-// Monta a mensagem de WhatsApp a partir do resultado de cadastrarDespesa
+// Monta a mensagem de WhatsApp a partir do resultado de cadastrarDespesa (req. 7)
 function formatarRespostaWhatsApp(r) {
-    const nomeItem = r.subcategoria || r.categoria
-    let msg = `✅ Despesa cadastrada: R$ ${formatarBR(r.valorLancado)} em ${nomeItem}`
+    const emoji = emojiPara(r.categoria, r.subcategoria)
+    const nomeItem = r.nomeItem
 
-    if (r.planejado != null) {
-        const pct = r.percentual != null ? ` (${formatarBR(r.percentual)}%)` : ''
-        msg += `\n📊 ${r.categoria} este mês: R$ ${formatarBR(r.realizado)} de R$ ${formatarBR(r.planejado)}${pct}`
-    } else {
-        msg += `\n📊 ${r.categoria}: sem limite planejado definido`
+    if (r.tipo === 'receita') {
+        return `✅ Receita registrada!\n\n${emoji} R$ ${formatarBR(r.valorLancado)} em ${nomeItem}\n\n💚 Lançado com sucesso no Planner.`
     }
 
-    if (r.subcategoria && r.planejadoSub != null && r.restanteSub != null) {
-        msg += `\n💰 Limite restante em ${r.subcategoria}: R$ ${formatarBR(r.restanteSub)} de R$ ${formatarBR(r.planejadoSub)}`
-    } else if (r.limiteRestante != null) {
-        msg += `\n💰 Limite restante em ${r.categoria}: R$ ${formatarBR(r.limiteRestante)} de R$ ${formatarBR(r.planejado)}`
+    let msg = `✅ Despesa registrada!\n\n${emoji} R$ ${formatarBR(r.valorLancado)} em ${nomeItem}`
+
+    if (r.planejado == null) {
+        msg += `\n\n📊 Sem limite definido para ${nomeItem}.`
+        return msg
+    }
+
+    const pct = r.percentual ?? 0
+    const restanteExibido = formatarBR(Math.max(0, r.restante))
+    let cor, texto
+    if (pct < 50) {
+        cor = '🟢'; texto = `Você ainda tem R$ ${restanteExibido} disponíveis em ${nomeItem}.`
+    } else if (pct < 75) {
+        cor = '🟡'; texto = `Atenção! Você já usou mais da metade do orçamento de ${nomeItem}. Restam R$ ${restanteExibido}.`
+    } else if (pct < 90) {
+        cor = '🟠'; texto = `Cuidado! O limite de ${nomeItem} está quase no fim. Restam apenas R$ ${restanteExibido}.`
+    } else {
+        cor = '🔴'; texto = `Limite crítico! Você está prestes a estourar o orçamento de ${nomeItem}. Restam R$ ${restanteExibido}.`
+    }
+    msg += `\n\n${cor} ${texto}`
+    return msg
+}
+
+// Segunda mensagem separada, enviada SÓ quando o gasto ultrapassa 100% do limite (req. 8).
+// Retorna null quando não se aplica.
+function formatarInsightEstouro(r) {
+    if (r.tipo !== 'despesa' || r.percentual == null || r.percentual < 100 || !r.sugestoes.length) return null
+    const [a, b] = r.sugestoes
+    let msg = `⚠️ Você estourou o orçamento de ${r.nomeItem} este mês.`
+    if (a && b) {
+        msg += `\n\n💡 Sugestão: tente reduzir gastos em ${a.categoria} (R$ ${formatarBR(a.disponivel)} disponíveis) ou ${b.categoria} (R$ ${formatarBR(b.disponivel)} disponíveis) para compensar.`
+    } else if (a) {
+        msg += `\n\n💡 Sugestão: tente reduzir gastos em ${a.categoria} (R$ ${formatarBR(a.disponivel)} disponíveis) para compensar.`
     }
     return msg
 }
@@ -711,7 +836,10 @@ module.exports = {
     interpretarDespesa,
     cadastrarDespesa,
     formatarRespostaWhatsApp,
+    formatarInsightEstouro,
     abrirPlannerBrowser,
     PLANEJAMENTO,
     CATEGORIAS_DESPESA,
+    RECEITAS,
+    PALAVRAS_INFORMAIS,
 }
