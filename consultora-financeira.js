@@ -490,17 +490,26 @@ function vencimentoParaISO(vencimento) {
 }
 
 // Lança a conta de luz no Planner DE VERDADE (categoria Casa/Luz, mesma função de cadastro
-// usada pras despesas normais) e só DEPOIS grava em memória — a confirmação ao Maurício só
-// sai se o lançamento real deu certo. Memória local é complementar (alimenta prioridades,
-// alertas e os comandos "luz quitada"/"luz negociada"), nunca substitui o Planner real.
+// usada pras despesas normais, descrição = nome exato da subcategoria "Luz") e só DEPOIS
+// grava em memória — a confirmação ao Maurício só sai se o lançamento real deu certo.
+// Memória local é complementar (alimenta prioridades, alertas e os comandos "luz quitada"/
+// "luz negociada"), nunca substitui o Planner real.
+//
+// Conta com vencimento no mês atual entra no limite mensal normalmente (lançada com a data
+// real, dentro do mês corrente). Conta com vencimento em mês anterior (já atrasada) é lançada
+// com a data ORIGINAL também — como o Balanço Mensal do site é escopado pelo mês real da
+// transação, ela automaticamente não conta no gasto do mês atual; só muda a mensagem de
+// confirmação, que avisa isso explicitamente em vez de mostrar o % do mês (que não se aplica).
 async function registrarContaLuz(valorConta, vencimento, { onStatus } = {}) {
     const dataISO = vencimentoParaISO(vencimento) || hojeISO()
+    const atrasada = dataISO.slice(0, 7) < mesAtual()
+    let resultado
     try {
-        await plannerAgent.cadastrarDespesa({
+        resultado = await plannerAgent.cadastrarDespesa({
             valor: valorConta,
             categoria: 'Casa',
             subcategoria: 'Luz',
-            descricao: 'Conta de luz',
+            descricao: 'Luz',
             data: dataISO,
             status: 'Pendente', // CONTA_LUZ por definição é uma conta ainda NÃO paga
         }, { onStatus })
@@ -514,7 +523,7 @@ async function registrarContaLuz(valorConta, vencimento, { onStatus } = {}) {
     const mem = memoriaStore.carregarMemoria()
     mem.contasAtrasadas.push({
         id: `luz_${Date.now()}`,
-        descricao: 'Conta de luz',
+        descricao: 'Luz',
         valor: valorConta,
         vencimentoOriginal: vencimento,
         status: 'atrasada',
@@ -524,7 +533,11 @@ async function registrarContaLuz(valorConta, vencimento, { onStatus } = {}) {
     if (mem.metas.luz.status === 'pendente') mem.metas.luz.status = 'em_negociacao'
     memoriaStore.salvarMemoria(mem)
     invalidarCache() // o gasto real do mês mudou
-    return `Maurício, lancei no Planner: conta de luz de R$${formatarBR(valorConta)}${vencimento ? ` (venceu ${vencimento})` : ''}. Prioridade #1 pra quitar. 💡`
+
+    if (atrasada) {
+        return `✅ Despesa registrada!\n\n💡 R$ ${formatarBR(valorConta)} em Luz\n\n⚠️ Conta atrasada — não afeta o limite do mês atual, mas é prioridade pra quitar.`
+    }
+    return plannerAgent.formatarRespostaWhatsApp(resultado)
 }
 
 // Registro só em memória — não lança despesa no Planner, porque o valor TOTAL da compra
