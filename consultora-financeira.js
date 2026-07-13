@@ -116,7 +116,7 @@ function nomesItemConhecidos() {
         .concat(['Uber', '99'])
 }
 
-// Retorna { tipo: 'saldo'|'dashboard'|'parcelas'|'prioridades'|'termometro'|'desafio'|'categoria', item? }
+// Retorna { tipo: 'saldo'|'dashboard'|'parcelas'|'prioridades'|'termometro'|'desafio'|'categoria'|'pendencias', item? }
 // ou null se a mensagem não é um comando rápido reconhecido.
 function detectarComandoRapido(texto) {
     const lower = texto.toLowerCase().trim().replace(/[?!.]+$/, '')
@@ -128,6 +128,9 @@ function detectarComandoRapido(texto) {
     if (lower === 'desafio') return { tipo: 'desafio' }
     if (['luz quitada', 'quitei a luz', 'paguei a luz toda'].includes(lower)) return { tipo: 'luz_quitada' }
     if (['luz negociada', 'negociei a luz'].includes(lower)) return { tipo: 'luz_negociada' }
+    // Frase livre (ex: "o que tenho de pendências", "quais minhas pendências") — não precisa
+    // bater exato, "pendênc" já basta pra reconhecer a intenção.
+    if (/pend[eê]ncias?/.test(lower)) return { tipo: 'pendencias' }
     const item = nomesItemConhecidos().find(n => n.toLowerCase() === lower)
     if (item) return { tipo: 'categoria', item }
     return null
@@ -782,11 +785,30 @@ Projeção: sobram *R$${formatarBR(resumo.saldoProjetado)}* no fim do mês.
 ${resumo.dica}`
 }
 
+// Lê /controle/pendencias de verdade (plannerAgent.listarPendenciasAteHoje) e devolve UMA
+// mensagem POR pendência atrasada até hoje — pedido explícito do dono, nada de lista única.
+async function formatarPendencias({ onStatus } = {}) {
+    let pendencias
+    try {
+        pendencias = await plannerAgent.listarPendenciasAteHoje({ onStatus })
+    } catch (err) {
+        console.error('❌ [Consultora] Erro ao ler pendências:', err.message)
+        return [err.message === 'LOGIN_TIMEOUT'
+            ? 'Maurício, o login do Planner expirou (5 min) — pede de novo que eu reabro o navegador.'
+            : `Maurício, não consegui checar as pendências agora (${err.message}) — tenta de novo em instantes.`]
+    }
+    if (!pendencias.length) {
+        return ['Maurício, nenhuma pendência atrasada até hoje. ✅']
+    }
+    return pendencias.map(p => `⚠️ Pendência (venceu ${p.data}): ${p.texto}`)
+}
+
 // Dispatcher dos comandos rápidos — retorna um ARRAY de mensagens (mesmo contrato de
 // responderConsultaFinanceira), ou null se o tipo de comando não for reconhecido.
 async function processarComandoRapido(comando, { onStatus } = {}) {
     // luz_quitada/luz_negociada são operações só de memória — não precisam dos dados
-    // do mês, resolvidas antes de abrir o navegador.
+    // do mês, resolvidas antes de abrir o navegador. pendencias abre o navegador só pra
+    // essa página específica, não precisa do resumo mensal (obterResumoComCache).
     if (comando.tipo === 'luz_quitada') {
         const mem = memoriaStore.carregarMemoria()
         mem.contasAtrasadas.forEach(c => { if (c.status !== 'quitada') { c.status = 'quitada'; c.atualizadoEm = new Date().toISOString() } })
@@ -800,6 +822,9 @@ async function processarComandoRapido(comando, { onStatus } = {}) {
         mem.metas.luz.status = 'em_negociacao'
         memoriaStore.salvarMemoria(mem)
         return ['Maurício, marquei a luz como negociada. Quando quitar, me diga "luz quitada". 📝']
+    }
+    if (comando.tipo === 'pendencias') {
+        return await formatarPendencias({ onStatus })
     }
 
     const mem = memoriaStore.carregarMemoria()

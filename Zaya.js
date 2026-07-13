@@ -1063,8 +1063,8 @@ async function connectToWhatsApp() {
                 }
 
                 // Comandos rápidos (saldo, dashboard, parcelas, prioridades, termômetro,
-                // desafio, [categoria], luz quitada/negociada) — reconhecidos localmente,
-                // sem precisar do Groq.
+                // desafio, [categoria], luz quitada/negociada, pendências) — reconhecidos
+                // localmente, sem precisar do Groq.
                 if (text) {
                     const comandoRapido = consultoraFinanceira.detectarComandoRapido(text)
                     if (comandoRapido) {

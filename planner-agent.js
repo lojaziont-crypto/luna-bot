@@ -22,6 +22,7 @@ const PLANNER_URL = process.env.PLANNER_URL || 'https://web.meuplannerfinanceiro
 const PLANNER_BASE = 'https://web.meuplannerfinanceiro.com.br'
 const LANCAMENTOS_URL = `${PLANNER_BASE}/controle/lancamentos`
 const BALANCO_MENSAL_URL = `${PLANNER_BASE}/dashboard/mensal`
+const PENDENCIAS_URL = `${PLANNER_BASE}/controle/pendencias`
 
 // Perfil fora do diretório do projeto — Edge não aceita userDataDir dentro de pastas de repositório git
 const PROFILE_DIR = process.env.PLANNER_PROFILE_DIR
@@ -747,6 +748,46 @@ async function lerBalancoMensalCompleto(page) {
     })
 }
 
+// Lê /controle/pendencias e retorna só as pendências com vencimento HOJE ou ANTERIOR (atrasadas
+// até hoje) — cada item como { texto, data } (texto = linha inteira, crua, pra não depender de
+// adivinhar colunas específicas; data = "DD/MM/AAAA" extraída de dentro do texto).
+async function lerPendenciasAteHoje(page) {
+    await page.goto(PENDENCIAS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+    await esperar(3000)
+    await fecharModaisPromocionais(page)
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'pendencias.png') }).catch(() => {})
+
+    const linhas = await page.evaluate(() => {
+        const els = [...document.querySelectorAll('table tbody tr, [class*="row" i]')]
+        return els.map(l => (l.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+    })
+
+    const hoje = new Date()
+    hoje.setHours(0, 0, 0, 0)
+    const resultado = []
+    for (const texto of linhas) {
+        const m = texto.match(/(\d{2})\/(\d{2})\/(\d{4})/)
+        if (!m) continue
+        const data = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]))
+        if (data <= hoje) resultado.push({ texto, data: `${m[1]}/${m[2]}/${m[3]}` })
+    }
+    return resultado
+}
+
+// Orquestra: abre o navegador, garante login, lê /controle/pendencias e devolve só as
+// atrasadas até hoje. Usa o mesmo mutex/browser persistente das outras operações.
+async function listarPendenciasAteHoje({ onStatus } = {}) {
+    if (ocupado) throw new Error('Navegador do Planner ocupado com outra operação — tente de novo em instantes.')
+    ocupado = true
+    try {
+        const { page } = await abrirPlannerBrowser()
+        await garantirLogado(page, onStatus)
+        return await lerPendenciasAteHoje(page)
+    } finally {
+        ocupado = false
+    }
+}
+
 // Entre as categorias COM limite definido (exclui CATEGORIAS_SEM_LIMITE_PARA_SUGESTAO e a própria
 // categoria estourada), retorna as 2 com mais saldo disponível (planejado - realizado), maior folga primeiro.
 function sugerirCategoriasComFolga(realizadosTodos, categoriaEstourada) {
@@ -1093,6 +1134,7 @@ module.exports = {
     RECEITA_BASE_MENSAL,
     limitesPorItem,
     lerLancamentosDoMesAtual,
+    listarPendenciasAteHoje,
     CATEGORIAS_ESSENCIAIS,
     CATEGORIAS_SEMI_ESSENCIAIS,
     CATEGORIAS_NAO_ESSENCIAIS,
