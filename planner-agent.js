@@ -748,30 +748,14 @@ async function lerBalancoMensalCompleto(page) {
     })
 }
 
-// Nomes conhecidos (subcategoria, ou categoria quando ela não tem sub) ordenados do mais
-// específico pro mais genérico — usado pra reconhecer de qual item se trata dentro do texto
-// cru de uma linha de pendência (mesma ideia de NOMES_ITEM_GASTO em Zaya.js, mas aqui não dá
-// pra reaproveitar direto porque esse array vive no outro arquivo).
-function nomesConhecidosOrdenados() {
-    const nomes = []
-    for (const [cat, info] of Object.entries(PLANEJAMENTO)) {
-        const subs = Object.keys(info.subs)
-        nomes.push(...(subs.length ? subs : [cat]))
-    }
-    return nomes.sort((a, b) => b.length - a.length)
-}
-
-// Acha o item (subcategoria/categoria) mencionado no texto da linha, ou "Outros" se não
-// reconhecer nenhum — mesmo fallback usado no resto do código (EMOJIS['Outros'] = 📦).
-function identificarItemPendencia(texto) {
-    const lower = texto.toLowerCase()
-    return nomesConhecidosOrdenados().find(n => lower.includes(n.toLowerCase())) || 'Outros'
-}
-
 // Lê /controle/pendencias e retorna só as pendências com vencimento HOJE ou ANTERIOR (atrasadas
-// até hoje) — cada item como { texto, data, dataCurta, valor, nomeItem }. texto = linha inteira
-// crua (só pra log/debug); os demais campos já vêm estruturados pra montar a mensagem no
-// mesmo padrão visual dos lançamentos.
+// até hoje) — cada item como { data, dataCurta, valor, nomeItem, textoCompleto }.
+// IMPORTANTE: nomeItem vem da célula real da linha (não de um "achismo" comparando o texto
+// contra a lista de categorias conhecidas — isso dava "Outros" pra qualquer descrição/parcela
+// que não batesse com nome de categoria, ex: nome de pessoa numa parcela). Cada linha é lida
+// célula por célula (:scope > td); identifica a célula de data e a de valor por padrão, e usa
+// a ÚLTIMA célula de texto restante (a mais perto do valor, mesma posição de subcategoria/
+// descrição/cartão em /controle/lancamentos) como nomeItem — seja lá qual for o texto real ali.
 async function lerPendenciasAteHoje(page) {
     await page.goto(PENDENCIAS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
     await esperar(3000)
@@ -779,26 +763,38 @@ async function lerPendenciasAteHoje(page) {
     await page.screenshot({ path: path.join(DEBUG_DIR, 'pendencias.png') }).catch(() => {})
 
     const linhas = await page.evaluate(() => {
-        const els = [...document.querySelectorAll('table tbody tr, [class*="row" i]')]
-        return els.map(l => (l.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+        const trs = [...document.querySelectorAll('table tbody tr')]
+        return trs
+            .map(tr => [...tr.querySelectorAll(':scope > td')].map(td => (td.innerText || td.textContent || '').replace(/\s+/g, ' ').trim()))
+            .filter(tds => tds.length >= 2)
     })
 
     const hoje = new Date()
     hoje.setHours(0, 0, 0, 0)
     const resultado = []
-    for (const texto of linhas) {
-        const m = texto.match(/(\d{2})\/(\d{2})\/(\d{4})/)
-        if (!m) continue
+    for (const tds of linhas) {
+        const dataIdx = tds.findIndex(t => /^\d{2}\/\d{2}\/\d{4}$/.test(t))
+        if (dataIdx < 0) continue
+        const m = tds[dataIdx].match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
         const data = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]))
-        if (data <= hoje) {
-            resultado.push({
-                texto,
-                data: `${m[1]}/${m[2]}/${m[3]}`,
-                dataCurta: `${m[1]}/${m[2]}`,
-                valor: primeiroValorMoeda(texto),
-                nomeItem: identificarItemPendencia(texto),
-            })
-        }
+        if (data > hoje) continue
+
+        const valorIdx = tds.findIndex(t => /^R?\$?\s*[\d.]*\d,\d{2}$/.test(t))
+        const valor = valorIdx >= 0 ? primeiroValorMoeda(tds[valorIdx]) : primeiroValorMoeda(tds.join(' '))
+
+        // Células descritivas = tudo que sobrou (fora data/valor/status) e tem texto real
+        // (exclui vazio/ícone e o próprio rótulo de status).
+        const descritivas = tds.filter((t, i) => i !== dataIdx && i !== valorIdx
+            && t.length > 1 && !/^(pendente|conclu[íi]do|atrasad[ao]|vencid[ao])$/i.test(t))
+        const nomeItem = descritivas.length ? descritivas[descritivas.length - 1] : 'Outros'
+
+        resultado.push({
+            data: tds[dataIdx],
+            dataCurta: `${m[1]}/${m[2]}`,
+            valor,
+            nomeItem,
+            textoCompleto: tds.join(' '),
+        })
     }
     return resultado
 }

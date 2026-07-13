@@ -803,7 +803,11 @@ async function formatarPendencias({ onStatus } = {}) {
     // Mesmo padrão visual das confirmações de lançamento (✅ Anotado no Planner! / ✅ Despesa
     // registrada!), sem linha de prioridade — só o essencial: item, valor, vencimento.
     return pendencias.map(p => {
-        const emoji = plannerAgent.emojiPara(p.nomeItem, p.nomeItem)
+        // nomeItem raramente bate com uma categoria/subcategoria conhecida (costuma ser
+        // descrição livre, ex: nome de quem recebe uma parcela) — emojiPara cai pro fallback
+        // genérico (📦) nesses casos; se a linha menciona cartão/parcela, usa 💳 em vez disso.
+        let emoji = plannerAgent.emojiPara(p.nomeItem, p.nomeItem)
+        if (emoji === '📦' && /cart[ãa]o|parcela/i.test(p.textoCompleto || '')) emoji = '💳'
         const valorTxt = p.valor != null ? formatarBR(p.valor) : '?'
         return `⚠️ Conta pendente!\n\n${emoji} R$ ${valorTxt} em ${p.nomeItem} — venceu ${p.dataCurta}`
     })
