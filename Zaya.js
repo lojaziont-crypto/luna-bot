@@ -439,6 +439,13 @@ function pareceDespesa(texto) {
     const temValor = /\d[,.]\d{1,2}/.test(lower) || /r\$\s*\d/.test(lower) || /\d\s*(reais|r\$|\$)/i.test(lower) || /\b\d{1,4}\b/.test(lower)
     if (!temValor) return false
 
+    // Sinal de conta FUTURA (data/vencimento) — não depende de bater em NOMES_ITEM_GASTO,
+    // já que conta futura costuma vir sem categoria reconhecível (ex: "no cartão", "fatura
+    // do Thiago"), só com valor + quando vai vencer/chegar. Sem isso a mensagem caía direto
+    // no Claude conversacional, que nunca lança nada de verdade no Planner.
+    const PADRAO_VENCIMENTO = /\bdia\s*\d{1,2}\b|\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\bvai (vir|cair|chegar)\b|\bvence(u)?\b|\bvencimento\b/i
+    if (PADRAO_VENCIMENTO.test(lower)) return true
+
     return NOMES_ITEM_GASTO.some(n => n.length > 2 && lower.includes(n.toLowerCase()))
 }
 
@@ -606,6 +613,10 @@ async function processarComandoRegistrarNoPlanner(sock, from) {
             onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
         })
         await sock.sendMessage(from, { text: msg })
+        return
+    }
+    if (resultado.tipo === 'conta_futura') {
+        await processarContaFuturaPlanner(sock, from, resultado.contexto, resultado.vencimento)
         return
     }
     if (resultado.tipo === 'despesa' || resultado.tipo === 'receita') {

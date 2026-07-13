@@ -213,14 +213,16 @@ function pareceComandoRegistrar(texto) {
 
 // Usa o contexto recente (mensagens anteriores do dono, SEM a própria mensagem "anote...")
 // pra descobrir o que ele quer registrar, reaproveitando classificarMensagem sobre o texto
-// concatenado. Se vier "despesa"/"receita", quem chama ainda precisa extrair os campos reais
-// via plannerAgent.interpretarDespesa(contexto) — aqui só decidimos o quê registrar.
-// Retorna { tipo: 'despesa'|'receita'|'conta_luz'|'nenhum', contexto?, valorConta?, vencimento? }
+// concatenado. Se vier "despesa"/"receita"/"conta_futura", quem chama ainda precisa extrair
+// os campos reais via plannerAgent.interpretarDespesa(contexto) — aqui só decidimos o quê
+// registrar.
+// Retorna { tipo: 'despesa'|'receita'|'conta_luz'|'conta_futura'|'nenhum', contexto?, valorConta?, vencimento? }
 async function processarComandoRegistrar(mensagensRecentes) {
     const contexto = (mensagensRecentes || []).filter(Boolean).join('\n').trim()
     if (!contexto) return { tipo: 'nenhum' }
     const classificacao = await classificarMensagem(contexto)
     if (classificacao.tipo === 'conta_luz') return classificacao
+    if (classificacao.tipo === 'conta_futura') return { ...classificacao, contexto }
     if (classificacao.tipo === 'despesa' || classificacao.tipo === 'receita') {
         return { tipo: classificacao.tipo, contexto }
     }
@@ -343,6 +345,9 @@ Se a mensagem for SÓ uma saudação/social ("oi", "oi Zaya", "tudo bem?", "bom 
 Nesse caso específico (só cumprimento), não precisa começar com "Maurício," se soar mais natural sem.
 Exemplos corretos: "Maurício, oi! Tudo certo por aqui. 😊" / "Opa! Por aqui tudo bem. 👋"
 Errado: responder ao cumprimento com análise de saldo, contas atrasadas ou qualquer dado financeiro sem ele ter pedido.
+
+═══ NUNCA FINGIR QUE ALGO FOI LANÇADO ═══
+Você está numa conversa de CONSULTA — não tem nenhum poder de gravar nada no Planner, nem de salvar dado financeiro nenhum. Se você está respondendo, é porque a informação NÃO foi lançada de verdade (quem lança é a automação da Zaya, por fora desta conversa). NUNCA diga "já tá anotado", "anotado aqui", "já registrei", "pode deixar que eu anoto", "anota aí pra pagar quando o salário cair" ou qualquer frase que sugira que algo foi salvo/lançado/registrado — isso é falso e o Maurício vai achar que uma conta está no Planner quando não está. Se ele mencionar uma despesa, receita ou conta futura (com valor) nesta pergunta, não confirme nada — diga que ele precisa mandar o valor e a data/categoria numa mensagem direta pra Zaya lançar de verdade, ex: "Maurício, me manda o valor e quando vence numa mensagem separada que eu já registro certinho no Planner."
 
 ═══ TOM E FORMATO — REGRAS RÍGIDAS (NÃO NEGOCIÁVEIS) ═══
 - Comece com "Maurício," na grande maioria das respostas (exceção: saudação pura, ver regra acima).
@@ -607,7 +612,7 @@ async function registrarContaFutura(dados, vencimento, { onStatus } = {}) {
         return plannerAgent.formatarRespostaWhatsApp(resultado)
     }
     const emoji = plannerAgent.emojiPara(dados.categoria, dados.subcategoria)
-    return `✅ Anotado!\n\n${emoji} R$ ${formatarBR(dados.valor)} em ${resultado.nomeItem} — vence ${dataParaBRTxt(dataISO)}\n\n⚠️ Não afeta o limite de ${nomeMes(mesAtual())}.`
+    return `✅ Anotado no Planner!\n\n${emoji} R$ ${formatarBR(dados.valor)} em ${resultado.nomeItem} — vence ${dataParaBRTxt(dataISO)}\n\n⚠️ Não afeta o limite de ${nomeMes(mesAtual())}.`
 }
 
 // Registro só em memória — não lança despesa no Planner, porque o valor TOTAL da compra
