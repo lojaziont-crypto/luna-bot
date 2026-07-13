@@ -236,12 +236,16 @@ async function processarComandoRegistrar(mensagensRecentes) {
 function calcularRitmoItem(limite, realizado) {
     const ultimoDia = diasDoMes()
     const dia = diaAtualDoMes()
+    const diasRestantes = ultimoDia - dia + 1
     const limiteDiario = limite / ultimoDia
     const gastoEsperadoAteHoje = limiteDiario * dia
     const saldoRitmo = gastoEsperadoAteHoje - realizado
     const disponivelTotal = limite - realizado
-    const podeGastarHoje = Math.max(0, Math.min(limiteDiario + Math.max(0, saldoRitmo), disponivelTotal))
-    return { limiteDiario, gastoEsperadoAteHoje, saldoRitmo, disponivelTotal, podeGastarHoje }
+    // "Quanto dá pra gastar hoje" = o que sobrou no mês dividido pelos dias que faltam
+    // (incluindo hoje) — divisão simples, sem suavizar por ritmo. Pedido explícito do dono
+    // após comparar com a conta manual dele (sobrou R$167,55, faltam 20 dias → R$8,37/dia).
+    const podeGastarHoje = Math.max(0, disponivelTotal / diasRestantes)
+    return { limiteDiario, gastoEsperadoAteHoje, saldoRitmo, disponivelTotal, podeGastarHoje, diasRestantes }
 }
 
 // Score financeiro 0-10. É um heurístico com base no estado ATUAL (o bot é novo, ainda não
@@ -321,8 +325,12 @@ Saúde/higiene: máx 5% (R$174)
 Lazer: máx 5% (R$174)
 Reserva de emergência: crescer até 10% (R$348/mês)
 
-═══ CÁLCULOS (já vêm prontos nos dados reais abaixo, você só interpreta) ═══
+═══ CÁLCULOS (já vêm prontos nos dados reais abaixo — SEMPRE use os valores exatos dali, NUNCA calcule de cabeça nem invente um número aproximado) ═══
 Limite diário = limite mensal ÷ dias do mês. Saldo de ritmo = gasto esperado até hoje − gasto real até hoje (positivo = folga, negativo = atrasado). Folga mensal = receita − gasto total − contas fixas não pagas. Parcela segura máxima = folga mensal futura × 30%.
+"Pode gastar hoje" (o que responder quando ele perguntar "quanto posso gastar em X hoje") = disponível no mês da categoria ÷ dias restantes do mês (incluindo hoje) — esse valor já vem PRONTO em cada linha de categoria abaixo ("pode gastar hoje (disponível ÷ dias restantes)"), é só copiar o número de lá.
+
+═══ PERGUNTAS DE "QUANTO TENHO/POSSO GASTAR EM X" ═══
+Localize a linha EXATA daquela categoria/subcategoria na lista "Por categoria/subcategoria" dos DADOS REAIS abaixo e responda só com os números daquela linha ("disponível no mês" e "pode gastar hoje"). NUNCA use um número de outra categoria, do saldo total do mês ou de qualquer outro cálculo — se não achar a linha exata daquilo que ele perguntou, diga que não achou o dado em vez de estimar ou aproximar.
 
 ═══ COMO RESPONDER QUANDO ELE PERGUNTAR SOBRE UM GASTO ═══
 Antes de responder QUALQUER pergunta sobre gasto/compra — mesmo pequena, tipo "quero comprar um sorvete" — verifique OBRIGATORIAMENTE as prioridades e pendências reais abaixo (contas de luz atrasadas, parcelas ativas). Se houver algo relevante pra decisão, mencione mesmo que ele não tenha perguntado sobre isso especificamente — nunca aprove um gasto pequeno ignorando uma pendência maior em aberto. Ainda assim, mesmo mencionando a pendência, a resposta continua curta (1 mensagem, até 2 linhas): não é pra virar um resumo geral, só uma frase juntando os dois fatos.
@@ -376,7 +384,7 @@ function montarContextoDados(resumo, mem) {
         const realizado = resumo.porItem[item] || 0
         const { saldoRitmo, disponivelTotal, podeGastarHoje } = calcularRitmoItem(limite, realizado)
         const ritmoTxt = saldoRitmo >= 0 ? `em dia (R$${formatarBR(saldoRitmo)} de folga)` : `atrasado (R$${formatarBR(Math.abs(saldoRitmo))} acima do esperado)`
-        return `- ${item}: gasto R$${formatarBR(realizado)} de R$${formatarBR(limite)} | disponível no mês: R$${formatarBR(disponivelTotal)} | pode gastar hoje sem atrasar ritmo: R$${formatarBR(podeGastarHoje)} | ritmo: ${ritmoTxt}`
+        return `- ${item}: gasto R$${formatarBR(realizado)} de R$${formatarBR(limite)} | disponível no mês: R$${formatarBR(disponivelTotal)} | pode gastar hoje (disponível ÷ dias restantes): R$${formatarBR(podeGastarHoje)} | ritmo: ${ritmoTxt}`
     })
     for (const item of ['Uber', '99']) {
         if (resumo.porItem[item] != null) {
@@ -751,7 +759,7 @@ function formatarCategoria(item, resumo, mem) {
     if (disponivelTotal < 0) {
         return `Maurício, *${item}* já estourou — você usou R$${formatarBR(realizado)} de R$${formatarBR(limite)} (R$${formatarBR(Math.abs(disponivelTotal))} acima do planejado). Melhor segurar por aqui esse mês. ⚠️`
     }
-    return `Maurício, em *${item}* você já usou R$${formatarBR(realizado)} de R$${formatarBR(limite)}. Sobram R$${formatarBR(disponivelTotal)} no mês — hoje dá pra gastar até R$${formatarBR(podeGastarHoje)} sem atrasar o ritmo.`
+    return `Maurício, em *${item}* você já usou R$${formatarBR(realizado)} de R$${formatarBR(limite)}. Sobram R$${formatarBR(disponivelTotal)} no mês — hoje dá pra gastar até R$${formatarBR(podeGastarHoje)}.`
 }
 
 function formatarDesafio(mem, resumo) {
