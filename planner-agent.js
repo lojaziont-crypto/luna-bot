@@ -205,9 +205,12 @@ REGRAS:
 - status: "Pendente" se a mensagem indicar que a conta AINDA NÃO foi paga (ex: "pendente", "a pagar", "vence",
   "venceu", "atrasada"); "Concluído" se indicar que já foi paga (ex: "paguei", "quitei", "já paguei", "pago") ou
   se não houver nenhuma indicação clara — "Concluído" é o padrão.
+- cartao: nome de quem é o cartão de crédito ou identificação do cartão, SOMENTE se a mensagem mencionar isso
+  explicitamente (ex: "cartão do Thiago", "cartão de crédito do Thiago Santana", "no cartão Nubank"). Extraia só o
+  nome/identificação (ex: "Thiago Santana", "Nubank"), sem a palavra "cartão". Caso não seja mencionado, "".
 
 Responda EXCLUSIVAMENTE em JSON, sem texto fora do JSON:
-{"valor": 0.00, "categoria": "...", "subcategoria": "...", "data": "AAAA-MM-DD", "confianca": 0.0, "status": "Concluído"}`
+{"valor": 0.00, "categoria": "...", "subcategoria": "...", "data": "AAAA-MM-DD", "confianca": 0.0, "status": "Concluído", "cartao": ""}`
 
 // Retorna { ok, dados?, motivo? }. dados = { valor, categoria, subcategoria, descricao, data, status, confianca }
 async function interpretarDespesa(texto) {
@@ -262,8 +265,9 @@ async function interpretarDespesa(texto) {
     const descricao = subcategoria || categoria
 
     const status = bruto.status === 'Pendente' ? 'Pendente' : 'Concluído'
+    const cartao = typeof bruto.cartao === 'string' ? bruto.cartao.trim() : ''
 
-    const dados = { valor, categoria, subcategoria, descricao, data, status, confianca: Number.isFinite(confianca) ? confianca : 0.5 }
+    const dados = { valor, categoria, subcategoria, descricao, data, status, cartao, confianca: Number.isFinite(confianca) ? confianca : 0.5 }
 
     if (dados.confianca < 0.6) {
         return { ok: false, precisaConfirmar: true, dados, motivo: `Fiquei em dúvida se é *${categoria}*${subcategoria ? ` / ${subcategoria}` : ''}.` }
@@ -632,7 +636,7 @@ async function preencherLinhaLancamento(page, dados) {
     }
 
     // td[0]=checkbox, td[1]=data evento, td[2]=data efetivação, td[3]=categoria,
-    // td[4]=subcategoria, td[5]=inst.financeira(skip), td[6]=cartão(skip),
+    // td[4]=subcategoria, td[5]=inst.financeira(skip), td[6]=cartão,
     // td[7]=descrição, td[8]=valor, td[9]=status, td[10]=botões
     await setarInput(celulas[1], dados.data)   // input[type="date"] — formato YYYY-MM-DD
     await esperar(200)
@@ -657,6 +661,22 @@ async function preencherLinhaLancamento(page, dados) {
             await page.screenshot({ path: path.join(DEBUG_DIR, 'subcategoria_obrigatoria_faltando.png') }).catch(() => {})
             throw new Error(`Categoria "${dados.categoria}" exige uma subcategoria e nenhuma foi identificada`)
         }
+    }
+    if (dados.cartao) {
+        // Célula 6 (cartão) pode ser <select> (cartões já cadastrados no site) ou <input>
+        // livre, dependendo da conta — tenta select primeiro (match exato, case-insensitive),
+        // cai pro input se não houver select ou a opção não existir. Nunca crítico: se nenhum
+        // dos dois funcionar, só avisa e segue o lançamento sem travar por causa desse campo.
+        try {
+            await selecionar(celulas[6], dados.cartao)
+        } catch (e) {
+            try {
+                await setarInput(celulas[6], dados.cartao)
+            } catch (e2) {
+                console.log(`⚠️  [Planner] Cartão "${dados.cartao}" não preenchido: ${e2.message}`)
+            }
+        }
+        await esperar(200)
     }
     await setarInput(celulas[7], dados.descricao)
     await esperar(200)
