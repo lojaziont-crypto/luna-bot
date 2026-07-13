@@ -800,7 +800,13 @@ async function formatarPendencias({ onStatus } = {}) {
     if (!pendencias.length) {
         return ['Maurício, nenhuma pendência atrasada até hoje. ✅']
     }
-    return pendencias.map(p => `⚠️ Pendência (venceu ${p.data}): ${p.texto}`)
+    // Mesmo padrão visual das confirmações de lançamento (✅ Anotado no Planner! / ✅ Despesa
+    // registrada!), sem linha de prioridade — só o essencial: item, valor, vencimento.
+    return pendencias.map(p => {
+        const emoji = plannerAgent.emojiPara(p.nomeItem, p.nomeItem)
+        const valorTxt = p.valor != null ? formatarBR(p.valor) : '?'
+        return `⚠️ Conta pendente!\n\n${emoji} R$ ${valorTxt} em ${p.nomeItem} — venceu ${p.dataCurta}`
+    })
 }
 
 // Dispatcher dos comandos rápidos — retorna um ARRAY de mensagens (mesmo contrato de

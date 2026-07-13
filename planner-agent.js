@@ -748,9 +748,30 @@ async function lerBalancoMensalCompleto(page) {
     })
 }
 
+// Nomes conhecidos (subcategoria, ou categoria quando ela não tem sub) ordenados do mais
+// específico pro mais genérico — usado pra reconhecer de qual item se trata dentro do texto
+// cru de uma linha de pendência (mesma ideia de NOMES_ITEM_GASTO em Zaya.js, mas aqui não dá
+// pra reaproveitar direto porque esse array vive no outro arquivo).
+function nomesConhecidosOrdenados() {
+    const nomes = []
+    for (const [cat, info] of Object.entries(PLANEJAMENTO)) {
+        const subs = Object.keys(info.subs)
+        nomes.push(...(subs.length ? subs : [cat]))
+    }
+    return nomes.sort((a, b) => b.length - a.length)
+}
+
+// Acha o item (subcategoria/categoria) mencionado no texto da linha, ou "Outros" se não
+// reconhecer nenhum — mesmo fallback usado no resto do código (EMOJIS['Outros'] = 📦).
+function identificarItemPendencia(texto) {
+    const lower = texto.toLowerCase()
+    return nomesConhecidosOrdenados().find(n => lower.includes(n.toLowerCase())) || 'Outros'
+}
+
 // Lê /controle/pendencias e retorna só as pendências com vencimento HOJE ou ANTERIOR (atrasadas
-// até hoje) — cada item como { texto, data } (texto = linha inteira, crua, pra não depender de
-// adivinhar colunas específicas; data = "DD/MM/AAAA" extraída de dentro do texto).
+// até hoje) — cada item como { texto, data, dataCurta, valor, nomeItem }. texto = linha inteira
+// crua (só pra log/debug); os demais campos já vêm estruturados pra montar a mensagem no
+// mesmo padrão visual dos lançamentos.
 async function lerPendenciasAteHoje(page) {
     await page.goto(PENDENCIAS_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
     await esperar(3000)
@@ -769,7 +790,15 @@ async function lerPendenciasAteHoje(page) {
         const m = texto.match(/(\d{2})\/(\d{2})\/(\d{4})/)
         if (!m) continue
         const data = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]))
-        if (data <= hoje) resultado.push({ texto, data: `${m[1]}/${m[2]}/${m[3]}` })
+        if (data <= hoje) {
+            resultado.push({
+                texto,
+                data: `${m[1]}/${m[2]}/${m[3]}`,
+                dataCurta: `${m[1]}/${m[2]}`,
+                valor: primeiroValorMoeda(texto),
+                nomeItem: identificarItemPendencia(texto),
+            })
+        }
     }
     return resultado
 }
