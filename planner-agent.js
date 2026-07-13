@@ -1037,7 +1037,29 @@ async function gerarResumoFinanceiroDiario({ onStatus } = {}) {
         const { page } = await abrirPlannerBrowser()
         await garantirLogado(page, onStatus)
 
-        const { totalDespesasAjustado, receitaExtra, porItem, porDia, transacoes } = await lerLancamentosDoMesAtual(page)
+        const { receitaExtra, porItem, porDia, transacoes } = await lerLancamentosDoMesAtual(page)
+
+        // Categorias SEM subcategoria (Mercado, Academia, Lavanderia, etc.) têm o realizado
+        // substituído pelo valor real do Balanço Mensal — a soma calculada a partir dos
+        // lançamentos individuais já divergiu do que o site mostra (dono reportou Mercado
+        // errado 2x seguidas). Categorias COM subcategoria continuam usando a soma de
+        // lançamentos, porque é a única forma de isolar cada sub (o Balanço só dá o total
+        // da categoria inteira, não por subcategoria).
+        let realizadosBalanco = {}
+        try {
+            realizadosBalanco = await lerBalancoMensalCompleto(page)
+        } catch (e) {
+            console.log(`⚠️  [Planner] Não consegui ler o Balanço Mensal pro resumo: ${e.message}`)
+        }
+        for (const [cat, info] of Object.entries(PLANEJAMENTO)) {
+            if (Object.keys(info.subs).length || CATEGORIAS_IGNORAR_RESUMO.includes(cat)) continue
+            const doBalanco = realizadosBalanco[cat.toLowerCase()]
+            if (doBalanco != null) porItem[cat] = doBalanco
+        }
+        // Recalcula o total a partir do porItem já corrigido, pra ficar consistente com os
+        // valores por categoria mostrados/usados (em vez do total bruto somado direto dos
+        // lançamentos, que não reflete as substituições acima).
+        const totalDespesasAjustado = Object.values(porItem).reduce((s, v) => s + v, 0)
 
         const receitaTotal = RECEITA_BASE_MENSAL + receitaExtra
         const saldoProjetado = receitaTotal - totalDespesasAjustado
