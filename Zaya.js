@@ -925,7 +925,10 @@ async function connectToWhatsApp() {
             activeSock = null
 
             if (statusCode === DisconnectReason.loggedOut) {
-                console.log('🚪 Dispositivo desconectado pelo WhatsApp. Delete a pasta auth_info e reinicie.')
+                console.log('🚪 Dispositivo desconectado pelo WhatsApp — limpando sessão e gerando novo QR code...')
+                try { fs.rmSync(path.join(__dirname, 'auth_info'), { recursive: true, force: true }) } catch {}
+                if (reconnectTimer) clearTimeout(reconnectTimer)
+                reconnectTimer = setTimeout(() => { reconnectTimer = null; connectToWhatsApp() }, 3000)
             } else if (statusCode === DisconnectReason.connectionReplaced) {
                 console.log('⚠️ Sessão substituída (440) — deletando auth e exibindo novo QR code...')
                 try { fs.rmSync(path.join(__dirname, 'auth_info'), { recursive: true, force: true }) } catch {}
