@@ -516,19 +516,42 @@ async function listarSubcategoriasReais(categoria, { onStatus } = {}) {
 // Verifica se uma categoria já é conhecida — cache local PRIMEIRO, só acessa o site se
 // não achar nada salvo (requisito: "só atualizar do site se a categoria não estiver na
 // lista local"). Retorna o nome REAL exato (case do site), ou null se não existir.
+// Cache local primeiro; se não achar, consulta o painel real "Categorias e Limites"
+// (mais confiável que o dropdown quando há categorias com nomes duplicados no site —
+// ver lerCategoriasDoPainel/encontrarCategoriaNoPainel).
 async function verificarCategoriaExistente(nomeCategoria, { onStatus } = {}) {
     const doCache = categoriaConhecidaLocal(nomeCategoria)
     if (doCache) return doCache
-    const categoriasReais = await listarCategoriasDespesaReais({ onStatus })
-    return casarNome(nomeCategoria, categoriasReais)
+    if (ocupado) throw new Error('Já estou ocupado com outro lançamento — tente de novo em instantes.')
+    ocupado = true
+    try {
+        const { page } = await abrirFinanceiroBrowser()
+        await garantirLogado(page, onStatus)
+        const cards = await lerCategoriasDoPainel(page)
+        const encontrada = encontrarCategoriaNoPainel(cards, nomeCategoria, null)
+        if (encontrada) registrarCategoriaReal(encontrada.categoria)
+        return encontrada ? encontrada.categoria : null
+    } finally {
+        ocupado = false
+    }
 }
 
 // Mesma lógica para subcategoria, dado o nome REAL da categoria já resolvido
 async function verificarSubcategoriaExistente(categoriaReal, nomeSubcategoria, { onStatus } = {}) {
     const doCache = subcategoriaConhecidaLocal(categoriaReal, nomeSubcategoria)
     if (doCache) return doCache
-    const subsReais = await listarSubcategoriasReais(categoriaReal, { onStatus })
-    return casarNome(nomeSubcategoria, subsReais)
+    if (ocupado) throw new Error('Já estou ocupado com outro lançamento — tente de novo em instantes.')
+    ocupado = true
+    try {
+        const { page } = await abrirFinanceiroBrowser()
+        await garantirLogado(page, onStatus)
+        const cards = await lerCategoriasDoPainel(page)
+        const encontrada = encontrarCategoriaNoPainel(cards, categoriaReal, nomeSubcategoria)
+        if (encontrada?.subcategoria) registrarSubcategoriaReal(encontrada.categoria, encontrada.subcategoria)
+        return encontrada ? encontrada.subcategoria : null
+    } finally {
+        ocupado = false
+    }
 }
 
 async function preencherRestanteESalvar(page, dados) {
@@ -667,11 +690,54 @@ async function preencherFormularioNovaCategoria(page, nomeCategoria, nomeSubcate
 
 const MAX_TENTATIVAS_CRIACAO = 2
 
-// Cria a categoria (+ subcategoria opcional) e SÓ retorna sucesso depois de reabrir o
-// dropdown real de Categoria/Subcategoria e confirmar que ela aparece de verdade —
-// nunca assume que "clicou Salvar" == "foi criada". Tenta até MAX_TENTATIVAS_CRIACAO
-// vezes antes de desistir. Retorna { categoria, subcategoria } com os nomes EXATOS
-// confirmados no site (pra usar direto no lançamento, sem perguntar de novo ao usuário).
+// Lê o painel "Categorias e Limites" (aba Planejamento e Controle) direto pelos seletores
+// REAIS do card (confirmados por inspeção ao vivo em 2026-07-26):
+// - card: div.bg-white.border.border-slate-200.rounded-xl.p-4
+// - nome: p.font-semibold.text-slate-900 (primeiro do card)
+// - subcategorias: span.text-slate-600 dentro de div.space-y-1.border-t.border-slate-100.pt-2
+// Retorna UM ITEM POR CARD (pode haver nomes duplicados — o site NÃO impede criar a mesma
+// categoria mais de uma vez) — por isso a verificação de existência varre todos os cards
+// com aquele nome, nunca assume que o primeiro achado é o certo.
+async function lerCategoriasDoPainel(page) {
+    if (!page.url().includes('/financeiro')) {
+        await page.goto(FINANCEIRO_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+    }
+    await clicarAba(page, 'Planejamento e Controle')
+    await esperar(500)
+    return page.evaluate(() => {
+        const cards = [...document.querySelectorAll('div.bg-white.border.border-slate-200.rounded-xl.p-4')]
+        return cards.map(card => {
+            const nomeEl = card.querySelector('p.font-semibold.text-slate-900')
+            const subs = [...card.querySelectorAll('div.space-y-1.border-t.border-slate-100.pt-2 span.text-slate-600')]
+                .map(s => s.textContent.trim())
+            return { nome: nomeEl ? nomeEl.textContent.trim() : '', subs }
+        }).filter(c => c.nome)
+    })
+}
+
+// Verifica se uma categoria (+ subcategoria opcional) existe no painel, tolerando
+// categorias duplicadas (varre TODOS os cards com o nome, procura a subcategoria em
+// qualquer um deles). Retorna { categoria, subcategoria } com os nomes EXATOS do card
+// que bateu, ou null se não encontrar.
+function encontrarCategoriaNoPainel(cards, nomeCategoria, nomeSubcategoria) {
+    const norm = s => s.toString().trim().toLowerCase()
+    const candidatas = cards.filter(c => norm(c.nome) === norm(nomeCategoria))
+    if (!candidatas.length) return null
+    if (!nomeSubcategoria) return { categoria: candidatas[0].nome, subcategoria: null }
+    for (const c of candidatas) {
+        const subReal = c.subs.find(s => norm(s) === norm(nomeSubcategoria))
+        if (subReal) return { categoria: c.nome, subcategoria: subReal }
+    }
+    return null
+}
+
+// Cria a categoria (+ subcategoria opcional) e SÓ retorna sucesso depois de conferir no
+// painel real "Categorias e Limites" que ela aparece de verdade — nunca assume que
+// "clicou Salvar" == "foi criada". Verifica ANTES de criar também (evita duplicar uma
+// categoria que já existe — o site não tem nenhuma validação de nome único, então
+// recriar sem checar antes gera duplicatas reais, como já aconteceu em produção).
+// Tenta criar até MAX_TENTATIVAS_CRIACAO vezes antes de desistir. Retorna
+// { categoria, subcategoria } com os nomes EXATOS confirmados no site.
 async function criarCategoriaComSubcategoria(nomeCategoria, nomeSubcategoria, { onStatus } = {}) {
     if (ocupado) throw new Error('Já estou ocupado com outro lançamento — tente de novo em instantes.')
     ocupado = true
@@ -680,36 +746,30 @@ async function criarCategoriaComSubcategoria(nomeCategoria, nomeSubcategoria, { 
         ;({ page } = await abrirFinanceiroBrowser())
         await garantirLogado(page, onStatus)
 
+        let cards = await lerCategoriasDoPainel(page)
+        let encontrada = encontrarCategoriaNoPainel(cards, nomeCategoria, nomeSubcategoria)
+        if (encontrada) {
+            if (encontrada.subcategoria) registrarSubcategoriaReal(encontrada.categoria, encontrada.subcategoria)
+            else registrarCategoriaReal(encontrada.categoria)
+            console.log(`✅ [Financeiro] Categoria já existia no site: ${encontrada.categoria}${encontrada.subcategoria ? ' / ' + encontrada.subcategoria : ''}`)
+            return { categoria: encontrada.categoria, subcategoria: encontrada.subcategoria }
+        }
+
         for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_CRIACAO; tentativa++) {
             await clicarAba(page, 'Planejamento e Controle')
             await esperar(500)
             await preencherFormularioNovaCategoria(page, nomeCategoria, nomeSubcategoria)
 
-            // Verificação de verdade: reabre o modal de Saída e confere no dropdown real
-            await abrirModalSaida(page)
-            await abrirComboBox(page, 'Categoria')
-            const categoriasReais = await lerOpcoesComboBoxAberto(page)
-            const categoriaConfirmada = casarNome(nomeCategoria, categoriasReais)
+            cards = await lerCategoriasDoPainel(page)
+            encontrada = encontrarCategoriaNoPainel(cards, nomeCategoria, nomeSubcategoria)
 
-            let subConfirmada = null
-            if (categoriaConfirmada && nomeSubcategoria) {
-                await clicarOpcao(page, categoriaConfirmada)
-                await esperar(800)
-                await abrirComboBox(page, 'Subcategoria')
-                const subsReais = await lerOpcoesComboBoxAberto(page)
-                subConfirmada = casarNome(nomeSubcategoria, subsReais)
-                if (subConfirmada) registrarCategoriaReal(categoriaConfirmada, subsReais)
-            } else if (categoriaConfirmada) {
-                registrarCategoriaReal(categoriaConfirmada)
+            if (encontrada) {
+                if (encontrada.subcategoria) registrarSubcategoriaReal(encontrada.categoria, encontrada.subcategoria)
+                else registrarCategoriaReal(encontrada.categoria)
+                console.log(`✅ [Financeiro] Categoria confirmada no site: ${encontrada.categoria}${encontrada.subcategoria ? ' / ' + encontrada.subcategoria : ''} (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO})`)
+                return { categoria: encontrada.categoria, subcategoria: encontrada.subcategoria }
             }
-            await fecharModal(page)
-
-            const precisaSub = !!nomeSubcategoria
-            if (categoriaConfirmada && (!precisaSub || subConfirmada)) {
-                console.log(`✅ [Financeiro] Categoria confirmada no site: ${categoriaConfirmada}${subConfirmada ? ' / ' + subConfirmada : ''} (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO})`)
-                return { categoria: categoriaConfirmada, subcategoria: subConfirmada || null }
-            }
-            console.log(`⚠️  [Financeiro] Categoria/subcategoria não apareceu no site após criar (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO}) — tentando de novo...`)
+            console.log(`⚠️  [Financeiro] Categoria/subcategoria não apareceu no painel após criar (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO}) — tentando de novo...`)
         }
 
         throw new Error(`Não consegui confirmar a categoria "${nomeCategoria}"${nomeSubcategoria ? ` / subcategoria "${nomeSubcategoria}"` : ''} no site após ${MAX_TENTATIVAS_CRIACAO} tentativas`)
@@ -718,21 +778,19 @@ async function criarCategoriaComSubcategoria(nomeCategoria, nomeSubcategoria, { 
     }
 }
 
+// Clica no lápis (editar) do card cujo nome bate — o primeiro botão do card é sempre o
+// de editar (confirmado por inspeção: classe hover:text-primary no lápis, hover:text-red-600
+// na lixeira, nessa ordem no DOM). Se houver duplicatas com o mesmo nome, edita a primeira.
 async function clicarEditarCategoria(page, nomeCategoria) {
-    // Risco não verificado: acha o card da categoria pelo nome exato e sobe até achar
-    // um contêiner com 2+ botões visíveis (lápis + lixeira), clicando o primeiro
-    // (lápis, assumido como o botão de editar por ordem visual observada ao vivo).
     const clicouEditar = await page.evaluate((nome) => {
-        const nomeEl = [...document.querySelectorAll('*')].find(el =>
-            el.children.length === 0 && el.textContent.trim() === nome)
-        if (!nomeEl) return false
-        let container = nomeEl.parentElement
-        for (let i = 0; i < 6 && container; i++) {
-            const botoes = [...container.querySelectorAll('button')].filter(b => b.offsetParent !== null)
-            if (botoes.length >= 2) { botoes[0].click(); return true }
-            container = container.parentElement
-        }
-        return false
+        const norm = s => s.trim().toLowerCase()
+        const card = [...document.querySelectorAll('div.bg-white.border.border-slate-200.rounded-xl.p-4')]
+            .find(el => norm(el.querySelector('p.font-semibold.text-slate-900')?.textContent || '') === norm(nome))
+        if (!card) return false
+        const btn = card.querySelector('button')
+        if (!btn) return false
+        btn.click()
+        return true
     }, nomeCategoria)
     if (!clicouEditar) {
         await page.screenshot({ path: path.join(DEBUG_DIR, 'categoria_editar_nao_encontrada.png') }).catch(() => {})
@@ -742,8 +800,9 @@ async function clicarEditarCategoria(page, nomeCategoria) {
 }
 
 // Adiciona uma subcategoria nova a uma categoria JÁ EXISTENTE (abre via lápis de edição),
-// verifica de verdade no dropdown real antes de dar como concluído (mesma lógica de
-// retry/verificação de criarCategoriaComSubcategoria). Retorna o nome EXATO confirmado.
+// verifica no painel real antes de criar (evita duplicar) e depois de criar (confirma
+// que funcionou) — mesma lógica de criarCategoriaComSubcategoria. Retorna o nome EXATO
+// confirmado no site.
 async function adicionarSubcategoriaEmCategoriaExistente(nomeCategoria, nomeSubcategoria, { onStatus } = {}) {
     if (ocupado) throw new Error('Já estou ocupado com outro lançamento — tente de novo em instantes.')
     ocupado = true
@@ -751,6 +810,14 @@ async function adicionarSubcategoriaEmCategoriaExistente(nomeCategoria, nomeSubc
     try {
         ;({ page } = await abrirFinanceiroBrowser())
         await garantirLogado(page, onStatus)
+
+        let cards = await lerCategoriasDoPainel(page)
+        let encontrada = encontrarCategoriaNoPainel(cards, nomeCategoria, nomeSubcategoria)
+        if (encontrada) {
+            registrarSubcategoriaReal(encontrada.categoria, encontrada.subcategoria)
+            console.log(`✅ [Financeiro] Subcategoria já existia no site: ${encontrada.categoria} / ${encontrada.subcategoria}`)
+            return { categoria: encontrada.categoria, subcategoria: encontrada.subcategoria }
+        }
 
         for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_CRIACAO; tentativa++) {
             await clicarAba(page, 'Planejamento e Controle')
@@ -760,27 +827,14 @@ async function adicionarSubcategoriaEmCategoriaExistente(nomeCategoria, nomeSubc
             await page.screenshot({ path: path.join(DEBUG_DIR, 'subcategoria_antes_salvar.png') }).catch(() => {})
             await clicarSalvarCategoria(page)
 
-            // Verificação de verdade contra o dropdown real
-            await abrirModalSaida(page)
-            await abrirComboBox(page, 'Categoria')
-            const categoriasReais = await lerOpcoesComboBoxAberto(page)
-            const categoriaReal = casarNome(nomeCategoria, categoriasReais)
-            let subConfirmada = null
-            if (categoriaReal) {
-                await clicarOpcao(page, categoriaReal)
-                await esperar(800)
-                await abrirComboBox(page, 'Subcategoria')
-                const subsReais = await lerOpcoesComboBoxAberto(page)
-                subConfirmada = casarNome(nomeSubcategoria, subsReais)
-                if (subConfirmada) registrarCategoriaReal(categoriaReal, subsReais)
+            cards = await lerCategoriasDoPainel(page)
+            encontrada = encontrarCategoriaNoPainel(cards, nomeCategoria, nomeSubcategoria)
+            if (encontrada) {
+                registrarSubcategoriaReal(encontrada.categoria, encontrada.subcategoria)
+                console.log(`✅ [Financeiro] Subcategoria confirmada no site: ${encontrada.categoria} / ${encontrada.subcategoria} (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO})`)
+                return { categoria: encontrada.categoria, subcategoria: encontrada.subcategoria }
             }
-            await fecharModal(page)
-
-            if (categoriaReal && subConfirmada) {
-                console.log(`✅ [Financeiro] Subcategoria confirmada no site: ${categoriaReal} / ${subConfirmada} (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO})`)
-                return { categoria: categoriaReal, subcategoria: subConfirmada }
-            }
-            console.log(`⚠️  [Financeiro] Subcategoria não apareceu no site após criar (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO}) — tentando de novo...`)
+            console.log(`⚠️  [Financeiro] Subcategoria não apareceu no painel após criar (tentativa ${tentativa}/${MAX_TENTATIVAS_CRIACAO}) — tentando de novo...`)
         }
 
         throw new Error(`Não consegui confirmar a subcategoria "${nomeSubcategoria}" em "${nomeCategoria}" no site após ${MAX_TENTATIVAS_CRIACAO} tentativas`)
@@ -824,34 +878,20 @@ async function clicarSalvarCategoria(page) {
 }
 
 // Lê a aba "Planejamento e Controle" pra dar contexto de categorias já cadastradas ao
-// prompt do Groq. Tolerante a erro de parsing — usado só como dica, não como validação
-// (a validação de verdade é feita contra o <select> real no momento do lançamento).
+// prompt do Groq — usada só como dica, nunca pra validação real (essa é sempre contra o
+// painel/dropdown real no momento do lançamento). Mescla cards com o mesmo nome (o site
+// permite duplicatas) num único item, unindo as subcategorias, pra não poluir o prompt
+// com "Fornecedor" repetido várias vezes.
 async function listarPlanejamento(page) {
     try {
-        if (!page.url().includes('/financeiro')) {
-            await page.goto(FINANCEIRO_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {})
+        const cards = await lerCategoriasDoPainel(page)
+        const porNome = new Map() // nome (lowercase) -> { nome, subs: Set }
+        for (const c of cards) {
+            const chave = c.nome.toLowerCase()
+            if (!porNome.has(chave)) porNome.set(chave, { nome: c.nome, subs: new Set() })
+            for (const s of c.subs) porNome.get(chave).subs.add(s)
         }
-        await clicarAba(page, 'Planejamento e Controle')
-        await esperar(500)
-        const texto = await page.evaluate(() => document.querySelector('main')?.innerText || document.body.innerText)
-        const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean)
-        const categorias = []
-        let atual = null
-        for (let i = 0; i < linhas.length; i++) {
-            const linha = linhas[i]
-            if (/^Limite: R\$/.test(linha)) continue
-            if (linhas[i + 1] && /^Limite: R\$/.test(linhas[i + 1])) {
-                atual = { nome: linha, subs: [] }
-                categorias.push(atual)
-                i++
-                continue
-            }
-            if (atual && linhas[i + 1] && /^R\$\s?[\d.,]+\/mês$/.test(linhas[i + 1])) {
-                atual.subs.push(linha)
-                i++
-            }
-        }
-        return categorias
+        return [...porNome.values()].map(c => ({ nome: c.nome, subs: [...c.subs] }))
     } catch {
         return []
     }
