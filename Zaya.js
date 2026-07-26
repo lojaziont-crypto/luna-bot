@@ -99,6 +99,20 @@ let financeiroGroupJid = process.env.FINANCEIRO_GROUP_JID || null
 const financeiroPendentes = new Map()
 const FINANCEIRO_PENDENTE_TTL = 5 * 60 * 1000
 
+// Varredura única do histórico do grupo financeiro (roda 1x, na primeira vez que o
+// grupo é identificado após essa funcionalidade existir) — flag persiste em disco pra
+// nunca repetir em reinícios futuros.
+const VARREDURA_EMPRESA_FILE = path.join(__dirname, 'empresa_varredura.json')
+let varreduraEmpresaEmAndamento = false
+
+function carregarVarreduraEmpresaState() {
+    try { if (fs.existsSync(VARREDURA_EMPRESA_FILE)) return JSON.parse(fs.readFileSync(VARREDURA_EMPRESA_FILE, 'utf8')) } catch {}
+    return { varreduraHistoricoEmpresaConcluida: false }
+}
+function salvarVarreduraEmpresaState(state) {
+    fs.writeFileSync(VARREDURA_EMPRESA_FILE, JSON.stringify(state, null, 2))
+}
+
 // Resposta pendente do Adriano: map de prazoEnvio (YYYY-MM-DD) → timestamp de quando foi perguntado
 const adrianoPendente = new Map()
 
@@ -1427,6 +1441,10 @@ async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
             if (subject.includes('zark') && subject.includes('ziont') && subject.includes('financeiro')) {
                 financeiroGroupJid = from
                 console.log(`💼 [Zaya/Financeiro] Grupo "Zark e Ziont | Financeiro" identificado — JID: ${from}`)
+                // dispara a varredura única do histórico (fire-and-forget — pode levar
+                // muito tempo, não deve bloquear o processamento de mensagens ao vivo)
+                dispararVarreduraHistoricoEmpresaSeNecessario(sock, from, msg).catch(err =>
+                    console.error('❌ [Zaya/Empresa] Erro ao iniciar varredura:', err.message))
             }
         } catch {}
     }
@@ -1519,6 +1537,255 @@ async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
     if (!resultado.ok) return // mensagem não era uma despesa de verdade — ignora silenciosamente
 
     await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Varredura ÚNICA do histórico do grupo financeiro — registra despesas antigas que
+// ainda não foram lançadas. Roda 1x (flag em empresa_varredura.json), sequencialmente
+// (uma mensagem por vez, aguardando confirmação de cada uma antes de seguir pra próxima).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VARREDURA_TIMEOUT_RESPOSTA_MS = 30 * 60 * 1000 // 30 min por item, conforme especificado
+
+function construirMapaReacoesExistentes(mensagens) {
+    const mapa = new Map() // id da mensagem-alvo → texto da reação
+    for (const m of mensagens) {
+        const reaction = m.message?.reactionMessage
+        if (reaction?.key?.id) mapa.set(reaction.key.id, reaction.text || '')
+    }
+    return mapa
+}
+
+// Espera a primeira mensagem de texto (não do bot) no grupo, até o timeout. Resolve com
+// o texto da resposta, ou null se ninguém respondeu a tempo.
+function aguardarRespostaNoGrupo(sock, groupJid, timeoutMs) {
+    return new Promise((resolve) => {
+        let resolvido = false
+        const handler = ({ messages, type }) => {
+            if (resolvido || (type !== 'notify' && type !== 'append')) return
+            for (const m of messages) {
+                if (m.key.remoteJid !== groupJid || m.key.fromMe) continue
+                const texto = (m.message?.conversation || m.message?.extendedTextMessage?.text || '').trim()
+                if (!texto) continue
+                finalizar(texto)
+                return
+            }
+        }
+        function finalizar(texto) {
+            if (resolvido) return
+            resolvido = true
+            clearTimeout(timer)
+            sock.ev.off('messages.upsert', handler)
+            resolve(texto)
+        }
+        const timer = setTimeout(() => finalizar(null), timeoutMs)
+        sock.ev.on('messages.upsert', handler)
+    })
+}
+
+// Busca histórico via sync sob demanda do Baileys (fetchMessageHistory) — o pedido vai
+// pro telefone vinculado (precisa estar online) e a resposta chega de forma assíncrona
+// pelo evento 'messaging-history.set'. Pagina pra trás a partir de mensagemAncora até
+// não vir mais nada novo (início do histórico) ou o telefone não responder.
+async function coletarHistoricoGrupoFinanceiro(sock, groupJid, mensagemAncora, { maxIteracoes = 40, tamanhoLote = 50, timeoutRespostaMs = 20000 } = {}) {
+    const { toNumber } = await import('@whiskeysockets/baileys')
+    const mapaMensagens = new Map()
+    let ancoraKey = mensagemAncora.key
+    let ancoraTs = toNumber(mensagemAncora.messageTimestamp) * 1000
+
+    for (let i = 0; i < maxIteracoes; i++) {
+        const lote = await new Promise((resolve) => {
+            let resolvido = false
+            const handler = (data) => {
+                if (resolvido) return
+                const msgsDoGrupo = (data.messages || []).filter(m => m.key?.remoteJid === groupJid)
+                // resposta de outro chat (sync concorrente/residual) — continua esperando a nossa
+                if (!msgsDoGrupo.length && data.messages && data.messages.length) return
+                resolvido = true
+                clearTimeout(timer)
+                sock.ev.off('messaging-history.set', handler)
+                resolve(msgsDoGrupo)
+            }
+            const timer = setTimeout(() => {
+                if (resolvido) return
+                resolvido = true
+                sock.ev.off('messaging-history.set', handler)
+                resolve(null) // telefone offline ou sem mais histórico
+            }, timeoutRespostaMs)
+            sock.ev.on('messaging-history.set', handler)
+            sock.fetchMessageHistory(tamanhoLote, ancoraKey, ancoraTs).catch(() => {
+                if (resolvido) return
+                resolvido = true
+                clearTimeout(timer)
+                sock.ev.off('messaging-history.set', handler)
+                resolve(null)
+            })
+        })
+
+        if (!lote || !lote.length) break
+
+        let novasNesseLote = 0
+        for (const m of lote) {
+            if (!mapaMensagens.has(m.key.id)) { mapaMensagens.set(m.key.id, m); novasNesseLote++ }
+        }
+        if (!novasNesseLote) break // resposta repetida — evita loop infinito
+
+        const maisAntiga = lote.reduce((a, b) => toNumber(a.messageTimestamp) < toNumber(b.messageTimestamp) ? a : b)
+        ancoraKey = maisAntiga.key
+        ancoraTs = toNumber(maisAntiga.messageTimestamp) * 1000
+
+        await esperar(1500) // não flooda o telefone com pedidos em sequência
+    }
+
+    return [...mapaMensagens.values()]
+}
+
+// Processa UMA mensagem histórica: extrai dados, confirma no grupo, aguarda resposta
+// (até 30 min) e lança/reage de acordo. Retorna 'registrada' | 'ignorada' | 'semResposta'.
+async function processarMensagemHistoricaFinanceiro(sock, groupJid, msg) {
+    let dados = null
+
+    try {
+        if (msg.message.imageMessage) {
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+            const buffer = await downloadMediaMessage(msg, 'buffer', {})
+            const r = await financeiroAgent.interpretarNotaFiscalImagem(buffer.toString('base64'), msg.message.imageMessage.mimetype || 'image/jpeg')
+            if (r.ok) dados = r.dados
+        } else if (msg.message.documentMessage) {
+            const docMsg = msg.message.documentMessage
+            const ehPdf = /\.pdf$/i.test(docMsg.fileName || '') || docMsg.mimetype === 'application/pdf'
+            if (!ehPdf) return 'ignorada'
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+            const buffer = await downloadMediaMessage(msg, 'buffer', {})
+            const parser = new PDFParse({ data: buffer })
+            await parser.load()
+            const parsed = await parser.getText()
+            await parser.destroy().catch(() => {})
+            const categorias = await financeiroAgent.obterCategoriasConhecidas()
+            const r = await financeiroAgent.interpretarDespesaTexto(parsed.text || '', categorias)
+            if (r.ok) dados = r.dados
+        } else {
+            const texto = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
+            if (!texto || !financeiroAgent.pareceDespesaFinanceiro(texto)) return 'ignorada'
+            const categorias = await financeiroAgent.obterCategoriasConhecidas()
+            const r = await financeiroAgent.interpretarDespesaTexto(texto, categorias)
+            if (r.ok) dados = r.dados
+        }
+    } catch (err) {
+        console.log(`⚠️  [Zaya/Empresa] Erro ao interpretar mensagem histórica: ${err.message}`)
+        return 'ignorada'
+    }
+
+    if (!dados) return 'ignorada' // não era uma despesa de verdade
+
+    if (!dados.empresa) {
+        await sock.sendMessage(groupJid, {
+            text: `🤔 (Varredura) Encontrei uma possível despesa de R$ ${financeiroAgent.formatarBR(dados.valor)} (${dados.descricao}) mas não sei de qual empresa. É *Ziont* ou *Zark*? (responda em até 30 min, ou "cancela" pra ignorar)`,
+        })
+        const resp = await aguardarRespostaNoGrupo(sock, groupJid, VARREDURA_TIMEOUT_RESPOSTA_MS)
+        if (!resp) return 'semResposta'
+        if (/^n[aã]o\b|^cancel/i.test(resp)) return 'ignorada'
+        const empresaMatch = financeiroAgent.EMPRESAS.find(e => resp.toLowerCase().includes(e.toLowerCase()))
+        if (!empresaMatch) return 'ignorada'
+        dados.empresa = empresaMatch
+    }
+
+    const sub = dados.subcategoria ? ` / ${dados.subcategoria}` : ''
+    await sock.sendMessage(groupJid, {
+        text: `🤔 (Varredura) Vou registrar: R$ ${financeiroAgent.formatarBR(dados.valor)} em *${dados.categoria}${sub}* — ${dados.empresa}. Confirma? (responda em até 30 min)`,
+    })
+
+    const resposta = await aguardarRespostaNoGrupo(sock, groupJid, VARREDURA_TIMEOUT_RESPOSTA_MS)
+    if (!resposta) return 'semResposta'
+
+    const lower = resposta.toLowerCase()
+    if (/^n[aã]o\b|^cancel|^ignora|^pula/.test(lower)) {
+        await sock.sendMessage(groupJid, { react: { text: '❌', key: msg.key } }).catch(() => {})
+        return 'ignorada'
+    }
+    if (!/^s[iî]m\b|^ok\b|^pode\b|^confirma|^isso|^exato/.test(lower)) {
+        return 'semResposta' // resposta ambígua — não lança, não reage, segue em frente
+    }
+
+    try {
+        const r = await financeiroAgent.cadastrarDespesaEmpresa(dados, {
+            onStatus: m => sock.sendMessage(groupJid, { text: m }).catch(() => {}),
+        })
+        await sock.sendMessage(groupJid, { react: { text: '✅', key: msg.key } }).catch(() => {})
+        const emoji = financeiroAgent.emojiPara(r.categoria, r.subcategoria)
+        const item = r.subcategoria || r.categoria
+        let linhaLimite = ''
+        if (r.limiteInfo && r.limiteInfo.limite > 0) {
+            const restante = r.limiteInfo.limite - r.limiteInfo.realizado
+            linhaLimite = `\n\n📊 Limite restante em ${r.categoria}: R$ ${financeiroAgent.formatarBR(restante)}`
+        }
+        await sock.sendMessage(groupJid, {
+            text: `✅ Despesa registrada!\n\n${emoji} R$ ${financeiroAgent.formatarBR(r.valorLancado)} em ${item} — ${r.empresa}${linhaLimite}`,
+        })
+        console.log(`✅ [Zaya/Empresa] Registrada: R$${dados.valor} em ${dados.categoria}`)
+        return 'registrada'
+    } catch (err) {
+        await sock.sendMessage(groupJid, { text: `❌ Não consegui lançar (${err.message}) — pulando esse item.` })
+        return 'ignorada'
+    }
+}
+
+async function executarVarreduraHistoricoEmpresa(sock, groupJid, mensagemAncora) {
+    if (varreduraEmpresaEmAndamento) return
+    varreduraEmpresaEmAndamento = true
+    console.log('🔍 [Zaya/Empresa] Iniciando varredura do histórico...')
+
+    let registradas = 0, ignoradas = 0, semResposta = 0
+    try {
+        const { toNumber } = await import('@whiskeysockets/baileys')
+        const mensagens = await coletarHistoricoGrupoFinanceiro(sock, groupJid, mensagemAncora)
+        const mapaReacoes = construirMapaReacoesExistentes(mensagens)
+
+        const candidatas = mensagens
+            .filter(m => !m.key.fromMe && m.message && !m.message.reactionMessage && !m.message.protocolMessage)
+            .filter(m => { const r = mapaReacoes.get(m.key.id); return r !== '✅' && r !== '❌' }) // já processadas antes
+            .sort((a, b) => toNumber(a.messageTimestamp) - toNumber(b.messageTimestamp))
+
+        for (const msg of candidatas) {
+            const nome = msg.pushName || msg.key.participant || '(desconhecido)'
+            const dataMsg = new Date(toNumber(msg.messageTimestamp) * 1000).toLocaleDateString('pt-BR')
+            console.log(`🔍 [Zaya/Empresa] Processando mensagem de ${nome} — ${dataMsg}`)
+
+            const resultado = await processarMensagemHistoricaFinanceiro(sock, groupJid, msg)
+            if (resultado === 'registrada') registradas++
+            else if (resultado === 'semResposta') semResposta++
+            else ignoradas++
+
+            if (resultado !== 'registrada') {
+                const desc = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '(mídia)'
+                console.log(`⏭️  [Zaya/Empresa] Pulada (sem resposta/ignorada): ${desc}`)
+            }
+        }
+
+        const state = carregarVarreduraEmpresaState()
+        state.varreduraHistoricoEmpresaConcluida = true
+        state.concluidaEm = new Date().toISOString()
+        state.resumo = { registradas, ignoradas, semResposta }
+        salvarVarreduraEmpresaState(state)
+
+        await sock.sendMessage(groupJid, {
+            text: `✅ Varredura concluída! ${registradas} despesas registradas, ${ignoradas} ignoradas, ${semResposta} aguardando resposta.`,
+        })
+        console.log(`✅ [Zaya/Empresa] Varredura concluída: ${registradas} registradas, ${ignoradas} ignoradas, ${semResposta} sem resposta`)
+    } catch (err) {
+        console.error('❌ [Zaya/Empresa] Erro na varredura:', err.message)
+    } finally {
+        varreduraEmpresaEmAndamento = false
+    }
+}
+
+async function dispararVarreduraHistoricoEmpresaSeNecessario(sock, groupJid, mensagemAncora) {
+    if (varreduraEmpresaEmAndamento) return
+    const state = carregarVarreduraEmpresaState()
+    if (state.varreduraHistoricoEmpresaConcluida) return
+    // fire-and-forget — a varredura pode levar horas (30 min de espera por item ambíguo)
+    executarVarreduraHistoricoEmpresa(sock, groupJid, mensagemAncora).catch(err =>
+        console.error('❌ [Zaya/Empresa] Erro na varredura:', err.message))
 }
 
 function solicitarFaturamentoZyon() {

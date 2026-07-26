@@ -720,6 +720,7 @@ function formatarConfirmacao(r) {
 
 module.exports = {
     EMPRESAS,
+    emojiPara,
     pareceDespesaFinanceiro,
     interpretarDespesaTexto,
     interpretarNotaFiscalImagem,
