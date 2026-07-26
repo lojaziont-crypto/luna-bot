@@ -421,6 +421,31 @@ async function clicarOpcao(page, texto) {
     return true
 }
 
+// Conta quantas opções do dropdown ABERTO têm exatamente esse texto — o site permite
+// categorias com nome duplicado, então pode haver mais de uma "Fornecedor" na lista.
+async function contarOpcoesComTexto(page, texto) {
+    return page.evaluate((texto) => {
+        return [...document.querySelectorAll('[role="option"], li, div')]
+            .filter(el => el.children.length === 0 && el.textContent.trim() === texto && el.offsetParent !== null)
+            .length
+    }, texto)
+}
+
+// Clica na N-ésima (0-based) ocorrência de um texto no dropdown aberto — usado quando
+// há categorias/subcategorias duplicadas e a primeira ocorrência pode não ser a certa.
+async function clicarOpcaoNaPosicao(page, texto, indice) {
+    const handle = await page.evaluateHandle((texto, indice) => {
+        const els = [...document.querySelectorAll('[role="option"], li, div')]
+            .filter(el => el.children.length === 0 && el.textContent.trim() === texto && el.offsetParent !== null)
+        return els[indice] || null
+    }, texto, indice)
+    const el = handle && handle.asElement ? handle.asElement() : null
+    if (!el) return false
+    await el.click()
+    await esperar(300)
+    return true
+}
+
 async function selecionarComboBoxPorLabel(page, labelTexto, textoOpcao) {
     await abrirComboBox(page, labelTexto)
     const ok = await clicarOpcao(page, textoOpcao)
@@ -434,6 +459,11 @@ async function selecionarComboBoxPorLabel(page, labelTexto, textoOpcao) {
 // aberto) — nunca confia cegamente no nome que a IA extraiu do texto. Lança erro com
 // `.code` CATEGORIA_NAO_ENCONTRADA / SUBCATEGORIA_NAO_ENCONTRADA + as opções reais,
 // pro chamador decidir se pergunta ou oferece criar uma nova.
+// Seleciona a categoria (e subcategoria, se houver) no formulário de lançamento REAL.
+// O site permite categorias com o MESMO nome duplicadas (já vimos 5 "Fornecedor" em
+// produção, uma delas sem a subcategoria "Camisetas") — por isso, quando há mais de uma
+// ocorrência do nome no dropdown, tenta cada uma em sequência até achar a que realmente
+// tem a subcategoria pedida, em vez de assumir que a primeira é a certa.
 async function validarESelecionarCategoria(page, categoria, subcategoria) {
     await abrirComboBox(page, 'Categoria')
     const categoriasReais = await lerOpcoesComboBoxAberto(page)
@@ -445,25 +475,44 @@ async function validarESelecionarCategoria(page, categoria, subcategoria) {
         err.categoriasDisponiveis = categoriasReais
         throw err
     }
-    await clicarOpcao(page, categoriaReal)
-    await esperar(800) // React carrega as subcategorias dependentes
 
+    const totalOcorrencias = await contarOpcoesComTexto(page, categoriaReal)
     let subcategoriaReal = ''
-    if (subcategoria) {
+    let subsDisponiveisUltimaTentativa = []
+    let selecionou = false
+
+    for (let indice = 0; indice < Math.max(totalOcorrencias, 1); indice++) {
+        if (indice > 0) await abrirComboBox(page, 'Categoria') // reabre pra tentar a próxima ocorrência
+        const clicou = await clicarOpcaoNaPosicao(page, categoriaReal, indice)
+        if (!clicou) break
+        await esperar(800) // React carrega as subcategorias dependentes
+
+        if (!subcategoria) { selecionou = true; break }
+
         await abrirComboBox(page, 'Subcategoria')
         const subsReais = await lerOpcoesComboBoxAberto(page)
+        subsDisponiveisUltimaTentativa = subsReais
         subcategoriaReal = casarNome(subcategoria, subsReais)
-        if (!subcategoriaReal) {
-            await page.keyboard.press('Escape').catch(() => {})
-            const err = new Error(`Subcategoria "${subcategoria}" não existe em "${categoriaReal}".`)
-            err.code = 'SUBCATEGORIA_NAO_ENCONTRADA'
-            err.categoria = categoriaReal
-            err.subcategoriasDisponiveis = subsReais
-            throw err
+        if (subcategoriaReal) {
+            await clicarOpcao(page, subcategoriaReal)
+            await esperar(300)
+            selecionou = true
+            break
         }
-        await clicarOpcao(page, subcategoriaReal)
-        await esperar(300)
+        await page.keyboard.press('Escape').catch(() => {}) // fecha o dropdown de Subcategoria, tenta a próxima ocorrência de Categoria
+        await esperar(200)
     }
+
+    if (!selecionou) {
+        const err = new Error(`Subcategoria "${subcategoria}" não existe em nenhuma das ${Math.max(totalOcorrencias, 1)} ocorrência(s) de "${categoriaReal}".`)
+        err.code = 'SUBCATEGORIA_NAO_ENCONTRADA'
+        err.categoria = categoriaReal
+        err.subcategoriasDisponiveis = subsDisponiveisUltimaTentativa
+        throw err
+    }
+    // Reforça o cache local com o que acabou de ser confirmado de verdade no formulário
+    if (subcategoriaReal) registrarSubcategoriaReal(categoriaReal, subcategoriaReal)
+    else registrarCategoriaReal(categoriaReal)
     return { categoriaReal, subcategoriaReal }
 }
 
