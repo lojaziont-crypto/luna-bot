@@ -19,6 +19,7 @@ const { PDFParse } = require('pdf-parse')
 const plannerAgent = require('./planner-agent')
 const consultoraFinanceira = require('./consultora-financeira')
 const memoriaStore = require('./zaya-memoria')
+const financeiroAgent = require('./financeiro-agent')
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 
@@ -88,6 +89,15 @@ function salvarListas(listas) {
 
 // JID do grupo Ziont — carregado do env ou resolvido na primeira mensagem recebida
 let ziontGroupJid = process.env.ZIONT_GROUP_JID || null
+
+// JID do grupo "Zark e Ziont | Financeiro" — carregado do env ou resolvido na primeira
+// mensagem recebida (subject precisa conter zark + ziont + financeiro, pra não colidir
+// com o grupo "Ziont" comum, usado só pra Lista de Separação).
+let financeiroGroupJid = process.env.FINANCEIRO_GROUP_JID || null
+// Pendências do fluxo financeiro (empresa faltando / criar categoria / criar subcategoria),
+// por participante do grupo — "quem lançou aprova" a criação de categoria/subcategoria.
+const financeiroPendentes = new Map()
+const FINANCEIRO_PENDENTE_TTL = 5 * 60 * 1000
 
 // Resposta pendente do Adriano: map de prazoEnvio (YYYY-MM-DD) → timestamp de quando foi perguntado
 const adrianoPendente = new Map()
@@ -969,10 +979,15 @@ async function connectToWhatsApp() {
             if (msg.key.fromMe) continue
             if (!msg.message) continue
 
-            // Mensagens de grupo: só processa o grupo Ziont (PDFs de Lista de Separação)
+            // Mensagens de grupo: grupo Ziont (PDFs de Lista de Separação) + grupo
+            // financeiro (lançamento automático de despesas). Cada handler resolve seu
+            // próprio JID e ignora mensagens de grupos que não são o seu.
             if (from.endsWith('@g.us')) {
                 await tratarMensagemGrupoZiont(sock, msg, from).catch(err =>
                     console.error('❌ [Zaya/Ziont] Erro ao tratar mensagem de grupo:', err.message)
+                )
+                await tratarMensagemGrupoFinanceiro(sock, msg, from).catch(err =>
+                    console.error('❌ [Zaya/Financeiro] Erro ao tratar mensagem de grupo:', err.message)
                 )
                 continue
             }
@@ -1272,6 +1287,238 @@ async function tratarMensagemGrupoZiont(sock, msg, from) {
 
     console.log(`📋 [Zaya/Ziont] PDF "Lista de Separação" detectado no grupo Ziont — processando...`)
     await processarListaSeparacaoPDF(sock, msg)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grupo "Zark e Ziont | Financeiro" — lançamento automático de despesas
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Tenta lançar de fato no site (financeiro-agent.js já valida categoria/subcategoria
+// contra as opções REAIS do <select> — nunca confia cegamente no que a IA extraiu).
+async function tentarLancarFinanceiro(sock, from, participante, dados) {
+    await sock.sendMessage(from, { text: '⏳ Lançando no financeiro...' })
+    try {
+        const r = await financeiroAgent.cadastrarDespesaEmpresa(dados, {
+            onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+        })
+        financeiroPendentes.delete(participante)
+        await sock.sendMessage(from, { text: financeiroAgent.formatarConfirmacao(r) })
+    } catch (err) {
+        if (err.code === 'CATEGORIA_NAO_ENCONTRADA') {
+            financeiroPendentes.set(participante, {
+                dados, aguardando: 'criar_categoria',
+                expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+            })
+            const lista = err.categoriasDisponiveis?.length ? err.categoriasDisponiveis.join(', ') : '(nenhuma)'
+            await sock.sendMessage(from, {
+                text: `🤔 A categoria *${dados.categoria}* não existe no site.\nCategorias disponíveis: ${lista}\n\nQuer que eu crie a categoria *${dados.categoria}*? Responda *sim*, ou informe uma categoria existente.`,
+            })
+            return
+        }
+        if (err.code === 'SUBCATEGORIA_NAO_ENCONTRADA') {
+            financeiroPendentes.set(participante, {
+                dados, aguardando: 'criar_subcategoria', categoriaAlvo: err.categoria,
+                expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+            })
+            const lista = err.subcategoriasDisponiveis?.length ? err.subcategoriasDisponiveis.join(', ') : '(nenhuma)'
+            await sock.sendMessage(from, {
+                text: `🤔 A subcategoria *${dados.subcategoria}* não existe em *${err.categoria}*.\nSubcategorias disponíveis: ${lista}\n\nQuer que eu crie a subcategoria *${dados.subcategoria}*? Responda *sim*, ou informe uma subcategoria existente.`,
+            })
+            return
+        }
+        financeiroPendentes.delete(participante)
+        const msgErro = err.message === 'LOGIN_TIMEOUT'
+            ? '⏰ Tempo de login esgotado (5 min). Envie a despesa novamente para eu reabrir o navegador.'
+            : `❌ Erro ao lançar no financeiro: ${err.message}`
+        await sock.sendMessage(from, { text: msgErro })
+    }
+}
+
+async function processarDespesaFinanceiro(sock, from, participante, dados) {
+    if (!dados.empresa) {
+        financeiroPendentes.set(participante, { dados, aguardando: 'empresa', expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL })
+        await sock.sendMessage(from, { text: '🤔 Qual empresa? *Ziont* ou *Zark*?' })
+        return
+    }
+    await tentarLancarFinanceiro(sock, from, participante, dados)
+}
+
+// Retorna true se a mensagem foi tratada como resposta a uma pendência financeira
+async function tratarRespostaFinanceiroPendente(sock, from, participante, texto) {
+    const pendente = financeiroPendentes.get(participante)
+    if (!pendente || Date.now() > pendente.expiraEm) {
+        financeiroPendentes.delete(participante)
+        return false
+    }
+    const lower = texto.trim().toLowerCase()
+
+    if (pendente.aguardando === 'empresa') {
+        const empresaMatch = financeiroAgent.EMPRESAS.find(e => lower.includes(e.toLowerCase()))
+        if (!empresaMatch) {
+            await sock.sendMessage(from, { text: 'Não entendi — responda *Ziont* ou *Zark*.' })
+            return true
+        }
+        financeiroPendentes.delete(participante)
+        await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, empresa: empresaMatch })
+        return true
+    }
+
+    if (pendente.aguardando === 'criar_categoria') {
+        if (/^n[aã]o\b|^cancel/.test(lower)) {
+            financeiroPendentes.delete(participante)
+            await sock.sendMessage(from, { text: '❌ Ok, não criei a categoria. Envie a despesa de novo com uma categoria existente.' })
+            return true
+        }
+        if (/^s[iî]m\b|^ok\b|^pode\b|^confirma/.test(lower)) {
+            financeiroPendentes.delete(participante)
+            await sock.sendMessage(from, { text: `⏳ Criando categoria *${pendente.dados.categoria}*...` })
+            try {
+                await financeiroAgent.criarCategoriaComSubcategoria(pendente.dados.categoria, pendente.dados.subcategoria || null, {
+                    onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+                })
+                financeiroAgent.invalidarCacheCategorias()
+                await tentarLancarFinanceiro(sock, from, participante, pendente.dados)
+            } catch (err) {
+                await sock.sendMessage(from, { text: `❌ Não consegui criar a categoria: ${err.message}` })
+            }
+            return true
+        }
+        // resposta livre: tenta usar como o nome de uma categoria já existente
+        financeiroPendentes.delete(participante)
+        await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, categoria: texto.trim() })
+        return true
+    }
+
+    if (pendente.aguardando === 'criar_subcategoria') {
+        if (/^n[aã]o\b|^cancel/.test(lower)) {
+            financeiroPendentes.delete(participante)
+            await sock.sendMessage(from, { text: '❌ Ok, não criei a subcategoria. Envie a despesa de novo com uma subcategoria existente (ou sem subcategoria).' })
+            return true
+        }
+        if (/^s[iî]m\b|^ok\b|^pode\b|^confirma/.test(lower)) {
+            financeiroPendentes.delete(participante)
+            await sock.sendMessage(from, { text: `⏳ Criando subcategoria *${pendente.dados.subcategoria}* em *${pendente.categoriaAlvo}*...` })
+            try {
+                await financeiroAgent.adicionarSubcategoriaEmCategoriaExistente(pendente.categoriaAlvo, pendente.dados.subcategoria, {
+                    onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+                })
+                financeiroAgent.invalidarCacheCategorias()
+                await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, categoria: pendente.categoriaAlvo })
+            } catch (err) {
+                await sock.sendMessage(from, { text: `❌ Não consegui criar a subcategoria: ${err.message}` })
+            }
+            return true
+        }
+        financeiroPendentes.delete(participante)
+        await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, categoria: pendente.categoriaAlvo, subcategoria: texto.trim() })
+        return true
+    }
+
+    return false
+}
+
+async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
+    // Resolve o JID do grupo "Zark e Ziont | Financeiro" uma única vez — exige zark +
+    // ziont + financeiro no subject, pra não colidir com o grupo "Ziont" (Lista de Separação)
+    if (!financeiroGroupJid) {
+        try {
+            const meta = await sock.groupMetadata(from)
+            const subject = (meta.subject || '').toLowerCase()
+            if (subject.includes('zark') && subject.includes('ziont') && subject.includes('financeiro')) {
+                financeiroGroupJid = from
+                console.log(`💼 [Zaya/Financeiro] Grupo "Zark e Ziont | Financeiro" identificado — JID: ${from}`)
+            }
+        } catch {}
+    }
+    if (financeiroGroupJid && from !== financeiroGroupJid) return
+    if (!financeiroGroupJid) return // ainda não identificado — não arrisca processar grupo errado
+
+    // Evita reprocessar mensagens antigas em caso de reconexão/resync (lança despesa real,
+    // diferente do grupo Ziont — aqui um reprocessamento duplicaria um lançamento financeiro)
+    const msgTs = Number(msg.messageTimestamp)
+    if (msgTs && msgTs < STARTUP_TS - 120) return
+
+    const participante = msg.key.participant || from
+    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
+
+    // Resposta a uma pendência (empresa faltando / criar categoria / criar subcategoria)
+    if (text && financeiroPendentes.has(participante)) {
+        const tratou = await tratarRespostaFinanceiroPendente(sock, from, participante, text)
+        if (tratou) return
+    }
+
+    const imageMsg = msg.message?.imageMessage
+    const docMsg = msg.message?.documentMessage
+
+    if (imageMsg) {
+        try {
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+            const buffer = await downloadMediaMessage(msg, 'buffer', {})
+            const imagemBase64 = buffer.toString('base64')
+            const mimeType = imageMsg.mimetype || 'image/jpeg'
+            await sock.sendMessage(from, { text: '📸 Recebi a nota fiscal, extraindo os dados...' })
+            const resultado = await financeiroAgent.interpretarNotaFiscalImagem(imagemBase64, mimeType)
+            if (!resultado.ok) {
+                await sock.sendMessage(from, { text: `❌ ${resultado.motivo}` })
+                return
+            }
+            await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
+        } catch (err) {
+            console.error('❌ [Zaya/Financeiro] Erro ao processar imagem:', err.message)
+            await sock.sendMessage(from, { text: '❌ Não consegui processar essa imagem agora.' })
+        }
+        return
+    }
+
+    if (docMsg) {
+        const ehPdf = /\.pdf$/i.test(docMsg.fileName || '') || docMsg.mimetype === 'application/pdf'
+        if (!ehPdf) return
+        try {
+            const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+            const buffer = await downloadMediaMessage(msg, 'buffer', {})
+            let textoPdf = ''
+            try {
+                const parser = new PDFParse({ data: buffer })
+                await parser.load()
+                const parsed = await parser.getText()
+                textoPdf = parsed.text || ''
+                await parser.destroy().catch(() => {})
+            } catch (err) {
+                await sock.sendMessage(from, { text: '❌ Não consegui ler o texto desse PDF.' })
+                return
+            }
+            await sock.sendMessage(from, { text: '📄 Recebi o boleto/PDF, extraindo os dados...' })
+            const categoriasConhecidas = await financeiroAgent.obterCategoriasConhecidas({
+                onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+            })
+            const resultado = await financeiroAgent.interpretarDespesaTexto(textoPdf, categoriasConhecidas)
+            if (!resultado.ok) {
+                await sock.sendMessage(from, { text: `❌ ${resultado.motivo}` })
+                return
+            }
+            await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
+        } catch (err) {
+            console.error('❌ [Zaya/Financeiro] Erro ao processar PDF:', err.message)
+            await sock.sendMessage(from, { text: '❌ Não consegui processar esse PDF agora.' })
+        }
+        return
+    }
+
+    if (!text || !financeiroAgent.pareceDespesaFinanceiro(text)) return
+
+    let resultado
+    try {
+        const categoriasConhecidas = await financeiroAgent.obterCategoriasConhecidas({
+            onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+        })
+        resultado = await financeiroAgent.interpretarDespesaTexto(text, categoriasConhecidas)
+    } catch (err) {
+        console.error('❌ [Zaya/Financeiro] Erro na interpretação:', err.message)
+        return
+    }
+    if (!resultado.ok) return // mensagem não era uma despesa de verdade — ignora silenciosamente
+
+    await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
 }
 
 function solicitarFaturamentoZyon() {
