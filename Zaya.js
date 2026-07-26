@@ -98,6 +98,11 @@ let financeiroGroupJid = process.env.FINANCEIRO_GROUP_JID || null
 // por participante do grupo — "quem lançou aprova" a criação de categoria/subcategoria.
 const financeiroPendentes = new Map()
 const FINANCEIRO_PENDENTE_TTL = 5 * 60 * 1000
+// Dedup de mensagens já processadas do grupo financeiro (evita reprocessar em caso de
+// reentrega do Baileys, que fazia o wizard de categoria/subcategoria repetir a mesma
+// pergunta várias vezes pra mesma despesa)
+const financeiroMensagensProcessadas = new Set()
+const FINANCEIRO_MENSAGENS_PROCESSADAS_MAX = 500
 
 // Varredura única do histórico do grupo financeiro (roda 1x, na primeira vez que o
 // grupo é identificado após essa funcionalidade existir) — flag persiste em disco pra
@@ -1319,25 +1324,11 @@ async function tentarLancarFinanceiro(sock, from, participante, dados) {
         await sock.sendMessage(from, { text: financeiroAgent.formatarConfirmacao(r) })
     } catch (err) {
         if (err.code === 'CATEGORIA_NAO_ENCONTRADA') {
-            financeiroPendentes.set(participante, {
-                dados, aguardando: 'criar_categoria',
-                expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
-            })
-            const lista = err.categoriasDisponiveis?.length ? err.categoriasDisponiveis.join(', ') : '(nenhuma)'
-            await sock.sendMessage(from, {
-                text: `🤔 A categoria *${dados.categoria}* não existe no site.\nCategorias disponíveis: ${lista}\n\nQuer que eu crie a categoria *${dados.categoria}*? Responda *sim*, ou informe uma categoria existente.`,
-            })
+            await iniciarWizardCategoriaNova(sock, from, participante, dados)
             return
         }
         if (err.code === 'SUBCATEGORIA_NAO_ENCONTRADA') {
-            financeiroPendentes.set(participante, {
-                dados, aguardando: 'criar_subcategoria', categoriaAlvo: err.categoria,
-                expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
-            })
-            const lista = err.subcategoriasDisponiveis?.length ? err.subcategoriasDisponiveis.join(', ') : '(nenhuma)'
-            await sock.sendMessage(from, {
-                text: `🤔 A subcategoria *${dados.subcategoria}* não existe em *${err.categoria}*.\nSubcategorias disponíveis: ${lista}\n\nQuer que eu crie a subcategoria *${dados.subcategoria}*? Responda *sim*, ou informe uma subcategoria existente.`,
-            })
+            await iniciarWizardSubcategoriaExistente(sock, from, participante, dados, err.categoria)
             return
         }
         financeiroPendentes.delete(participante)
@@ -1357,6 +1348,57 @@ async function processarDespesaFinanceiro(sock, from, participante, dados) {
     await tentarLancarFinanceiro(sock, from, participante, dados)
 }
 
+// ── Wizard de categoria/subcategoria nova — Passo 1: pergunta qual categoria usar ──
+// (categoria sugerida pela IA não existe no site). Estado só é criado UMA vez por
+// despesa — enquanto `financeiroPendentes` tiver essa entrada, a pergunta não é
+// reenviada (ver dedup por ID de mensagem em tratarMensagemGrupoFinanceiro, que é o
+// que evita reprocessar a MESMA mensagem do zero e reabrir esse wizard do início).
+async function iniciarWizardCategoriaNova(sock, from, participante, dados) {
+    financeiroPendentes.set(participante, {
+        dados, aguardando: 'categoria_nome',
+        expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+    })
+    await sock.sendMessage(from, {
+        text: `🤔 A categoria *${dados.categoria}* não existe no site. Qual categoria você quer usar?`,
+    })
+}
+
+// Categoria já existe, só a subcategoria sugerida que não bate — Passo S1
+async function iniciarWizardSubcategoriaExistente(sock, from, participante, dados, categoriaReal) {
+    financeiroPendentes.set(participante, {
+        dados: { ...dados, categoria: categoriaReal }, aguardando: 'subcategoria_nome_existente',
+        expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+    })
+    await sock.sendMessage(from, {
+        text: `🤔 A subcategoria *${dados.subcategoria}* não existe em *${categoriaReal}*. Qual subcategoria você quer usar? (ou responda "nenhuma" pra lançar sem subcategoria)`,
+    })
+}
+
+// Passo 3: confirmação final antes de criar categoria (+ subcategoria opcional) nova
+async function pedirConfirmacaoCriacaoCategoria(sock, from, participante, dados) {
+    financeiroPendentes.set(participante, {
+        dados, aguardando: 'confirmar_criacao_categoria',
+        expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+    })
+    const sub = dados.subcategoria ? ` com subcategoria *${dados.subcategoria}*` : ''
+    await sock.sendMessage(from, { text: `Vou criar a categoria *${dados.categoria}*${sub}. Confirma?` })
+}
+
+// Categoria já resolvida (existente ou recém-criada) — resolve a subcategoria sugerida
+// contra as opções reais (se houver) ou lança direto sem subcategoria.
+async function resolverSubcategoriaEExecutar(sock, from, participante, dados) {
+    if (!dados.subcategoria) {
+        await tentarLancarFinanceiro(sock, from, participante, dados)
+        return
+    }
+    let subsReais = []
+    try { subsReais = await financeiroAgent.listarSubcategoriasReais(dados.categoria) } catch {}
+    const subExistente = financeiroAgent.casarNome(dados.subcategoria, subsReais)
+    // se bater com uma real, usa ela; senão segue normal — cadastrarDespesaEmpresa vai
+    // acusar SUBCATEGORIA_NAO_ENCONTRADA de novo e cair no wizard de subcategoria existente
+    await tentarLancarFinanceiro(sock, from, participante, { ...dados, subcategoria: subExistente || dados.subcategoria })
+}
+
 // Retorna true se a mensagem foi tratada como resposta a uma pendência financeira
 async function tratarRespostaFinanceiroPendente(sock, from, participante, texto) {
     const pendente = financeiroPendentes.get(participante)
@@ -1365,6 +1407,8 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
         return false
     }
     const lower = texto.trim().toLowerCase()
+    const ehSim = /^s[iî]m\b|^ok\b|^pode\b|^confirma|^isso|^exato/.test(lower)
+    const ehNao = /^n[aã]o\b|^cancel|^ignora|^pula/.test(lower)
 
     if (pendente.aguardando === 'empresa') {
         const empresaMatch = financeiroAgent.EMPRESAS.find(e => lower.includes(e.toLowerCase()))
@@ -1377,54 +1421,134 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
         return true
     }
 
-    if (pendente.aguardando === 'criar_categoria') {
-        if (/^n[aã]o\b|^cancel/.test(lower)) {
+    // ── Passo 1 → 2: categoria nova. Antes de perguntar mais nada, checa se o nome
+    // informado já bate com uma categoria REAL do site (case-insensitive) — se bater,
+    // usa a existente direto, sem perguntar sobre criar subcategoria nem confirmar criação.
+    if (pendente.aguardando === 'categoria_nome') {
+        if (ehNao) {
             financeiroPendentes.delete(participante)
-            await sock.sendMessage(from, { text: '❌ Ok, não criei a categoria. Envie a despesa de novo com uma categoria existente.' })
+            await sock.sendMessage(from, { text: '❌ Ok, cancelado.' })
             return true
         }
-        if (/^s[iî]m\b|^ok\b|^pode\b|^confirma/.test(lower)) {
+        const nomeCategoria = texto.trim()
+        let categoriasReais = []
+        try { categoriasReais = await financeiroAgent.listarCategoriasDespesaReais() } catch {}
+        const categoriaExistente = financeiroAgent.casarNome(nomeCategoria, categoriasReais)
+
+        if (categoriaExistente) {
+            const dadosComCategoria = { ...pendente.dados, categoria: categoriaExistente }
             financeiroPendentes.delete(participante)
-            await sock.sendMessage(from, { text: `⏳ Criando categoria *${pendente.dados.categoria}*...` })
-            try {
-                await financeiroAgent.criarCategoriaComSubcategoria(pendente.dados.categoria, pendente.dados.subcategoria || null, {
-                    onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
-                })
-                financeiroAgent.invalidarCacheCategorias()
-                await tentarLancarFinanceiro(sock, from, participante, pendente.dados)
-            } catch (err) {
-                await sock.sendMessage(from, { text: `❌ Não consegui criar a categoria: ${err.message}` })
-            }
+            await resolverSubcategoriaEExecutar(sock, from, participante, dadosComCategoria)
             return true
         }
-        // resposta livre: tenta usar como o nome de uma categoria já existente
-        financeiroPendentes.delete(participante)
-        await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, categoria: texto.trim() })
+
+        financeiroPendentes.set(participante, {
+            dados: { ...pendente.dados, categoria: nomeCategoria },
+            aguardando: 'tem_subcategoria',
+            expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+        })
+        await sock.sendMessage(from, { text: 'Vai ter subcategoria? Responda *sim* ou *não*.' })
         return true
     }
 
-    if (pendente.aguardando === 'criar_subcategoria') {
-        if (/^n[aã]o\b|^cancel/.test(lower)) {
-            financeiroPendentes.delete(participante)
-            await sock.sendMessage(from, { text: '❌ Ok, não criei a subcategoria. Envie a despesa de novo com uma subcategoria existente (ou sem subcategoria).' })
+    // Passo 2: vai ter subcategoria?
+    if (pendente.aguardando === 'tem_subcategoria') {
+        if (ehSim) {
+            financeiroPendentes.set(participante, {
+                dados: pendente.dados, aguardando: 'subcategoria_nome',
+                expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+            })
+            await sock.sendMessage(from, { text: 'Qual o nome da subcategoria?' })
             return true
         }
-        if (/^s[iî]m\b|^ok\b|^pode\b|^confirma/.test(lower)) {
+        if (ehNao) {
+            await pedirConfirmacaoCriacaoCategoria(sock, from, participante, { ...pendente.dados, subcategoria: '' })
+            return true
+        }
+        // resposta ambígua — só reforça a MESMA pergunta, não reinicia o wizard do zero
+        await sock.sendMessage(from, { text: 'Não entendi — vai ter subcategoria? Responda *sim* ou *não*.' })
+        return true
+    }
+
+    // Passo 2b: nome da subcategoria (categoria nova)
+    if (pendente.aguardando === 'subcategoria_nome') {
+        await pedirConfirmacaoCriacaoCategoria(sock, from, participante, { ...pendente.dados, subcategoria: texto.trim() })
+        return true
+    }
+
+    // Passo 3 → 4: confirmação final, cria categoria (+sub) e lança
+    if (pendente.aguardando === 'confirmar_criacao_categoria') {
+        if (ehNao) {
             financeiroPendentes.delete(participante)
-            await sock.sendMessage(from, { text: `⏳ Criando subcategoria *${pendente.dados.subcategoria}* em *${pendente.categoriaAlvo}*...` })
-            try {
-                await financeiroAgent.adicionarSubcategoriaEmCategoriaExistente(pendente.categoriaAlvo, pendente.dados.subcategoria, {
-                    onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
-                })
-                financeiroAgent.invalidarCacheCategorias()
-                await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, categoria: pendente.categoriaAlvo })
-            } catch (err) {
-                await sock.sendMessage(from, { text: `❌ Não consegui criar a subcategoria: ${err.message}` })
-            }
+            await sock.sendMessage(from, { text: '❌ Ok, cancelado.' })
+            return true
+        }
+        if (!ehSim) {
+            await sock.sendMessage(from, { text: 'Não entendi — confirma a criação? Responda *sim* ou *não*.' })
             return true
         }
         financeiroPendentes.delete(participante)
-        await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, categoria: pendente.categoriaAlvo, subcategoria: texto.trim() })
+        const dados = pendente.dados
+        await sock.sendMessage(from, { text: `⏳ Criando categoria *${dados.categoria}*${dados.subcategoria ? ` / *${dados.subcategoria}*` : ''}...` })
+        try {
+            await financeiroAgent.criarCategoriaComSubcategoria(dados.categoria, dados.subcategoria || null, {
+                onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+            })
+            financeiroAgent.invalidarCacheCategorias()
+            await tentarLancarFinanceiro(sock, from, participante, dados)
+        } catch (err) {
+            await sock.sendMessage(from, { text: `❌ Não consegui criar a categoria: ${err.message}` })
+        }
+        return true
+    }
+
+    // ── Categoria já existe, só falta resolver a subcategoria ──────────────────────
+    if (pendente.aguardando === 'subcategoria_nome_existente') {
+        if (ehNao || /^nenhuma\b/.test(lower)) {
+            financeiroPendentes.delete(participante)
+            await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, subcategoria: '' })
+            return true
+        }
+        const nomeSub = texto.trim()
+        let subsReais = []
+        try { subsReais = await financeiroAgent.listarSubcategoriasReais(pendente.dados.categoria) } catch {}
+        const subExistente = financeiroAgent.casarNome(nomeSub, subsReais)
+        if (subExistente) {
+            financeiroPendentes.delete(participante)
+            await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, subcategoria: subExistente })
+            return true
+        }
+        financeiroPendentes.set(participante, {
+            dados: { ...pendente.dados, subcategoria: nomeSub },
+            aguardando: 'confirmar_criacao_subcategoria',
+            expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+        })
+        await sock.sendMessage(from, { text: `Vou criar a subcategoria *${nomeSub}* em *${pendente.dados.categoria}*. Confirma?` })
+        return true
+    }
+
+    if (pendente.aguardando === 'confirmar_criacao_subcategoria') {
+        if (ehNao) {
+            financeiroPendentes.delete(participante)
+            await sock.sendMessage(from, { text: '❌ Ok, cancelado.' })
+            return true
+        }
+        if (!ehSim) {
+            await sock.sendMessage(from, { text: 'Não entendi — confirma a criação? Responda *sim* ou *não*.' })
+            return true
+        }
+        financeiroPendentes.delete(participante)
+        const dados = pendente.dados
+        await sock.sendMessage(from, { text: `⏳ Criando subcategoria *${dados.subcategoria}* em *${dados.categoria}*...` })
+        try {
+            await financeiroAgent.adicionarSubcategoriaEmCategoriaExistente(dados.categoria, dados.subcategoria, {
+                onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+            })
+            financeiroAgent.invalidarCacheCategorias()
+            await tentarLancarFinanceiro(sock, from, participante, dados)
+        } catch (err) {
+            await sock.sendMessage(from, { text: `❌ Não consegui criar a subcategoria: ${err.message}` })
+        }
         return true
     }
 
@@ -1456,10 +1580,22 @@ async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
     const msgTs = Number(msg.messageTimestamp)
     if (msgTs && msgTs < STARTUP_TS - 120) return
 
+    // Dedup por ID de mensagem — o Baileys pode reentregar a MESMA mensagem (reconexão,
+    // resync de app-state) e sem isso o wizard de categoria/subcategoria reabria do zero
+    // pra cada reentrega, fazendo a mesma pergunta várias vezes pra mesma despesa.
+    const msgId = msg.key?.id
+    if (msgId) {
+        if (financeiroMensagensProcessadas.has(msgId)) return
+        financeiroMensagensProcessadas.add(msgId)
+        if (financeiroMensagensProcessadas.size > FINANCEIRO_MENSAGENS_PROCESSADAS_MAX) {
+            financeiroMensagensProcessadas.delete(financeiroMensagensProcessadas.values().next().value)
+        }
+    }
+
     const participante = msg.key.participant || from
     const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || ''
 
-    // Resposta a uma pendência (empresa faltando / criar categoria / criar subcategoria)
+    // Resposta a uma pendência (empresa faltando / wizard de categoria ou subcategoria)
     if (text && financeiroPendentes.has(participante)) {
         const tratou = await tratarRespostaFinanceiroPendente(sock, from, participante, text)
         if (tratou) return

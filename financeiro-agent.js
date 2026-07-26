@@ -424,6 +424,50 @@ async function validarESelecionarCategoria(page, categoria, subcategoria) {
     return { categoriaReal, subcategoriaReal }
 }
 
+// Lista as categorias de despesa REAIS (abre o modal Saída, lê o dropdown Categoria e
+// fecha sem salvar) — usado pra reconhecer categoria já cadastrada ANTES de perguntar
+// se deve criar uma nova (evita pedir confirmação de criação de algo que já existe).
+async function listarCategoriasDespesaReais({ onStatus } = {}) {
+    if (ocupado) throw new Error('Já estou ocupado com outro lançamento — tente de novo em instantes.')
+    ocupado = true
+    let page
+    try {
+        ;({ page } = await abrirFinanceiroBrowser())
+        await garantirLogado(page, onStatus)
+        await abrirModalSaida(page)
+        await abrirComboBox(page, 'Categoria')
+        const categorias = await lerOpcoesComboBoxAberto(page)
+        await fecharModal(page)
+        return categorias
+    } finally {
+        ocupado = false
+    }
+}
+
+// Lista as subcategorias REAIS de uma categoria já existente
+async function listarSubcategoriasReais(categoria, { onStatus } = {}) {
+    if (ocupado) throw new Error('Já estou ocupado com outro lançamento — tente de novo em instantes.')
+    ocupado = true
+    let page
+    try {
+        ;({ page } = await abrirFinanceiroBrowser())
+        await garantirLogado(page, onStatus)
+        await abrirModalSaida(page)
+        await abrirComboBox(page, 'Categoria')
+        const categorias = await lerOpcoesComboBoxAberto(page)
+        const categoriaReal = casarNome(categoria, categorias)
+        if (!categoriaReal) { await fecharModal(page); return [] }
+        await clicarOpcao(page, categoriaReal)
+        await esperar(800)
+        await abrirComboBox(page, 'Subcategoria')
+        const subs = await lerOpcoesComboBoxAberto(page)
+        await fecharModal(page)
+        return subs
+    } finally {
+        ocupado = false
+    }
+}
+
 async function preencherRestanteESalvar(page, dados) {
     const dataEl = await elementoPorLabel(page, 'Data')
     if (dataEl) {
@@ -721,11 +765,14 @@ function formatarConfirmacao(r) {
 module.exports = {
     EMPRESAS,
     emojiPara,
+    casarNome,
     pareceDespesaFinanceiro,
     interpretarDespesaTexto,
     interpretarNotaFiscalImagem,
     obterCategoriasConhecidas,
     invalidarCacheCategorias,
+    listarCategoriasDespesaReais,
+    listarSubcategoriasReais,
     cadastrarDespesaEmpresa,
     criarCategoriaComSubcategoria,
     adicionarSubcategoriaEmCategoriaExistente,
