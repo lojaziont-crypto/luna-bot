@@ -388,31 +388,31 @@ async function abrirComboBox(page, labelTexto) {
     await esperar(350)
 }
 
-// Lê as opções do dropdown recém-aberto. As opções da grupoz.base44.app são divs/li
-// sem role="option" formal — filtra por elemento-folha visível dentro de um listbox,
-// com fallback genérico caso a estrutura não use role="listbox".
+// Cada page.evaluate abaixo repete esta mesma busca (não dá pra compartilhar uma função
+// entre Node e o contexto da página do Puppeteer sem gambiarra). Descoberto por inspeção
+// ao vivo em 2026-07-26: o Radix Select destaca automaticamente a PRIMEIRA opção ao abrir
+// (foco de teclado), e essa opção destacada ganha uma estrutura DIFERENTE das demais — um
+// <span> extra dentro do <div role="option"> (pro aria-labelledby) — então ela tem 2
+// filhos, não 0. O filtro antigo (`children.length === 0`) excluía exatamente essa opção,
+// o que explicava "Fornecedor" nunca ser reconhecido depois que virou o primeiro item da
+// lista (auto-destacado). Por isso NUNCA filtrar por número de filhos aqui — usar
+// textContent do [role="option"] direto, confiável independente de estar destacado ou não.
 async function lerOpcoesComboBoxAberto(page) {
     return page.evaluate(() => {
-        let els = []
-        const listbox = document.querySelector('[role="listbox"]')
-        if (listbox) {
-            els = [...listbox.querySelectorAll('[role="option"], li, div')].filter(el => el.offsetParent !== null)
-        }
-        if (!els.length) {
-            els = [...document.querySelectorAll('[role="option"]')].filter(el => el.offsetParent !== null)
-        }
-        const textos = els
-            .filter(el => el.children.length === 0)
-            .map(el => el.textContent.trim())
-            .filter(t => t && t.length < 60)
+        let els = [...document.querySelectorAll('[role="option"]')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('li')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('div')].filter(el => el.children.length === 0 && el.offsetParent !== null)
+        const textos = els.map(el => el.textContent.trim()).filter(t => t && t.length < 60)
         return [...new Set(textos)]
     })
 }
 
 async function clicarOpcao(page, texto) {
     const handle = await page.evaluateHandle((texto) => {
-        const els = [...document.querySelectorAll('[role="option"], li, div')]
-        return els.find(el => el.children.length === 0 && el.textContent.trim() === texto && el.offsetParent !== null) || null
+        let els = [...document.querySelectorAll('[role="option"]')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('li')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('div')].filter(el => el.children.length === 0 && el.offsetParent !== null)
+        return els.find(el => el.textContent.trim() === texto) || null
     }, texto)
     const el = handle && handle.asElement ? handle.asElement() : null
     if (!el) return false
@@ -425,9 +425,10 @@ async function clicarOpcao(page, texto) {
 // categorias com nome duplicado, então pode haver mais de uma "Fornecedor" na lista.
 async function contarOpcoesComTexto(page, texto) {
     return page.evaluate((texto) => {
-        return [...document.querySelectorAll('[role="option"], li, div')]
-            .filter(el => el.children.length === 0 && el.textContent.trim() === texto && el.offsetParent !== null)
-            .length
+        let els = [...document.querySelectorAll('[role="option"]')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('li')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('div')].filter(el => el.children.length === 0 && el.offsetParent !== null)
+        return els.filter(el => el.textContent.trim() === texto).length
     }, texto)
 }
 
@@ -435,9 +436,11 @@ async function contarOpcoesComTexto(page, texto) {
 // há categorias/subcategorias duplicadas e a primeira ocorrência pode não ser a certa.
 async function clicarOpcaoNaPosicao(page, texto, indice) {
     const handle = await page.evaluateHandle((texto, indice) => {
-        const els = [...document.querySelectorAll('[role="option"], li, div')]
-            .filter(el => el.children.length === 0 && el.textContent.trim() === texto && el.offsetParent !== null)
-        return els[indice] || null
+        let els = [...document.querySelectorAll('[role="option"]')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('li')].filter(el => el.offsetParent !== null)
+        if (!els.length) els = [...document.querySelectorAll('div')].filter(el => el.children.length === 0 && el.offsetParent !== null)
+        const matching = els.filter(el => el.textContent.trim() === texto)
+        return matching[indice] || null
     }, texto, indice)
     const el = handle && handle.asElement ? handle.asElement() : null
     if (!el) return false
