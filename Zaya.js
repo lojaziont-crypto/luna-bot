@@ -1372,7 +1372,59 @@ async function processarDespesaFinanceiro(sock, from, participante, dados) {
         await sock.sendMessage(from, { text: '🤔 Qual empresa? *Ziont* ou *Zark*?' })
         return
     }
+    if (dados.ehPendente) {
+        await resolverCategoriaEIniciarFluxoPendente(sock, from, participante, dados)
+        return
+    }
     await tentarLancarFinanceiro(sock, from, participante, dados)
+}
+
+// ── Fluxo de despesa PENDENTE/PARCELADA — a categoria/subcategoria precisa estar
+// confirmada ANTES de perguntar forma de pagamento/parcelamento/vencimento (nada é
+// lançado até o resumo final ser confirmado, diferente do fluxo normal que lança
+// reativamente). Reaproveita os MESMOS wizards de criação de categoria já existentes —
+// eles decidem sozinhos (via dados.ehPendente) se devem continuar pro pagamento em vez
+// de lançar direto.
+async function resolverCategoriaEIniciarFluxoPendente(sock, from, participante, dados) {
+    let categoriaReal = null
+    try { categoriaReal = await financeiroAgent.verificarCategoriaExistente(dados.categoria) } catch {}
+    if (!categoriaReal) {
+        await iniciarWizardCategoriaNova(sock, from, participante, dados)
+        return
+    }
+    dados = { ...dados, categoria: categoriaReal }
+
+    if (dados.subcategoria) {
+        let subReal = null
+        try { subReal = await financeiroAgent.verificarSubcategoriaExistente(categoriaReal, dados.subcategoria) } catch {}
+        if (!subReal) {
+            await iniciarWizardSubcategoriaExistente(sock, from, participante, dados, categoriaReal)
+            return
+        }
+        dados = { ...dados, subcategoria: subReal }
+    }
+
+    await iniciarPerguntaFormaPagamento(sock, from, participante, dados)
+}
+
+// Ponto único chamado depois que a categoria/subcategoria JÁ EXISTIA (não precisou criar)
+// — decide se lança direto ou entra no fluxo de pendente/parcelado.
+async function continuarAposCategoriaResolvida(sock, from, participante, dados) {
+    if (dados.ehPendente) {
+        await iniciarPerguntaFormaPagamento(sock, from, participante, dados)
+    } else {
+        await tentarLancarFinanceiro(sock, from, participante, dados)
+    }
+}
+
+// Mesmo ponto único, mas chamado logo depois de CRIAR uma categoria/subcategoria nova
+// (usa o retry pós-criação no caminho normal, já que ali existe lançamento real em jogo).
+async function continuarAposCriarCategoria(sock, from, participante, dados) {
+    if (dados.ehPendente) {
+        await iniciarPerguntaFormaPagamento(sock, from, participante, dados)
+    } else {
+        await tentarLancarComRetryPosCriacao(sock, from, participante, dados)
+    }
 }
 
 // ── Wizard de categoria/subcategoria nova — Passo 1: pergunta qual categoria usar ──
@@ -1415,14 +1467,144 @@ async function pedirConfirmacaoCriacaoCategoria(sock, from, participante, dados)
 // contra as opções reais (se houver) ou lança direto sem subcategoria.
 async function resolverSubcategoriaEExecutar(sock, from, participante, dados) {
     if (!dados.subcategoria) {
-        await tentarLancarFinanceiro(sock, from, participante, dados)
+        await continuarAposCategoriaResolvida(sock, from, participante, dados)
         return
     }
     let subExistente = null
     try { subExistente = await financeiroAgent.verificarSubcategoriaExistente(dados.categoria, dados.subcategoria) } catch {}
-    // se bater com uma real (cache local ou site), usa ela; senão segue normal —
-    // cadastrarDespesaEmpresa vai acusar SUBCATEGORIA_NAO_ENCONTRADA e cair no wizard
-    await tentarLancarFinanceiro(sock, from, participante, { ...dados, subcategoria: subExistente || dados.subcategoria })
+    if (subExistente) {
+        await continuarAposCategoriaResolvida(sock, from, participante, { ...dados, subcategoria: subExistente })
+        return
+    }
+    // não achou — se for fluxo pendente, abre o wizard de criação direto (proativo, sem
+    // tentar lançar nada); no fluxo normal, deixa cadastrarDespesaEmpresa acusar
+    // SUBCATEGORIA_NAO_ENCONTRADA reativamente (comportamento já existente).
+    if (dados.ehPendente) {
+        await iniciarWizardSubcategoriaExistente(sock, from, participante, dados, dados.categoria)
+        return
+    }
+    await tentarLancarFinanceiro(sock, from, participante, dados)
+}
+
+// ── Fluxo de despesa PENDENTE/PARCELADA — Passo 1: forma de pagamento ──────────────
+// Categoria/subcategoria já estão confirmadas nesse ponto. Pula qualquer pergunta cujo
+// valor a IA já tenha extraído da mensagem original (ex: "parcelado em 3x no cartão,
+// vence dia 10" já traz os três — vai direto pro resumo).
+async function iniciarPerguntaFormaPagamento(sock, from, participante, dados) {
+    if (!dados.formaPagamento) {
+        financeiroPendentes.set(participante, { dados, aguardando: 'forma_pagamento', expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL })
+        await sock.sendMessage(from, { text: 'Vai ser pago na conta (Mercado Pago/Nubank) ou no cartão de crédito?' })
+        return
+    }
+    await perguntarParcelamento(sock, from, participante, dados)
+}
+
+// Passo 2: parcelamento (quantas vezes)
+async function perguntarParcelamento(sock, from, participante, dados) {
+    if (dados.parcelas == null) {
+        financeiroPendentes.set(participante, { dados, aguardando: 'tem_parcelamento', expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL })
+        await sock.sendMessage(from, { text: 'Vai parcelar? Se sim, em quantas vezes?' })
+        return
+    }
+    await perguntarVencimento(sock, from, participante, dados)
+}
+
+// Passo 3: dia de vencimento
+async function perguntarVencimento(sock, from, participante, dados) {
+    if (!dados.diaVencimento) {
+        financeiroPendentes.set(participante, { dados, aguardando: 'vencimento', expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL })
+        await sock.sendMessage(from, { text: 'Qual o dia de vencimento?' })
+        return
+    }
+    await mostrarResumoEConfirmar(sock, from, participante, dados)
+}
+
+// Passo 5: mostra o resumo de todas as parcelas e pede confirmação final antes de lançar
+async function mostrarResumoEConfirmar(sock, from, participante, dados) {
+    const datas = financeiroAgent.calcularDatasParcelas(dados.diaVencimento, dados.parcelas)
+    const valorParcela = dados.valor / dados.parcelas
+    const descPagamento = dados.formaPagamento === 'cartao'
+        ? 'no cartão de crédito'
+        : `na conta ${financeiroAgent.formaPagamentoInfo(dados.empresa, 'conta').texto}`
+    const datasFormatadas = datas.map(d => { const [, m, dd] = d.split('-'); return `${dd}/${m}` })
+
+    financeiroPendentes.set(participante, {
+        dados: { ...dados, _datasCalculadas: datas },
+        aguardando: 'confirmar_parcelas',
+        expiraEm: Date.now() + FINANCEIRO_PENDENTE_TTL,
+    })
+
+    const resumo = dados.parcelas > 1
+        ? `${dados.parcelas}x de R$ ${financeiroAgent.formatarBR(valorParcela)} ${descPagamento}, vencendo ${datasFormatadas.join(' e ')}`
+        : `R$ ${financeiroAgent.formatarBR(dados.valor)} ${descPagamento}, vencendo ${datasFormatadas[0]}`
+    await sock.sendMessage(from, { text: `Vou lançar ${resumo}. Confirma?` })
+}
+
+// Passo 6: lança uma despesa Pendente por parcela, uma mensagem de confirmação por vez
+async function lancarParcelas(sock, from, participante, dados) {
+    const datas = dados._datasCalculadas || financeiroAgent.calcularDatasParcelas(dados.diaVencimento, dados.parcelas)
+    const totalParcelas = dados.parcelas
+    const valorParcela = Math.round((dados.valor / totalParcelas) * 100) / 100
+
+    await sock.sendMessage(from, { text: '⏳ Lançando no financeiro...' })
+    for (let i = 0; i < totalParcelas; i++) {
+        const dadosParcela = { ...dados, valor: valorParcela, data: datas[i], status: 'Pendente' }
+        try {
+            const r = await financeiroAgent.cadastrarDespesaEmpresa(dadosParcela, {
+                onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
+            })
+            const [, mm, dd] = datas[i].split('-')
+            await sock.sendMessage(from, {
+                text: financeiroAgent.formatarConfirmacaoPendente(r, {
+                    parcelaAtual: i + 1,
+                    totalParcelas,
+                    vencimentoDDMM: `${dd}/${mm}`,
+                    formaPagamento: dados.formaPagamento,
+                }),
+            })
+            console.log(`✅ [Zaya/Financeiro] Parcela ${i + 1}/${totalParcelas} lançada: R$${valorParcela} em ${dados.categoria}`)
+        } catch (err) {
+            await sock.sendMessage(from, { text: `❌ Erro ao lançar a parcela ${i + 1}/${totalParcelas}: ${err.message}` })
+            return
+        }
+    }
+}
+
+// ── Parsers das respostas do fluxo de pendente/parcelado — reconhecem as variações de
+// linguagem pedidas (parcelo em 2x / 2 vezes / duas parcelas; vence dia 1 / todo dia 1 /
+// dia 01 / 1º; no crédito / no cartão / cartão de crédito; na conta / no pix / débito).
+function detectarFormaPagamento(textoLower) {
+    if (/cart[aã]o|cr[eé]dito/.test(textoLower)) return 'cartao'
+    if (/\bconta\b|\bpix\b|d[eé]bito|mercado pago|nubank/.test(textoLower)) return 'conta'
+    return null
+}
+
+const NUMEROS_POR_EXTENSO = {
+    'uma': 1, 'um': 1, 'duas': 2, 'dois': 2, 'tr[eê]s': 3, 'quatro': 4, 'cinco': 5,
+    'seis': 6, 'sete': 7, 'oito': 8, 'nove': 9, 'dez': 10, 'onze': 11, 'doze': 12,
+}
+// Retorna { tipo: 'nao' | 'numero' | 'sim_sem_numero' | 'ambiguo', valor? }
+function parseParcelamento(texto) {
+    const lower = texto.trim().toLowerCase()
+    if (/^n[aã]o\b/.test(lower)) return { tipo: 'nao' }
+    const numMatch = lower.match(/(\d+)\s*(x\b|vezes|parcelas)/) || lower.match(/^(\d+)$/)
+    if (numMatch) {
+        const n = parseInt(numMatch[1], 10)
+        if (n >= 1) return { tipo: 'numero', valor: n }
+    }
+    for (const [chave, num] of Object.entries(NUMEROS_POR_EXTENSO)) {
+        if (new RegExp(`\\b${chave}\\b`).test(lower)) return { tipo: 'numero', valor: num }
+    }
+    if (/^s[iî]m\b|^pode\b|^confirma/.test(lower)) return { tipo: 'sim_sem_numero' }
+    return { tipo: 'ambiguo' }
+}
+
+// Aceita "1", "01", "dia 1", "todo dia 1", "dia 01", "1º"
+function parseDiaVencimento(texto) {
+    const m = texto.trim().match(/(\d{1,2})/)
+    if (!m) return null
+    const dia = parseInt(m[1], 10)
+    return dia >= 1 && dia <= 31 ? dia : null
 }
 
 // Retorna true se a mensagem foi tratada como resposta a uma pendência financeira
@@ -1443,7 +1625,7 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
             return true
         }
         financeiroPendentes.delete(participante)
-        await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, empresa: empresaMatch })
+        await processarDespesaFinanceiro(sock, from, participante, { ...pendente.dados, empresa: empresaMatch })
         return true
     }
 
@@ -1523,7 +1705,7 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
                 onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
             })
             financeiroAgent.invalidarCacheCategorias()
-            await tentarLancarComRetryPosCriacao(sock, from, participante, {
+            await continuarAposCriarCategoria(sock, from, participante, {
                 ...dados, categoria: confirmada.categoria, subcategoria: confirmada.subcategoria || '',
             })
         } catch (err) {
@@ -1536,7 +1718,7 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
     if (pendente.aguardando === 'subcategoria_nome_existente') {
         if (ehNao || /^nenhuma\b/.test(lower)) {
             financeiroPendentes.delete(participante)
-            await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, subcategoria: '' })
+            await continuarAposCategoriaResolvida(sock, from, participante, { ...pendente.dados, subcategoria: '' })
             return true
         }
         const nomeSub = texto.trim()
@@ -1544,7 +1726,7 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
         try { subExistente = await financeiroAgent.verificarSubcategoriaExistente(pendente.dados.categoria, nomeSub) } catch {}
         if (subExistente) {
             financeiroPendentes.delete(participante)
-            await tentarLancarFinanceiro(sock, from, participante, { ...pendente.dados, subcategoria: subExistente })
+            await continuarAposCategoriaResolvida(sock, from, participante, { ...pendente.dados, subcategoria: subExistente })
             return true
         }
         financeiroPendentes.set(participante, {
@@ -1576,12 +1758,66 @@ async function tratarRespostaFinanceiroPendente(sock, from, participante, texto)
                 onStatus: m => sock.sendMessage(from, { text: m }).catch(() => {}),
             })
             financeiroAgent.invalidarCacheCategorias()
-            await tentarLancarComRetryPosCriacao(sock, from, participante, {
+            await continuarAposCriarCategoria(sock, from, participante, {
                 ...dados, categoria: confirmada.categoria, subcategoria: confirmada.subcategoria,
             })
         } catch (err) {
             await sock.sendMessage(from, { text: `❌ Não consegui criar a subcategoria: ${err.message}` })
         }
+        return true
+    }
+
+    // ── Fluxo de despesa PENDENTE/PARCELADA ────────────────────────────────────────
+    if (pendente.aguardando === 'forma_pagamento') {
+        const forma = detectarFormaPagamento(lower)
+        if (!forma) {
+            await sock.sendMessage(from, { text: 'Não entendi — vai ser na conta ou no cartão de crédito?' })
+            return true
+        }
+        await perguntarParcelamento(sock, from, participante, { ...pendente.dados, formaPagamento: forma })
+        return true
+    }
+
+    if (pendente.aguardando === 'tem_parcelamento') {
+        const parsed = parseParcelamento(texto)
+        if (parsed.tipo === 'nao') {
+            await perguntarVencimento(sock, from, participante, { ...pendente.dados, parcelas: 1 })
+            return true
+        }
+        if (parsed.tipo === 'numero') {
+            await perguntarVencimento(sock, from, participante, { ...pendente.dados, parcelas: parsed.valor })
+            return true
+        }
+        if (parsed.tipo === 'sim_sem_numero') {
+            await sock.sendMessage(from, { text: 'Em quantas vezes?' })
+            return true // continua no mesmo estado — próxima resposta deve ser só o número
+        }
+        await sock.sendMessage(from, { text: 'Não entendi — vai parcelar? Responda *não*, ou em quantas vezes (ex: 2x, 3 vezes).' })
+        return true
+    }
+
+    if (pendente.aguardando === 'vencimento') {
+        const dia = parseDiaVencimento(texto)
+        if (!dia) {
+            await sock.sendMessage(from, { text: 'Não entendi o dia — responda só o número (ex: 10, dia 10, todo dia 10).' })
+            return true
+        }
+        await mostrarResumoEConfirmar(sock, from, participante, { ...pendente.dados, diaVencimento: dia })
+        return true
+    }
+
+    if (pendente.aguardando === 'confirmar_parcelas') {
+        if (ehNao) {
+            financeiroPendentes.delete(participante)
+            await sock.sendMessage(from, { text: '❌ Ok, cancelado.' })
+            return true
+        }
+        if (!ehSim) {
+            await sock.sendMessage(from, { text: 'Não entendi — confirma? Responda *sim* ou *não*.' })
+            return true
+        }
+        financeiroPendentes.delete(participante)
+        await lancarParcelas(sock, from, participante, pendente.dados)
         return true
     }
 
@@ -1683,6 +1919,9 @@ async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
                 await sock.sendMessage(from, { text: `❌ ${resultado.motivo}` })
                 return
             }
+            // Boleto costuma trazer "vencimento"/"pendente" no próprio texto — dispara o
+            // fluxo de forma de pagamento/parcelamento igual uma mensagem de texto pendente.
+            resultado.dados.ehPendente = financeiroAgent.pareceDespesaPendenteOuParcelada(textoPdf) || resultado.dados.status === 'Pendente'
             await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
         } catch (err) {
             console.error('❌ [Zaya/Financeiro] Erro ao processar PDF:', err.message)
@@ -1705,6 +1944,7 @@ async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
     }
     if (!resultado.ok) return // mensagem não era uma despesa de verdade — ignora silenciosamente
 
+    resultado.dados.ehPendente = financeiroAgent.pareceDespesaPendenteOuParcelada(text) || resultado.dados.status === 'Pendente'
     await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
 }
 

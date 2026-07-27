@@ -156,10 +156,16 @@ REGRAS:
 - conta: nome do banco/forma de pagamento (ex: "Mercado Pago", "Nubank"), SOMENTE se mencionado
   explicitamente. Senão "".
 - cartao: nome/identificação do cartão de crédito, SOMENTE se mencionado explicitamente. Senão "".
+- formaPagamento: "cartao" se a mensagem mencionar "cartão"/"crédito"/"no crédito"; "conta" se mencionar
+  "conta"/"pix"/"débito"; "" se não for possível saber pela mensagem.
+- parcelas: número total de parcelas SE a mensagem mencionar parcelamento (ex: "2x", "em 3 vezes",
+  "parcelado em 4", "duas parcelas") → número inteiro. Se não mencionar parcelamento nenhum, null.
+- diaVencimento: dia do mês (1 a 31) SE a mensagem mencionar um vencimento (ex: "vence dia 10",
+  "todo dia 1", "dia 05", "vencimento no dia 20") → número inteiro. Se não mencionar, null.
 - confianca: número de 0 a 1 indicando o quão seguro você está da categoria escolhida.
 
 Responda EXCLUSIVAMENTE em JSON, sem texto fora do JSON:
-{"valor": 0.00, "empresa": "", "categoria": "...", "subcategoria": "", "descricao": "...", "data": "AAAA-MM-DD", "status": "Concluído", "conta": "", "cartao": "", "confianca": 0.0}`
+{"valor": 0.00, "empresa": "", "categoria": "...", "subcategoria": "", "descricao": "...", "data": "AAAA-MM-DD", "status": "Concluído", "conta": "", "cartao": "", "formaPagamento": "", "parcelas": null, "diaVencimento": null, "confianca": 0.0}`
 }
 
 function descreverCategoriasConhecidas(lista) {
@@ -253,14 +259,31 @@ function normalizarDadosBrutos(bruto, hoje) {
     const cartao = (bruto.cartao || '').toString().trim()
     const confianca = Number(bruto.confianca)
 
+    const formaPagamento = bruto.formaPagamento === 'cartao' ? 'cartao' : bruto.formaPagamento === 'conta' ? 'conta' : ''
+    const parcelasNum = Number(bruto.parcelas)
+    const parcelas = Number.isInteger(parcelasNum) && parcelasNum >= 1 ? parcelasNum : null
+    const diaVencimentoNum = Number(bruto.diaVencimento)
+    const diaVencimento = Number.isInteger(diaVencimentoNum) && diaVencimentoNum >= 1 && diaVencimentoNum <= 31 ? diaVencimentoNum : null
+
     if (!categoria) {
         return { ok: false, motivo: 'Não identifiquei a categoria dessa despesa.' }
     }
 
     return {
         ok: true,
-        dados: { valor, empresa, categoria, subcategoria, descricao, data, status, conta, cartao, confianca: Number.isFinite(confianca) ? confianca : 0.5 },
+        dados: {
+            valor, empresa, categoria, subcategoria, descricao, data, status, conta, cartao,
+            formaPagamento, parcelas, diaVencimento,
+            confianca: Number.isFinite(confianca) ? confianca : 0.5,
+        },
     }
+}
+
+// Detecta se a mensagem indica despesa pendente/a pagar/parcelada — dispara o fluxo de
+// forma de pagamento + parcelamento + vencimento em vez do lançamento imediato normal.
+function pareceDespesaPendenteOuParcelada(texto) {
+    if (!texto) return false
+    return /\bparcel|\bcr[eé]dito\b|\bvence(u)?\b|\bvencimento\b|vai vir|\ba pagar\b|\bpendente\b/i.test(texto)
 }
 
 // ───────────────────────── Browser persistente ─────────────────────────
@@ -637,7 +660,23 @@ async function preencherRestanteESalvar(page, dados) {
     await esperar(200)
 
     await selecionarComboBoxPorLabel(page, 'Status', dados.status || 'Concluído')
-    await esperar(200)
+    await esperar(400) // o campo "Vencimento" só aparece dinamicamente depois de escolher "Pendente"
+
+    // Status "Pendente" revela um campo "Vencimento" (data) separado do campo "Data" —
+    // descoberto por teste ao vivo em 2026-07-27: sem preencher, o formulário não salva.
+    // Usa a mesma data da despesa (pra parcelas, já é a data de vencimento calculada).
+    if ((dados.status || 'Concluído') === 'Pendente') {
+        const vencimentoEl = await elementoPorLabel(page, 'Vencimento')
+        if (vencimentoEl) {
+            await page.evaluate((el, val) => {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+                if (setter) setter.call(el, val); else el.value = val
+                el.dispatchEvent(new Event('input', { bubbles: true }))
+                el.dispatchEvent(new Event('change', { bubbles: true }))
+            }, vencimentoEl, dados.data)
+            await esperar(200)
+        }
+    }
 
     await setarInputPorLabel(page, 'Descrição', dados.descricao)
     await esperar(200)
@@ -700,9 +739,13 @@ async function cadastrarDespesaEmpresa(dados, { onStatus } = {}) {
         const { categoriaReal, subcategoriaReal } = await validarESelecionarCategoria(page, dados.categoria, dados.subcategoria)
 
         // Conta é sempre a fixa da empresa (nunca perguntada) — Ziont → Mercado Pago,
-        // Zark → Nubank. Descrição é sempre o nome exato da subcategoria (ou da categoria,
-        // se ela não tiver subcategoria) — nunca texto livre.
-        const contaResolvida = CONTA_POR_EMPRESA[dados.empresa] || dados.conta || ''
+        // Zark → Nubank. Se a forma de pagamento for cartão de crédito (fluxo de despesa
+        // pendente/parcelada), o banco fica no campo Cartão de crédito em vez de Conta —
+        // Conta fica em branco nesse caso. Descrição é sempre o nome exato da subcategoria
+        // (ou da categoria, se ela não tiver subcategoria) — nunca texto livre.
+        const bancoDaEmpresa = CONTA_POR_EMPRESA[dados.empresa] || ''
+        const contaResolvida = dados.formaPagamento === 'cartao' ? '' : (bancoDaEmpresa || dados.conta || '')
+        const cartaoResolvido = dados.formaPagamento === 'cartao' ? (bancoDaEmpresa || dados.cartao || '') : (dados.cartao || '')
         const descricaoResolvida = subcategoriaReal || categoriaReal
 
         await preencherRestanteESalvar(page, {
@@ -710,10 +753,11 @@ async function cadastrarDespesaEmpresa(dados, { onStatus } = {}) {
             categoria: categoriaReal,
             subcategoria: subcategoriaReal,
             conta: contaResolvida,
+            cartao: cartaoResolvido,
             descricao: descricaoResolvida,
         })
 
-        console.log(`✅ [Financeiro] Lançado: ${descricaoResolvida} — R$ ${dados.valor.toFixed(2)} (${categoriaReal}${subcategoriaReal ? '/' + subcategoriaReal : ''}) — ${dados.empresa} — Conta: ${contaResolvida}`)
+        console.log(`✅ [Financeiro] Lançado: ${descricaoResolvida} — R$ ${dados.valor.toFixed(2)} (${categoriaReal}${subcategoriaReal ? '/' + subcategoriaReal : ''}) — ${dados.empresa} — Conta: ${contaResolvida || '(cartão: ' + cartaoResolvido + ')'}`)
 
         let limiteInfo = null
         try {
@@ -726,6 +770,7 @@ async function cadastrarDespesaEmpresa(dados, { onStatus } = {}) {
             valorLancado: dados.valor,
             empresa: dados.empresa,
             conta: contaResolvida,
+            cartao: cartaoResolvido,
             categoria: categoriaReal,
             subcategoria: subcategoriaReal || null,
             descricao: descricaoResolvida,
@@ -1005,11 +1050,61 @@ function formatarConfirmacao(r) {
     return `✅ Despesa registrada!\n\n${emoji} R$ ${formatarBR(r.valorLancado)} em ${item}\n\nConta: ${r.conta}\n\n🏢 Empresa: ${r.empresa}`
 }
 
+// Calcula as datas de vencimento de N parcelas a partir do dia do mês informado. A
+// primeira parcela cai na PRÓXIMA ocorrência desse dia (se o dia já passou ou é hoje
+// neste mês, começa no mês seguinte); as demais somam 1 mês cada. Datas em AAAA-MM-DD.
+// Dias que não existem no mês (ex: 31 em fevereiro) caem no último dia do mês.
+function calcularDatasParcelas(diaVencimento, quantidade) {
+    const hojeStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+    const [anoH, mesH, diaH] = hojeStr.split('-').map(Number)
+    let ano = anoH
+    let mes = mesH
+    const diasNoMes = (a, m) => new Date(a, m, 0).getDate() // m é 1-based aqui
+
+    if (Math.min(diaVencimento, diasNoMes(ano, mes)) <= diaH) {
+        mes += 1
+        if (mes > 12) { mes = 1; ano += 1 }
+    }
+
+    const datas = []
+    for (let i = 0; i < quantidade; i++) {
+        const diaFinal = Math.min(diaVencimento, diasNoMes(ano, mes))
+        datas.push(`${ano}-${String(mes).padStart(2, '0')}-${String(diaFinal).padStart(2, '0')}`)
+        mes += 1
+        if (mes > 12) { mes = 1; ano += 1 }
+    }
+    return datas
+}
+
+// Emoji + texto de exibição da forma de pagamento — cartão de crédito é sempre 💳; conta
+// usa o banco fixo da empresa (💰 Mercado Pago / 💜 Nubank).
+function formaPagamentoInfo(empresa, formaPagamento) {
+    if (formaPagamento === 'cartao') return { emoji: '💳', texto: 'Cartão de crédito' }
+    const conta = CONTA_POR_EMPRESA[empresa] || ''
+    if (conta === 'Nubank') return { emoji: '💜', texto: 'Nubank' }
+    return { emoji: '💰', texto: 'Mercado Pago' }
+}
+
+// Formato EXATO pedido pelo dono pro fluxo de despesa pendente/parcelada — mostra
+// vencimento e forma de pagamento; o contador "(N/total)" só aparece quando há mais de
+// uma parcela.
+function formatarConfirmacaoPendente(r, { parcelaAtual, totalParcelas, vencimentoDDMM, formaPagamento }) {
+    const emoji = emojiPara(r.categoria, r.subcategoria)
+    const item = r.subcategoria || r.categoria
+    const parcelaTxt = totalParcelas > 1 ? ` (${parcelaAtual}/${totalParcelas})` : ''
+    const pag = formaPagamentoInfo(r.empresa, formaPagamento)
+    return `✅ Despesa registrada!\n\n${emoji} R$ ${formatarBR(r.valorLancado)} em ${item}${parcelaTxt} · vence ${vencimentoDDMM}\n\n${pag.emoji} ${pag.texto}\n\n🏢 Empresa: ${r.empresa}`
+}
+
 module.exports = {
     EMPRESAS,
     emojiPara,
     casarNome,
     pareceDespesaFinanceiro,
+    pareceDespesaPendenteOuParcelada,
+    calcularDatasParcelas,
+    formaPagamentoInfo,
+    formatarConfirmacaoPendente,
     interpretarDespesaTexto,
     interpretarNotaFiscalImagem,
     obterCategoriasConhecidas,
