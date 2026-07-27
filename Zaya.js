@@ -1881,16 +1881,7 @@ async function processarMensagemHistoricaFinanceiro(sock, groupJid, msg) {
             onStatus: m => sock.sendMessage(groupJid, { text: m }).catch(() => {}),
         })
         await sock.sendMessage(groupJid, { react: { text: '✅', key: msg.key } }).catch(() => {})
-        const emoji = financeiroAgent.emojiPara(r.categoria, r.subcategoria)
-        const item = r.subcategoria || r.categoria
-        let linhaLimite = ''
-        if (r.limiteInfo && r.limiteInfo.limite > 0) {
-            const restante = r.limiteInfo.limite - r.limiteInfo.realizado
-            linhaLimite = `\n\n📊 Limite restante em ${r.categoria}: R$ ${financeiroAgent.formatarBR(restante)}`
-        }
-        await sock.sendMessage(groupJid, {
-            text: `✅ Despesa registrada!\n\n${emoji} R$ ${financeiroAgent.formatarBR(r.valorLancado)} em ${item} — ${r.empresa}${linhaLimite}`,
-        })
+        await sock.sendMessage(groupJid, { text: financeiroAgent.formatarConfirmacao(r) })
         console.log(`✅ [Zaya/Empresa] Registrada: R$${dados.valor} em ${dados.categoria}`)
         return 'registrada'
     } catch (err) {

@@ -105,14 +105,23 @@ function extrairJSON(texto) {
     return JSON.parse(m[0])
 }
 
-// Emoji por categoria/subcategoria conhecida — fallback genérico pras novas
+// Emoji por categoria/subcategoria conhecida — fallback genérico (📋) pras novas
 const EMOJIS = {
-    'Transporte': '🚗', 'Publicidade': '📢', 'Pró-labore': '💼', 'Outros': '📦',
-    'Empréstimo': '🏦', 'Plataformas': '🛒',
+    'Camisetas': '👕',
+    'Mercado Livre': '🛒',
+    'Shopee': '🛍️',
+    'Transporte': '🚗',
+    'Publicidade': '📢',
+    'Empréstimo': '💳',
+    'Pró-labore': '👤',
+    'Outros': '📦',
 }
 function emojiPara(categoria, subcategoria) {
-    return EMOJIS[subcategoria] || EMOJIS[categoria] || '💰'
+    return EMOJIS[subcategoria] || EMOJIS[categoria] || '📋'
 }
+
+// Conta fixa por empresa — preenchida automaticamente, nunca perguntada ao usuário
+const CONTA_POR_EMPRESA = { Ziont: 'Mercado Pago', Zark: 'Nubank' }
 
 // Pré-filtro leve — o grupo é 100% dedicado a financeiro, então basta ter um número na
 // mensagem (diferente do pré-filtro do planner pessoal, que precisa de palavras-chave
@@ -689,9 +698,22 @@ async function cadastrarDespesaEmpresa(dados, { onStatus } = {}) {
         await abrirModalSaida(page)
 
         const { categoriaReal, subcategoriaReal } = await validarESelecionarCategoria(page, dados.categoria, dados.subcategoria)
-        await preencherRestanteESalvar(page, { ...dados, categoria: categoriaReal, subcategoria: subcategoriaReal })
 
-        console.log(`✅ [Financeiro] Lançado: ${dados.descricao} — R$ ${dados.valor.toFixed(2)} (${categoriaReal}${subcategoriaReal ? '/' + subcategoriaReal : ''}) — ${dados.empresa}`)
+        // Conta é sempre a fixa da empresa (nunca perguntada) — Ziont → Mercado Pago,
+        // Zark → Nubank. Descrição é sempre o nome exato da subcategoria (ou da categoria,
+        // se ela não tiver subcategoria) — nunca texto livre.
+        const contaResolvida = CONTA_POR_EMPRESA[dados.empresa] || dados.conta || ''
+        const descricaoResolvida = subcategoriaReal || categoriaReal
+
+        await preencherRestanteESalvar(page, {
+            ...dados,
+            categoria: categoriaReal,
+            subcategoria: subcategoriaReal,
+            conta: contaResolvida,
+            descricao: descricaoResolvida,
+        })
+
+        console.log(`✅ [Financeiro] Lançado: ${descricaoResolvida} — R$ ${dados.valor.toFixed(2)} (${categoriaReal}${subcategoriaReal ? '/' + subcategoriaReal : ''}) — ${dados.empresa} — Conta: ${contaResolvida}`)
 
         let limiteInfo = null
         try {
@@ -703,9 +725,10 @@ async function cadastrarDespesaEmpresa(dados, { onStatus } = {}) {
         return {
             valorLancado: dados.valor,
             empresa: dados.empresa,
+            conta: contaResolvida,
             categoria: categoriaReal,
             subcategoria: subcategoriaReal || null,
-            descricao: dados.descricao,
+            descricao: descricaoResolvida,
             status: dados.status || 'Concluído',
             limiteInfo,
         }
@@ -974,17 +997,12 @@ function invalidarCacheCategorias() {
     categoriasCache = null
 }
 
+// Formato EXATO pedido pelo dono — 7 linhas, uma linha vazia entre cada informação.
+// Sem linha de limite/status: só valor+item, conta e empresa.
 function formatarConfirmacao(r) {
     const emoji = emojiPara(r.categoria, r.subcategoria)
     const item = r.subcategoria || r.categoria
-    let linhaLimite = ''
-    if (r.limiteInfo && r.limiteInfo.limite > 0 && r.limiteInfo.percentual != null) {
-        const pct = r.limiteInfo.percentual
-        const iconePct = pct >= 100 ? '🔴' : pct >= 90 ? '🟠' : pct >= 50 ? '🟡' : '🟢'
-        linhaLimite = `\n\n${iconePct} R$ ${formatarBR(r.limiteInfo.realizado)} / R$ ${formatarBR(r.limiteInfo.limite)} (${pct.toFixed(0)}%) em ${item} este mês`
-    }
-    const statusTxt = r.status === 'Pendente' ? '\n⚠️ Status: Pendente' : ''
-    return `✅ Despesa registrada!\n\n${emoji} R$ ${formatarBR(r.valorLancado)} em ${item}\n🏢 Empresa: ${r.empresa}${statusTxt}${linhaLimite}`
+    return `✅ Despesa registrada!\n\n${emoji} R$ ${formatarBR(r.valorLancado)} em ${item}\n\nConta: ${r.conta}\n\n🏢 Empresa: ${r.empresa}`
 }
 
 module.exports = {
