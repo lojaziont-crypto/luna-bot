@@ -21,6 +21,7 @@ const consultoraFinanceira = require('./consultora-financeira')
 const memoriaStore = require('./zaya-memoria')
 const financeiroAgent = require('./financeiro-agent')
 const listaCompras = require('./lista-compras')
+const lembretes = require('./lembretes')
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 
@@ -37,6 +38,8 @@ const ZEON_JANELA_MS = 30 * 60 * 1000
 let despesaPendente = null // { dados, expiraEm } — aguardando confirmação do dono
 const DESPESA_PENDENTE_TTL = 5 * 60 * 1000
 let rendaExtraPendente = null // { valor, expiraEm } — aguardando o dono dizer de qual loja veio
+let lembretePendente = null // { evento, horario, data, expiraEm } — aguardando data e/ou horário
+const LEMBRETE_PENDENTE_TTL = 5 * 60 * 1000
 
 // Últimas mensagens de texto do dono (buffer simples, qualquer tipo), independente de
 // classificação — dá contexto pro comando "anote no planner" (ex: "Luz 103,05 vai vencer
@@ -568,6 +571,121 @@ async function tratarComandoListaCompras(sock, from, texto) {
     return false
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Lembretes (zaya_lembretes.json, via lembretes.js)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RE_LEMBRETES_VER = [
+    /\bmeus lembretes\b/i,
+    /\bo que (eu )?tenho (hoje|amanh[ãa])\b/i,
+    /\bagenda de hoje\b/i,
+    /\bminha agenda\b/i,
+]
+
+// Extrai o termo de um pedido de cancelamento ("cancela a reunião", "remove o
+// lembrete do dentista") — tenta primeiro o padrão com a palavra "lembrete"
+// explícita (isola só o nome depois dela), senão cai no padrão genérico
+// "cancela/remove X". Retorna null se a mensagem não bate em nenhum dos dois.
+function extrairTermoCancelamentoLembrete(texto) {
+    let m = texto.match(/\b(?:cancela(?:r)?|remove(?:r)?)\b.*?\blembrete\b\s*(?:d[eoa]s?\s+)?(.+?)[.!]?\s*$/i)
+    if (m && m[1]) return m[1].trim()
+    m = texto.match(/\b(?:cancela(?:r)?|remove(?:r)?)\s+(?:o|a|os|as)?\s*(.+?)[.!]?\s*$/i)
+    if (m && m[1]) return m[1].trim()
+    return null
+}
+
+// Sinal de que a mensagem é sobre criar um lembrete: menciona horário reconhecível
+// (ex: "9 horas", "14h", "15:30") OU usa palavra-gatilho de lembrete/compromisso
+// ("lembra", "lembrete", "não esquece", "agenda"). Só filtra chamadas óbvias ao
+// Groq — a decisão real (é lembrete ou não) fica com extrairEventoHorarioData.
+const RE_LEMBRETE_HORARIO = /\b([01]?\d|2[0-3])(:[0-5]\d)?\s*h(oras)?\b|\b([01]?\d|2[0-3]):[0-5]\d\b/i
+const RE_LEMBRETE_GATILHO = /\blembr(a|ete|ar)\b|n[ãa]o esque[cç]|\bagenda\b/i
+function pareceLembrete(texto) {
+    return RE_LEMBRETE_HORARIO.test(texto) || RE_LEMBRETE_GATILHO.test(texto)
+}
+
+function montarConfirmacaoLembrete(evento, horario, dataISO) {
+    const relativo = lembretes.formatarRelativo(dataISO)
+    return `✅ Lembrete criado! Vou te avisar 5 minutos antes do evento: ${evento}, às ${horario} (${relativo}).`
+}
+
+// Resposta do dono a uma pergunta de data/horário em aberto (lembretePendente).
+// Retorna true se a mensagem foi consumida por esse fluxo.
+async function tratarRespostaLembretePendente(sock, from, texto) {
+    if (!lembretePendente) return false
+    if (Date.now() > lembretePendente.expiraEm) {
+        lembretePendente = null
+        return false
+    }
+
+    if (lembretePendente.data === null) {
+        const data = lembretes.parseDataTexto(texto)
+        if (!data) {
+            await sock.sendMessage(from, { text: '📅 Não entendi a data — pode dizer de novo? (ex: hoje, amanhã, sexta)' })
+            return true
+        }
+        lembretePendente.data = data
+    } else if (lembretePendente.horario === null) {
+        const horario = lembretes.parseHorarioTexto(texto)
+        if (!horario) {
+            await sock.sendMessage(from, { text: '⏰ Não entendi o horário — pode dizer de novo? (ex: 9h, 14:30)' })
+            return true
+        }
+        lembretePendente.horario = horario
+    }
+
+    if (lembretePendente.data && lembretePendente.horario) {
+        const { evento, horario, data } = lembretePendente
+        lembretes.criarLembrete({ evento, dataHora: `${data}T${horario}:00` })
+        lembretePendente = null
+        await sock.sendMessage(from, { text: montarConfirmacaoLembrete(evento, horario, data) })
+    }
+    return true
+}
+
+// Retorna true se a mensagem foi tratada como comando de lembrete (já respondeu e
+// quem chamou deve dar `continue`); false se não tinha nada a ver.
+async function tratarComandoLembrete(sock, from, texto) {
+    if (RE_LEMBRETES_VER.some(re => re.test(texto))) {
+        await sock.sendMessage(from, { text: lembretes.formatarListaLembretes() })
+        return true
+    }
+
+    const termoCancelar = extrairTermoCancelamentoLembrete(texto)
+    if (termoCancelar) {
+        const removido = lembretes.cancelarLembrete(termoCancelar)
+        if (removido) {
+            await sock.sendMessage(from, { text: `✅ Lembrete de ${removido.evento} removido.` })
+            return true
+        }
+        // Não achou correspondência — não dá pra ter certeza que a frase era mesmo
+        // sobre um lembrete (ex: "cancela essa compra"), deixa cair pros próximos handlers.
+    }
+
+    if (pareceLembrete(texto)) {
+        const extraido = await lembretes.extrairEventoHorarioData(texto)
+        if (extraido && extraido.evento) {
+            const horario = lembretes.parseHorarioTexto(extraido.horarioTexto)
+            const data = lembretes.parseDataTexto(extraido.dataTexto)
+            if (!data) {
+                lembretePendente = { evento: extraido.evento, horario, data: null, expiraEm: Date.now() + LEMBRETE_PENDENTE_TTL }
+                await sock.sendMessage(from, { text: '📅 Qual a data? (ex: hoje, amanhã, sexta)' })
+                return true
+            }
+            if (!horario) {
+                lembretePendente = { evento: extraido.evento, horario: null, data, expiraEm: Date.now() + LEMBRETE_PENDENTE_TTL }
+                await sock.sendMessage(from, { text: '⏰ A que horas? (ex: 9h, 14:30)' })
+                return true
+            }
+            lembretes.criarLembrete({ evento: extraido.evento, dataHora: `${data}T${horario}:00` })
+            await sock.sendMessage(from, { text: montarConfirmacaoLembrete(extraido.evento, horario, data) })
+            return true
+        }
+    }
+
+    return false
+}
+
 async function processarDespesaPlanner(sock, from, texto) {
     let resultado
     try {
@@ -825,6 +943,25 @@ async function enviarAlertasProativos() {
         }
     } catch (err) {
         console.error('❌ [Zaya/Consultora] Erro ao verificar alertas proativos:', err.message)
+    }
+}
+
+// Lembretes — checado a cada 1 min (ver agendamento no fim do arquivo). Dedup e
+// janela de atraso ficam dentro de lembretes.js (verificarESepararParaDisparar já
+// marca enviado=true antes de retornar, então um erro de envio aqui não reenvia).
+async function verificarLembretes() {
+    if (!activeSock) return
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        const paraDisparar = lembretes.verificarESepararParaDisparar()
+        for (const l of paraDisparar) {
+            const [, horaISO] = l.dataHora.split('T')
+            const texto = `⏰ *Lembrete!*\n\n📌 ${l.evento}\n🕘 ${horaISO.slice(0, 5)} — em ${l.minutosRestantes} minutos`
+            await activeSock.sendMessage(ownerJidToSend, { text: texto })
+        }
+        lembretes.limparAntigos()
+    } catch (err) {
+        console.error('❌ [Zaya/Lembretes] Erro ao verificar lembretes:', err.message)
     }
 }
 
@@ -1141,6 +1278,12 @@ async function connectToWhatsApp() {
                     if (tratou) continue
                 }
 
+                // Resposta do dono a uma pergunta de data/horário em aberto de um lembrete
+                if (text && lembretePendente) {
+                    const tratou = await tratarRespostaLembretePendente(sock, from, text)
+                    if (tratou) continue
+                }
+
                 if (textoLower.includes('meus limites') || textoLower.includes('listar limites')) {
                     await responderLimites(sock, from)
                     continue
@@ -1212,6 +1355,14 @@ async function connectToWhatsApp() {
                 if (text) {
                     const tratouLista = await tratarComandoListaCompras(sock, from, text)
                     if (tratouLista) continue
+                }
+
+                // Lembretes — ver/cancelar são regex locais; criar passa pelo Groq
+                // (lembretes.js) só quando a mensagem tem cara de horário/palavra-gatilho
+                // de compromisso. Data/hora que faltarem são perguntadas em seguida.
+                if (text) {
+                    const tratouLembrete = await tratarComandoLembrete(sock, from, text)
+                    if (tratouLembrete) continue
                 }
 
                 // Só passa pelo classificador Groq (despesa/receita/ajuste_limite/conta_luz/
@@ -2803,6 +2954,12 @@ setTimeout(() => {
     verificarPedidosAtrasados().catch(err => console.error('❌ [Zaya/atrasados boot]:', err.message))
     agendarCicloZaya('verificarAtrasados', verificarPedidosAtrasados, 60 * 60 * 1000, 5 * 60 * 1000)
 }, 3 * 60 * 1000)
+
+// Lembretes — checagem fixa a cada 1 min (sem jitter, diferente dos ciclos acima:
+// aqui a granularidade importa pra pegar a janela "faltam 5 minutos" com precisão)
+setInterval(() => {
+    verificarLembretes().catch(err => console.error('❌ [Zaya/lembretes]:', err.message))
+}, 60 * 1000)
 
 // ─────────────────────────────────────────────────────────────────────────────
 
