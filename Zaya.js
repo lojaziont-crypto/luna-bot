@@ -20,6 +20,7 @@ const plannerAgent = require('./planner-agent')
 const consultoraFinanceira = require('./consultora-financeira')
 const memoriaStore = require('./zaya-memoria')
 const financeiroAgent = require('./financeiro-agent')
+const listaCompras = require('./lista-compras')
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 
@@ -476,6 +477,95 @@ function pareceDespesa(texto) {
     if (PADRAO_VENCIMENTO.test(lower)) return true
 
     return NOMES_ITEM_GASTO.some(n => n.length > 2 && lower.includes(n.toLowerCase()))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lista de compras (zaya_lista_compras.json, via lista-compras.js)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Comandos determinísticos (ver ao ir pro mercado, ver sem zerar, zerar) — resolvidos
+// por regex, sem custo de IA. "comprado"/"já comprei" são propositalmente amplos (a
+// pedido do dono) — zerar uma lista à toa é reversível e de baixo risco.
+const RE_LISTA_VER_MERCADO = [
+    /\b(vou|indo|estou)\s+(no|pro|para o)\s+mercado\b/i,
+    /\bvou fazer compras\b/i,
+]
+const RE_LISTA_VER = [
+    /\bmostra(r)?\s+(a\s+)?(minha\s+)?lista\b/i,
+    /\bo que (est[áa]|tem)\s+na lista\b/i,
+    /\blista de compras\b/i,
+]
+const RE_LISTA_ZERAR = [
+    /\bpode dar baixa\b/i,
+    /\bj[áa]\s+comprei\b/i,
+    /\bcomprado\b/i,
+    /\blimpa\s+a\s+lista\b/i,
+    /\bzer(á|a|ar)\s+a\s+lista\b/i,
+]
+
+// Extrai o termo de um pedido de remoção específico ("tira o detergente da lista",
+// "remove o arroz", "não precisa mais de leite") — ou null se a mensagem não bate
+// nesse padrão.
+function extrairTermoRemocaoLista(texto) {
+    let m = texto.match(/\b(?:tira|tire|remove)\s+(?:o|a|os|as)?\s*(.+?)(?:\s+da lista)?[.!]?\s*$/i)
+    if (m && m[1]) return m[1].trim()
+    m = texto.match(/n[ãa]o precisa mais de\s+(.+?)[.!]?\s*$/i)
+    if (m && m[1]) return m[1].trim()
+    return null
+}
+
+// Mensagem "parece" nomear um produto pra adicionar: sem número, sem "?", curta —
+// a menos que mencione "lista" explicitamente (aí libera frases mais longas, ex:
+// "adiciona detergente, sabão em pó e amaciante na lista"). Só filtra chamadas óbvias
+// ao Groq — a decisão real (é produto ou não) fica com classificarEExtrairItens.
+function podeSerItemLista(texto) {
+    const t = texto.trim()
+    if (!t || /\d/.test(t) || t.includes('?')) return false
+    const mencionaLista = /\blista\b/i.test(t)
+    const palavras = t.split(/\s+/)
+    if (mencionaLista) return palavras.length <= 20
+    return palavras.length <= 6
+}
+
+// Retorna true se a mensagem foi tratada como comando de lista de compras (já
+// respondeu e quem chamou deve dar `continue`); false se não tinha nada a ver.
+async function tratarComandoListaCompras(sock, from, texto) {
+    if (RE_LISTA_VER_MERCADO.some(re => re.test(texto)) || RE_LISTA_VER.some(re => re.test(texto))) {
+        await sock.sendMessage(from, { text: listaCompras.formatarListaMercado() })
+        return true
+    }
+
+    if (RE_LISTA_ZERAR.some(re => re.test(texto))) {
+        listaCompras.zerarLista()
+        await sock.sendMessage(from, { text: '✅ Lista zerada! Começando do zero.' })
+        return true
+    }
+
+    const termoRemocao = extrairTermoRemocaoLista(texto)
+    if (termoRemocao) {
+        const removido = listaCompras.removerItem(termoRemocao)
+        if (removido) {
+            await sock.sendMessage(from, { text: `✅ ${removido} removido da lista.` })
+            return true
+        }
+        // Não achou correspondência na lista — não dá pra ter certeza que a frase era
+        // mesmo sobre a lista de compras (ex: "tira uma dúvida"), então não responde
+        // nada aqui e deixa cair pros próximos handlers.
+    }
+
+    if (podeSerItemLista(texto)) {
+        const itens = await listaCompras.classificarEExtrairItens(texto)
+        if (itens) {
+            const adicionados = listaCompras.adicionarItens(itens)
+            const texto2 = adicionados.length
+                ? listaCompras.formatarConfirmacaoAdicionados(adicionados)
+                : 'Esse item já está na lista.'
+            await sock.sendMessage(from, { text: texto2 })
+            return true
+        }
+    }
+
+    return false
 }
 
 async function processarDespesaPlanner(sock, from, texto) {
@@ -1114,6 +1204,14 @@ async function connectToWhatsApp() {
                         }
                         continue
                     }
+                }
+
+                // Lista de compras — ver ao ir pro mercado/zerar/remover são regex locais;
+                // adicionar item passa pelo Groq (lista-compras.js) só quando a mensagem tem
+                // cara de nome de produto (sem número, curta ou mencionando "lista").
+                if (text) {
+                    const tratouLista = await tratarComandoListaCompras(sock, from, text)
+                    if (tratouLista) continue
                 }
 
                 // Só passa pelo classificador Groq (despesa/receita/ajuste_limite/conta_luz/
