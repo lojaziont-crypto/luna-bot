@@ -540,7 +540,7 @@ async function tratarComandoListaCompras(sock, from, texto) {
 
     if (RE_LISTA_ZERAR.some(re => re.test(texto))) {
         listaCompras.zerarLista()
-        await sock.sendMessage(from, { text: '✅ Lista zerada! Começando do zero.' })
+        await sock.sendMessage(from, { text: '✅ Lista de compras zerada!' })
         return true
     }
 
@@ -557,13 +557,14 @@ async function tratarComandoListaCompras(sock, from, texto) {
     }
 
     if (podeSerItemLista(texto)) {
-        const itens = await listaCompras.classificarEExtrairItens(texto)
-        if (itens) {
-            const adicionados = listaCompras.adicionarItens(itens)
-            const texto2 = adicionados.length
-                ? listaCompras.formatarConfirmacaoAdicionados(adicionados)
-                : 'Esse item já está na lista.'
-            await sock.sendMessage(from, { text: texto2 })
+        const itensClassificados = await listaCompras.classificarEExtrairItens(texto)
+        if (itensClassificados) {
+            const resultado = listaCompras.adicionarItens(itensClassificados)
+            const mensagens = listaCompras.formatarResultadoAdicao(resultado)
+            for (const m of mensagens) {
+                await sock.sendMessage(from, { text: m })
+                if (mensagens.length > 1) await esperar(300 + Math.random() * 500)
+            }
             return true
         }
     }
