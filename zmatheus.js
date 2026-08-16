@@ -31,7 +31,7 @@ const http = require('http')
 const { Boom } = require('@hapi/boom')
 const qrcode = require('qrcode-terminal')
 const pino = require('pino')
-const { TERMOS_BUSCA, buscarEmpresasNoMaps } = require('./maps-prospeccao')
+const { TERMOS_BUSCA, buscarEmpresasNoMaps, pareceCelular } = require('./maps-prospeccao')
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 const aleatorioEntre = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
@@ -186,7 +186,9 @@ async function cicloProspeccao(sock) {
 
     let encontradas = []
     try {
-        encontradas = await buscarEmpresasNoMaps(termo, 5, PROFILE_DIR)
+        // 20 (não só 8-10) de propósito — parte considerável descarta como fixo antes
+        // mesmo de checar WhatsApp, precisa de matéria-prima extra pra sobrar 8-10 bons.
+        encontradas = await buscarEmpresasNoMaps(termo, 20, PROFILE_DIR)
     } catch (err) {
         console.error('❌ [ZMatheus] Erro na busca do Google Maps:', err.message)
         return
@@ -197,9 +199,15 @@ async function cicloProspeccao(sock) {
     const jaContatadasAntes = await comMemoria(mem => new Set(mem.empresasContatadas.map(e => normalizarTelefone(e.telefone))))
     const candidatas = encontradas.filter(e => !jaContatadasAntes.has(normalizarTelefone(e.telefone)))
 
+    // Fixo é descartado ANTES até de gastar a chamada de rede — só celular (DDD + 9
+    // dígitos) pode ter WhatsApp de verdade.
     const comWhatsapp = []
     for (const emp of candidatas) {
         if (comWhatsapp.length >= restante) break
+        if (!pareceCelular(emp.telefone)) {
+            console.log(`📵 [ZMatheus] Número fixo ignorado: ${emp.telefone}`)
+            continue
+        }
         let temWhatsapp = false
         try {
             const r = await checarWhatsapp(sock, emp.telefone)
@@ -219,7 +227,7 @@ async function cicloProspeccao(sock) {
         const restanteAgora = mem.contadorDiarioMatheus.meta - mem.contadorDiarioMatheus.quantidade
         const novas = comWhatsapp
             .filter(e => !jaContatadas.has(normalizarTelefone(e.telefone)))
-            .slice(0, Math.min(aleatorioEntre(3, 5), restanteAgora))
+            .slice(0, Math.min(aleatorioEntre(8, 10), restanteAgora))
 
         for (const emp of novas) {
             const canal = proximoCanal(mem)
@@ -440,7 +448,7 @@ const server = http.createServer((req, res) => {
 if (require.main === module) {
     console.log('⚡ Iniciando ZMatheus...')
     console.log(`📱 Conectando ao WhatsApp do Matheus (${MATHEUS_PHONE}) — auth em ${AUTH_DIR}`)
-    console.log('🔍 Prospecção: mesma lógica do ZVendas (Google Maps, "aberto agora"), canal "matheus", zvendas_memoria.json compartilhado')
+    console.log('🔍 Prospecção: mesma lógica do ZVendas (Google Maps, "aberto agora"), 8-10 empresas/ciclo (fixo descartado antes de checar WhatsApp), canal "matheus", zvendas_memoria.json compartilhado')
     console.log('📨 Abordagem: 2 mensagens fixas (saudação + "Tudo bem?"), 8-15s de intervalo — sem IA, sem atendimento, para depois disso')
     server.listen(PORT, () => console.log(`🚀 ZMatheus HTTP server na porta ${PORT}`))
     connectToWhatsApp()

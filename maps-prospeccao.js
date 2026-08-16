@@ -10,6 +10,18 @@ const { launchBrowser, resolverChrome, configurarPagina } = require('./shopee-ag
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 
+// Celular vs fixo — feito localmente (sem gastar chamada de rede) ANTES de
+// verificar WhatsApp: só celular (DDD + 9 dígitos, com o 9º começando em "9")
+// pode ter WhatsApp de verdade; fixo é descartado na hora, sem nem tentar.
+// Mesma convenção de limpeza já usada em normalizarTelefone (zvendas.js/
+// zmatheus.js): remove tudo que não é dígito, depois o código do país (55) do
+// início, se houver.
+function pareceCelular(telefoneBruto) {
+    const limpo = String(telefoneBruto || '').replace(/\D/g, '').replace(/^55/, '')
+    const restante = limpo.slice(2) // depois do DDD (2 primeiros dígitos)
+    return restante.length > 0 && restante[0] === '9'
+}
+
 const TERMOS_BUSCA = [
     'restaurante SP', 'escola SP', 'academia SP', 'loja de roupas SP', 'empresa SP',
     'clínica SP', 'escritório SP', 'hotel SP', 'farmácia SP', 'supermercado SP',
@@ -91,4 +103,4 @@ async function buscarEmpresasNoMaps(termo, quantidade, profileDir) {
     return empresas
 }
 
-module.exports = { TERMOS_BUSCA, buscarEmpresasNoMaps }
+module.exports = { TERMOS_BUSCA, buscarEmpresasNoMaps, pareceCelular }

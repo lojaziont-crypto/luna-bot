@@ -12,7 +12,7 @@ const path = require('path')
 const http = require('http')
 const https = require('https')
 const Anthropic = require('@anthropic-ai/sdk')
-const { TERMOS_BUSCA, buscarEmpresasNoMaps: buscarEmpresasNoMapsCompartilhado } = require('./maps-prospeccao')
+const { TERMOS_BUSCA, buscarEmpresasNoMaps: buscarEmpresasNoMapsCompartilhado, pareceCelular } = require('./maps-prospeccao')
 
 const anthropic = new Anthropic({ timeout: 30000 }) // ANTHROPIC_API_KEY do .env
 
@@ -304,7 +304,9 @@ async function cicloProspeccao() {
 
     let encontradas = []
     try {
-        encontradas = await buscarEmpresasNoMaps(termo, 5)
+        // 20 (não só 8-10) de propósito — parte considerável descarta como fixo antes
+        // mesmo de checar WhatsApp, precisa de matéria-prima extra pra sobrar 8-10 bons.
+        encontradas = await buscarEmpresasNoMaps(termo, 20)
     } catch (err) {
         console.error('❌ [ZVendas] Erro na busca do Google Maps:', err.message)
         return
@@ -315,10 +317,16 @@ async function cicloProspeccao() {
     const candidatas = encontradas.filter(e => !jaContatadasAntes.has(normalizarTelefone(e.telefone)))
 
     // Só entra na fila quem realmente tem WhatsApp (via Zaya/sock.onWhatsApp) — evita
-    // gastar abordagem com telefone fixo/comercial sem WhatsApp.
+    // gastar abordagem com telefone fixo/comercial sem WhatsApp. Fixo é descartado
+    // ANTES até de gastar a chamada de rede — só celular (DDD + 9 dígitos) pode ter
+    // WhatsApp de verdade.
     const comWhatsapp = []
     for (const emp of candidatas) {
         if (comWhatsapp.length >= restante) break
+        if (!pareceCelular(emp.telefone)) {
+            console.log(`📵 [ZVendas] Número fixo ignorado: ${emp.telefone}`)
+            continue
+        }
         let temWhatsapp = false
         try {
             const r = await zayaRequest('/check-whatsapp', { numero: emp.telefone })
@@ -340,7 +348,7 @@ async function cicloProspeccao() {
         const restanteAgora = mem.contadorDiario.meta - mem.contadorDiario.quantidade
         const novas = comWhatsapp
             .filter(e => !jaContatadas.has(normalizarTelefone(e.telefone)))
-            .slice(0, Math.min(aleatorioEntre(3, 5), restanteAgora))
+            .slice(0, Math.min(aleatorioEntre(8, 10), restanteAgora))
 
         for (const emp of novas) {
             const canal = proximoCanal(mem)
@@ -1332,7 +1340,7 @@ const server = http.createServer((req, res) => {
 // via `node -e`) NUNCA deve abrir porta nem começar a raspar/mandar mensagem sozinho.
 if (require.main === module) {
     console.log('⚡ Iniciando ZVendas...')
-    console.log('🔍 Prospecção automática: 24h, só empresas "aberto agora", intervalos progressivos 1/2/4/8/16/32min depois fixo 64min (±30s), 3-5 empresas/ciclo, 15-25/dia')
+    console.log('🔍 Prospecção automática: 24h, só empresas "aberto agora", intervalos progressivos 1/2/4/8/16/32min depois fixo 64min (±30s), 8-10 empresas/ciclo (fixo descartado antes de checar WhatsApp), 15-25/dia')
     console.log('🔀 Canal: empresas novas alternam entre "zaya" e "matheus" (zvendas_memoria.json compartilhado) — este processo só aborda as do canal "zaya"')
     console.log('📱 Abordagem inicial: ciclo 15-40min, 2 mensagens (saudação + "Tudo bem?") com 8-15s de intervalo, depois aguarda resposta')
     console.log('💬 Atendimento: 24h, delay de digitação humanizado 3-30s (com indicador "digitando...") antes de cada mensagem')
