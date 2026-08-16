@@ -22,6 +22,9 @@ const memoriaStore = require('./zaya-memoria')
 const financeiroAgent = require('./financeiro-agent')
 const listaCompras = require('./lista-compras')
 const lembretes = require('./lembretes')
+const Groq = require('groq-sdk')
+
+const groqAudio = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 
@@ -40,6 +43,17 @@ const DESPESA_PENDENTE_TTL = 5 * 60 * 1000
 let rendaExtraPendente = null // { valor, expiraEm } — aguardando o dono dizer de qual loja veio
 let lembretePendente = null // { evento, horario, data, expiraEm } — aguardando data e/ou horário
 const LEMBRETE_PENDENTE_TTL = 5 * 60 * 1000
+
+// ZVendas (agente vendedor) — não tem sessão WhatsApp própria, usa a da Zaya
+// via /send-message e /apply-label.
+const ZVENDAS_URL = process.env.ZVENDAS_URL || 'http://localhost:3004'
+const ARQUIVO_LABELS = path.join(__dirname, 'zaya_labels.json')
+const ZVENDAS_ARTES_DIR = path.join(__dirname, 'zvendas_artes')
+let gruposCache = { at: 0, lista: [] }
+
+// Todas as notificações proativas do Zyon (vendas, alertas, relatórios, pedidos,
+// saldo de ads, saúde da conta etc.) vão pro grupo, não pro número pessoal do Maurício.
+const GRUPO_ZYON_ADMIN = 'Zark e Ziont | Administração'
 
 // Últimas mensagens de texto do dono (buffer simples, qualquer tipo), independente de
 // classificação — dá contexto pro comando "anote no planner" (ex: "Luz 103,05 vai vencer
@@ -93,6 +107,11 @@ function salvarListas(listas) {
 
 // JID do grupo Ziont — carregado do env ou resolvido na primeira mensagem recebida
 let ziontGroupJid = process.env.ZIONT_GROUP_JID || null
+
+// JID do grupo "Zark e Ziont | Administração" — carregado do env ou resolvido na
+// primeira mensagem recebida (subject precisa conter zark + ziont + administra,
+// mesmo padrão do grupo Financeiro, pra não colidir com o grupo "Ziont" comum).
+let zyonAdminGroupJid = process.env.ZYON_ADMIN_GROUP_JID || null
 
 // JID do grupo "Zark e Ziont | Financeiro" — carregado do env ou resolvido na primeira
 // mensagem recebida (subject precisa conter zark + ziont + financeiro, pra não colidir
@@ -227,14 +246,23 @@ async function resolverJid(sock, phone) {
     return fallback
 }
 
+// Prefere o JID já identificado via primeira mensagem do grupo (rápido, sem round-trip);
+// cai para a busca ao vivo por nome (resolverGrupoPorNome, cache de 10min) se ainda não
+// identificado — cobre o caso de mandar uma notificação antes de qualquer mensagem ter
+// chegado desse grupo.
+async function resolverGrupoZyonAdmin(sock) {
+    if (zyonAdminGroupJid) return zyonAdminGroupJid
+    return resolverDestino(sock, null, GRUPO_ZYON_ADMIN)
+}
+
 async function notifyNewOrder(orderId) {
     if (!activeSock) return
-    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
     try {
-        await activeSock.sendMessage(ownerJidToSend, {
+        const jid = await resolverGrupoZyonAdmin(activeSock)
+        await activeSock.sendMessage(jid, {
             text: `🛍️ *Nova Venda!*\n\nPedido *#${orderId}* confirmado! 🎉\n\nAcesse a Shopee para preparar o envio.`
         })
-        console.log(`🛍️ [Zyon→Zaya] Notificação enviada: pedido #${orderId}`)
+        console.log(`🛍️ [Zyon→Zaya] Notificação enviada ao grupo Administração: pedido #${orderId}`)
     } catch (err) {
         console.error('❌ Erro ao enviar notificação de novo pedido:', err.message)
     }
@@ -295,6 +323,23 @@ async function notifyZeon(mensagem) {
     }
 }
 
+// Canal próprio do Zyon (agente da Shopee) — distinto do Zeon (outro agente que também
+// existe nesse projeto). Todas as notificações proativas do Zyon vão pro grupo
+// Administração, não pro número pessoal do Maurício.
+async function notifyZyon(mensagem) {
+    if (!activeSock) {
+        console.log('⚠️ notifyZyon: WhatsApp não conectado')
+        return
+    }
+    try {
+        const jid = await resolverGrupoZyonAdmin(activeSock)
+        await activeSock.sendMessage(jid, { text: mensagem })
+        console.log('🛍️ [Zyon→Zaya] Mensagem enviada ao grupo Administração')
+    } catch (err) {
+        console.error('❌ Erro ao enviar notificação do Zyon:', err.message)
+    }
+}
+
 function repassarRespostaZeon(idDecisao, resposta) {
     const zeonUrl = process.env.ZEON_URL || 'http://localhost:3003'
     const data = JSON.stringify({ idDecisao, resposta })
@@ -343,6 +388,164 @@ function enviarMensagemZeon(mensagem) {
     req.on('error', err => console.error(`❌ [Zaya] Erro ao enviar mensagem ao Zeon: ${err.message}`))
     req.write(data)
     req.end()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOVO: ZVendas — notificação, repasse de decisão de desconto, e o próprio
+// envio de mensagem/etiquetas em nome do ZVendas (ele não tem sessão própria)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function notifyZVendas(mensagem) {
+    if (!activeSock) {
+        console.log('⚠️ notifyZVendas: WhatsApp não conectado')
+        return
+    }
+    const ownerJidToSend = ownerJid || `55${process.env.OWNER_PHONE}@s.whatsapp.net`
+    try {
+        await activeSock.sendMessage(ownerJidToSend, { text: mensagem })
+        console.log('🛍️ [ZVendas→Zaya] Mensagem enviada ao dono')
+    } catch (err) {
+        console.error('❌ Erro ao enviar notificação do ZVendas:', err.message)
+    }
+}
+
+function repassarRespostaZVendas(idDecisao, resposta) {
+    const data = JSON.stringify({ idDecisao, resposta })
+    let parsedUrl
+    try { parsedUrl = new URL(`${ZVENDAS_URL}/resposta-mauricio`) } catch {
+        console.error(`❌ [Zaya] ZVENDAS_URL inválida: ${ZVENDAS_URL}`)
+        return
+    }
+    const lib = parsedUrl.protocol === 'https:' ? https : http
+    const port = parsedUrl.port ? Number(parsedUrl.port) : 80
+
+    const req = lib.request({
+        hostname: parsedUrl.hostname,
+        port,
+        path: parsedUrl.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+    }, res => {
+        console.log(`📨 [Zaya→ZVendas] Resposta repassada (HTTP ${res.statusCode}): ${idDecisao} — ${resposta}`)
+    })
+    req.on('error', err => console.error(`❌ [Zaya] Erro ao repassar resposta ao ZVendas: ${err.message}`))
+    req.write(data)
+    req.end()
+}
+
+// Transcreve um áudio (buffer) via Groq Whisper. Retorna string vazia se falhar
+// ou se a transcrição vier vazia — quem chama decide o que fazer com isso.
+async function transcreverAudio(buffer, mimetype) {
+    try {
+        const ext = (mimetype || '').includes('ogg') ? 'ogg' : (mimetype || '').includes('mp4') ? 'm4a' : 'ogg'
+        const arquivo = await Groq.toFile(buffer, `audio.${ext}`, { type: mimetype || 'audio/ogg' })
+        const resposta = await groqAudio.audio.transcriptions.create({
+            file: arquivo,
+            model: 'whisper-large-v3',
+            language: 'pt',
+        })
+        return (resposta?.text || '').trim()
+    } catch (err) {
+        console.error('⚠️ [Zaya] Erro ao transcrever áudio (Groq):', err.message)
+        return ''
+    }
+}
+
+// Encaminha uma mensagem de não-dono ao ZVendas (fire-and-forget) — o ZVendas
+// decide se o JID pertence a uma conversa ativa dele; se não, ignora em silêncio.
+// key/messageTimestamp (a própria mensagem recebida) são guardados pelo ZVendas e
+// usados depois em POST /mark-unread se ele não conseguir mapear a resposta pra
+// nenhuma ação clara — sock.chatModify exige a referência da última mensagem pra
+// marcar como não lida (ver endpoint /mark-unread abaixo).
+function encaminharMensagemParaZVendas(from, text, pushName, ehInterativo, temMidia, arteCaminho, downloadFalhou, audioTranscricaoFalhou, key, messageTimestamp) {
+    return new Promise(resolve => {
+        const data = JSON.stringify({ from, text, pushName: pushName || '', ehInterativo: !!ehInterativo, temMidia: !!temMidia, arteCaminho: arteCaminho || null, downloadFalhou: !!downloadFalhou, audioTranscricaoFalhou: !!audioTranscricaoFalhou, key: key || null, messageTimestamp: messageTimestamp || null })
+        let parsedUrl
+        try { parsedUrl = new URL(`${ZVENDAS_URL}/incoming-message`) } catch { return resolve() }
+        const lib = parsedUrl.protocol === 'https:' ? https : http
+        const port = parsedUrl.port ? Number(parsedUrl.port) : 80
+
+        const req = lib.request({
+            hostname: parsedUrl.hostname,
+            port,
+            path: parsedUrl.pathname,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+        }, res => {
+            res.on('data', () => {})
+            res.on('end', () => resolve())
+        })
+        req.on('error', () => resolve())
+        req.setTimeout(5000, () => { req.destroy(); resolve() })
+        req.write(data)
+        req.end()
+    })
+}
+
+// Etiquetas do WhatsApp Business — sincronizadas pelo Baileys via app-state
+// ('labels.edit', registrado em connectToWhatsApp) e persistidas em zaya_labels.json.
+// garantirLabel só CRIA uma etiqueta nova se ela realmente não existir na conta
+// (as 6 etiquetas do ZVendas já foram cadastradas manualmente no WhatsApp Business).
+function normalizarNomeLabel(nome) {
+    return String(nome || '').trim().toLowerCase()
+}
+
+function carregarLabelsMap() {
+    try { return JSON.parse(fs.readFileSync(ARQUIVO_LABELS, 'utf8')) } catch { return {} }
+}
+
+function salvarLabelsMap(mapa) {
+    try { fs.writeFileSync(ARQUIVO_LABELS, JSON.stringify(mapa, null, 2), 'utf8') } catch (err) {
+        console.error('❌ [Zaya] Erro ao salvar zaya_labels.json:', err.message)
+    }
+}
+
+async function garantirLabel(sock, nome) {
+    const chave = normalizarNomeLabel(nome)
+    const mapa = carregarLabelsMap()
+    if (mapa[chave]) return mapa[chave].id
+
+    const idsExistentes = Object.values(mapa).map(l => Number(l.id)).filter(n => !Number.isNaN(n))
+    const novoId = String((idsExistentes.length ? Math.max(...idsExistentes) : 0) + 1)
+    await sock.addLabel('', { id: novoId, name: nome, color: 0, predefinedId: null, deleted: false })
+    mapa[chave] = { id: novoId, nome }
+    salvarLabelsMap(mapa)
+    console.log(`🏷️  [Zaya] Etiqueta "${nome}" não encontrada na sincronização — criada agora (id ${novoId})`)
+    return novoId
+}
+
+async function aplicarLabelContato(sock, jid, nome) {
+    const id = await garantirLabel(sock, nome)
+    await sock.addChatLabel(jid, id)
+    console.log(`🏷️  [Zaya] addChatLabel confirmado pelo WhatsApp: ${jid} → "${nome}" (id ${id})`)
+}
+
+// Resolve o JID de um grupo pelo nome (regex), consultando todos os grupos que a
+// conta participa. Cacheado por 10 min pra não bater na API a cada envio.
+async function resolverGrupoPorNome(sock, regexNome) {
+    const AGORA = Date.now()
+    if (AGORA - gruposCache.at > 10 * 60 * 1000) {
+        try {
+            const grupos = await sock.groupFetchAllParticipating()
+            gruposCache = { at: AGORA, lista: Object.values(grupos) }
+        } catch (err) {
+            console.error('❌ [Zaya] Erro ao listar grupos:', err.message)
+        }
+    }
+    return gruposCache.lista.find(g => regexNome.test(g.subject || ''))
+}
+
+// Resolve destino (contato ou grupo) compartilhado por /send-message e /send-image.
+async function resolverDestino(sock, to, toGroupName) {
+    if (toGroupName) {
+        const escapado = String(toGroupName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const grupo = await resolverGrupoPorNome(sock, new RegExp(escapado, 'i'))
+        if (!grupo) throw new Error(`Grupo "${toGroupName}" não encontrado`)
+        return grupo.id
+    }
+    if (to && to.includes('@')) return to
+    if (to) return resolverJid(sock, to)
+    throw new Error('to ou toGroupName é obrigatório')
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1078,6 +1281,23 @@ const server = http.createServer((req, res) => {
             }
         })
 
+    // NOVO: Zyon envia mensagem/alerta/relatório proativo — vai pro grupo Administração
+    } else if (req.method === 'POST' && req.url === '/zyon-notificacao') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { mensagem } = JSON.parse(body)
+                await notifyZyon(mensagem)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /zyon-notificacao error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
     } else if (req.method === 'POST' && req.url === '/notify-producao-lucas') {
         let body = ''
         req.on('data', chunk => { body += chunk })
@@ -1128,6 +1348,199 @@ const server = http.createServer((req, res) => {
         // Usa o mesmo fluxo de produção: consulta Zyon antes, envia só pendentes, envia no grupo
         cobrarAdriano(hoje).catch(err => console.error('❌ [Zaya/teste] Erro na cobrança de teste:', err.message))
 
+    // NOVO: ZVendas manda mensagem (a própria abordagem ou conversa) usando a sessão da Zaya
+    } else if (req.method === 'POST' && req.url === '/send-message') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                const { to, toGroupName, message, digitandoMs } = JSON.parse(body)
+                if (!message) throw new Error('message é obrigatório')
+                const jid = await resolverDestino(activeSock, to, toGroupName)
+                // digitandoMs (opcional, usado pelo ZVendas): mostra "digitando..." antes
+                // de mandar, simulando o tempo real que uma pessoa levaria pra escrever.
+                if (digitandoMs && Number(digitandoMs) > 0) {
+                    try { await activeSock.sendPresenceUpdate('composing', jid) } catch {}
+                    await esperar(Number(digitandoMs))
+                    try { await activeSock.sendPresenceUpdate('paused', jid) } catch {}
+                }
+                await activeSock.sendMessage(jid, { text: message })
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, jid }))
+            } catch (err) {
+                console.error('❌ /send-message error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas pede pra reenviar uma imagem já salva em disco (ex: arte do cliente)
+    } else if (req.method === 'POST' && req.url === '/send-image') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                const { to, toGroupName, caminho, caption } = JSON.parse(body)
+                if (!caminho) throw new Error('caminho é obrigatório')
+                if (!fs.existsSync(caminho)) throw new Error(`Arquivo não encontrado: ${caminho}`)
+                const jid = await resolverDestino(activeSock, to, toGroupName)
+                await activeSock.sendMessage(jid, { image: fs.readFileSync(caminho), caption: caption || undefined })
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, jid }))
+            } catch (err) {
+                console.error('❌ /send-image error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas pede pra aplicar uma etiqueta num contato
+    } else if (req.method === 'POST' && req.url === '/apply-label') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                const { jid, label } = JSON.parse(body)
+                if (!jid || !label) throw new Error('jid e label são obrigatórios')
+                await aplicarLabelContato(activeSock, jid, label)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /apply-label error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas pede pra marcar uma conversa como não lida — usado quando ele
+    // não consegue mapear a mensagem do cliente pra nenhuma ação clara (pergunta
+    // fora do contexto de venda etc.) e prefere deixar pra revisão manual em vez de
+    // responder algo errado. chatModify markRead:false exige a referência (key +
+    // messageTimestamp) da última mensagem recebida, por isso o ZVendas manda de volta
+    // exatamente o que a Zaya encaminhou em encaminharMensagemParaZVendas.
+    } else if (req.method === 'POST' && req.url === '/mark-unread') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                const { jid, key, messageTimestamp } = JSON.parse(body)
+                if (!jid || !key || !messageTimestamp) throw new Error('jid, key e messageTimestamp são obrigatórios')
+                await activeSock.chatModify({ markRead: false, lastMessages: [{ key, messageTimestamp }] }, jid)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /mark-unread error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas manda avisar o Maurício de algo (ex: desconto pedido, pedido fechado)
+    } else if (req.method === 'POST' && req.url === '/zvendas-notificacao') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                const { mensagem } = JSON.parse(body)
+                await notifyZVendas(mensagem)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true }))
+            } catch (err) {
+                console.error('❌ /zvendas-notificacao error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas pergunta se um número tem WhatsApp antes de colocar na fila de prospecção
+    } else if (req.method === 'POST' && req.url === '/check-whatsapp') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                const { numero } = JSON.parse(body)
+                if (!numero) throw new Error('numero é obrigatório')
+                const base = String(numero).replace(/\D/g, '')
+                const comCC = base.startsWith('55') ? base : `55${base}`
+                const resultado = await activeSock.onWhatsApp(comCC)
+                const encontrado = resultado?.[0]
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, temWhatsapp: !!encontrado?.exists, jid: encontrado?.jid || null }))
+            } catch (err) {
+                console.error('❌ /check-whatsapp error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas pede o catálogo real de produtos do WhatsApp Business
+    } else if (req.method === 'POST' && req.url === '/catalogo') {
+        (async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                // getCatalog já travou (nunca resolve nem rejeita) nesta conta em testes
+                // anteriores — corrida contra timeout pra sempre responder algo em vez de
+                // pendurar a requisição do ZVendas pra sempre.
+                const { products } = await Promise.race([
+                    activeSock.getCatalog({ limit: 100 }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('getCatalog não respondeu em 90s')), 90000)),
+                ])
+                const produtos = (products || []).map(p => ({
+                    id: p.id, nome: p.name, descricao: p.description || '', preco: p.price ?? null,
+                    moeda: p.currency || 'BRL', imageUrl: p.imageUrls?.[0] || null, retailerId: p.retailerId || null,
+                    url: p.url || null,
+                }))
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, produtos }))
+            } catch (err) {
+                console.error('❌ /catalogo error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })()
+
+    // NOVO: ZVendas pede pra mandar um produto do catálogo como product message de verdade
+    } else if (req.method === 'POST' && req.url === '/send-product') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', async () => {
+            try {
+                if (!activeSock) throw new Error('WhatsApp não conectado')
+                const { to, toGroupName, produto } = JSON.parse(body)
+                if (!produto?.nome) throw new Error('produto.nome é obrigatório')
+                const jid = await resolverDestino(activeSock, to, toGroupName)
+                await activeSock.sendMessage(jid, {
+                    product: {
+                        productId: produto.id || undefined,
+                        title: produto.nome,
+                        description: produto.descricao || '',
+                        currencyCode: produto.moeda || 'BRL',
+                        priceAmount1000: produto.preco != null ? Math.round(produto.preco * 1000) : undefined,
+                        retailerId: produto.retailerId || undefined,
+                        productImage: produto.imageUrl ? { url: produto.imageUrl } : undefined,
+                    },
+                    businessOwnerJid: activeSock.user?.id,
+                })
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: true, jid }))
+            } catch (err) {
+                console.error('❌ /send-product error:', err.message)
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ ok: false, error: err.message }))
+            }
+        })
+
+    // NOVO: ZVendas pede o número do próprio WhatsApp Business (pra montar link de catálogo)
+    } else if (req.url === '/meu-numero') {
+        const numero = activeSock?.user?.id?.split('@')[0]?.split(':')[0] || null
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, numero }))
+
     } else if (req.url === '/health') {
         res.writeHead(200)
         res.end('ok')
@@ -1167,6 +1580,19 @@ async function connectToWhatsApp() {
 
     sock.ev.on('contacts.upsert', contacts => {
         processarContatos(contacts)
+    })
+
+    // Sincroniza as etiquetas do WhatsApp Business (as 6 usadas pelo ZVendas já
+    // foram cadastradas manualmente no app) — garantirLabel só cria uma nova se
+    // ela não aparecer aqui.
+    sock.ev.on('labels.edit', (label) => {
+        if (!label?.id || !label?.name) return
+        const mapa = carregarLabelsMap()
+        const chave = normalizarNomeLabel(label.name)
+        if (label.deleted) delete mapa[chave]
+        else mapa[chave] = { id: label.id, nome: label.name }
+        salvarLabelsMap(mapa)
+        console.log(`🏷️  [Zaya] Etiqueta sincronizada: "${label.name}" (id ${label.id})${label.deleted ? ' [removida]' : ''}`)
     })
 
     sock.ev.on('connection.update', (update) => {
@@ -1236,6 +1662,9 @@ async function connectToWhatsApp() {
                 await tratarMensagemGrupoFinanceiro(sock, msg, from).catch(err =>
                     console.error('❌ [Zaya/Financeiro] Erro ao tratar mensagem de grupo:', err.message)
                 )
+                await tratarMensagemGrupoZyonAdmin(sock, msg, from).catch(err =>
+                    console.error('❌ [Zaya/Zyon] Erro ao tratar mensagem de grupo:', err.message)
+                )
                 continue
             }
 
@@ -1246,6 +1675,12 @@ async function connectToWhatsApp() {
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
                 null
+
+            // Imagem/documento de não-dono (ex: arte/logo pro ZVendas) não tem texto em
+            // .conversation/.extendedTextMessage — sem isso, cairia no "if (!text) continue"
+            // abaixo e seria descartado antes de chegar em qualquer handler.
+            const midiaRecebida = msg.message.imageMessage ? 'imagem' : (msg.message.documentMessage ? 'documento' : (msg.message.audioMessage ? 'áudio' : null))
+            const legendaMidia = msg.message.imageMessage?.caption || msg.message.documentMessage?.caption || null
 
             // Verifica resposta do Adriano antes de qualquer outro handler
             if (text && await tratarRespostaAdriano(sock, from, text).catch(() => false)) continue
@@ -1322,6 +1757,18 @@ async function connectToWhatsApp() {
                         const resposta = text.replace(idDecisao, '').trim() || text
                         console.log(`⚡ [Zaya] Resposta do Maurício para decisão ${idDecisao}: ${resposta}`)
                         repassarRespostaZeon(idDecisao, resposta)
+                        continue
+                    }
+                }
+
+                // Resposta do Maurício a uma decisão pendente do ZVendas (desconto)
+                if (text) {
+                    const matchDecisaoZVendas = text.match(/\b(zv_\d+)\b/)
+                    if (matchDecisaoZVendas) {
+                        const idDecisao = matchDecisaoZVendas[1]
+                        const resposta = text.replace(idDecisao, '').trim() || text
+                        console.log(`🛍️ [Zaya] Resposta do Maurício para decisão ZVendas ${idDecisao}: ${resposta}`)
+                        repassarRespostaZVendas(idDecisao, resposta)
                         continue
                     }
                 }
@@ -1414,7 +1861,7 @@ async function connectToWhatsApp() {
                 }
             }
 
-            if (!text) continue
+            if (!text && !(midiaRecebida && !isOwner)) continue
 
             if (isOwner && text.trim() === '!shopee') {
                 console.log('📓 Comando !shopee recebido — gerando relatório...')
@@ -1422,7 +1869,7 @@ async function connectToWhatsApp() {
                 continue
             }
 
-            if (text.trim() === `!registrar ${process.env.OWNER_PHONE}`) {
+            if (text && text.trim() === `!registrar ${process.env.OWNER_PHONE}`) {
                 salvarOwnerJid(from)
                 await sock.sendMessage(from, { text: '✅ Você foi registrado como dono! Agora use *!shopee* para gerar o relatório.' })
                 continue
@@ -1437,7 +1884,97 @@ async function connectToWhatsApp() {
             }
 
             const sender = from.replace('@s.whatsapp.net', '')
-            console.log(`⏭️  [${sender}]: resposta automática desativada`)
+            // WhatsApp às vezes entrega a mensagem com o JID "@lid" (identificador privado)
+            // em vez do número de telefone — resolve pro formato @s.whatsapp.net antes de
+            // encaminhar, senão o ZVendas nunca acha a conversa (que foi salva pelo telefone).
+            let fromParaZVendas = from
+            if (from.endsWith('@lid')) {
+                try {
+                    const pn = await sock.signalRepository.lidMapping.getPNForLID(from)
+                    if (pn) {
+                        // pn pode vir com sufixo de dispositivo (ex: "5511...:0@s.whatsapp.net")
+                        // — remove pra bater exatamente com o JID que o ZVendas já guardou.
+                        const numeroLimpo = pn.split('@')[0].split(':')[0]
+                        fromParaZVendas = `${numeroLimpo}@s.whatsapp.net`
+                        console.log(`🔁 [Zaya] LID resolvido: ${from} → ${fromParaZVendas}`)
+                    }
+                } catch (err) {
+                    console.error('⚠️ [Zaya] Erro ao resolver LID→PN:', err.message)
+                }
+            }
+            // Botão/lista interativa (buttonsMessage/listMessage e as respostas a eles) é
+            // sinal direto de menu automatizado de atendimento — não precisa nem olhar o texto.
+            const ehInterativo = !!(
+                msg.message?.buttonsMessage || msg.message?.listMessage ||
+                msg.message?.buttonsResponseMessage || msg.message?.listResponseMessage ||
+                msg.message?.templateMessage || msg.message?.interactiveMessage
+            )
+            // Salva a imagem/arte em disco (pra depois reenviar junto do pedido no grupo
+            // de produção) — só imagem por enquanto, documento (PDF etc.) não é reenviado.
+            let arteCaminho = null
+            let downloadFalhou = false
+            if (msg.message.imageMessage) {
+                try {
+                    const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {})
+                    if (!fs.existsSync(ZVENDAS_ARTES_DIR)) fs.mkdirSync(ZVENDAS_ARTES_DIR, { recursive: true })
+                    const numeroLimpo = fromParaZVendas.split('@')[0].split(':')[0]
+                    const ext = (msg.message.imageMessage.mimetype || 'image/jpeg').includes('png') ? 'png' : 'jpg'
+                    arteCaminho = path.join(ZVENDAS_ARTES_DIR, `${numeroLimpo}.${ext}`)
+                    fs.writeFileSync(arteCaminho, buffer)
+                    console.log(`🎨 [Zaya] Arte salva: ${arteCaminho}`)
+                } catch (err) {
+                    console.error('⚠️ [Zaya] Erro ao baixar/salvar arte:', err.message)
+                    downloadFalhou = true
+                }
+            }
+
+            // Áudio/voice note (ptt) de não-dono — baixa e transcreve via Groq Whisper.
+            // O texto transcrito vira o próprio "text" daqui pra frente, tratado igual
+            // a uma mensagem de texto normal pelo ZVendas (não é um placeholder).
+            let audioTranscrito = null
+            let audioTranscricaoFalhou = false
+            if (msg.message.audioMessage) {
+                try {
+                    const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {})
+                    const resultado = await transcreverAudio(buffer, msg.message.audioMessage.mimetype)
+                    if (resultado) {
+                        audioTranscrito = resultado
+                    } else {
+                        audioTranscricaoFalhou = true
+                    }
+                } catch (err) {
+                    console.error('⚠️ [Zaya] Erro ao baixar áudio:', err.message)
+                    audioTranscricaoFalhou = true
+                }
+                console.log(`🎤 [ZVendas] Áudio recebido de ${msg.pushName || sender} — transcrito: ${audioTranscrito ? 'sim' : 'não'}`)
+            }
+
+            // Placeholder distingue sucesso de falha real — sem isso o ZVendas não tem
+            // como saber que o download quebrou, e o Claude "inventava" frases tipo
+            // "acho que não carregou direito" sem nenhum sinal real por trás.
+            let textoParaZVendas
+            if (text) {
+                textoParaZVendas = text
+            } else if (audioTranscrito) {
+                textoParaZVendas = audioTranscrito
+            } else if (msg.message.audioMessage) {
+                // Texto não-vazio só pra passar pelo gate de "from && text" no ZVendas —
+                // o campo audioTranscricaoFalhou é o sinal real que ele usa aqui.
+                textoParaZVendas = '[áudio recebido, transcrição falhou]'
+            } else if (midiaRecebida) {
+                textoParaZVendas = downloadFalhou
+                    ? `[${midiaRecebida} recebida mas houve erro ao processar]`
+                    : `[${midiaRecebida} recebida${legendaMidia ? `: ${legendaMidia}` : ''}]`
+            } else {
+                textoParaZVendas = ''
+            }
+            // temMidia só cobre imagem/documento (arte) — áudio não é "arte", é convertido
+            // em texto acima e não deve marcar arteRecebida do lado do ZVendas.
+            const temMidiaArte = !!(msg.message.imageMessage || msg.message.documentMessage)
+            encaminharMensagemParaZVendas(fromParaZVendas, textoParaZVendas, msg.pushName, ehInterativo, temMidiaArte, arteCaminho, downloadFalhou, audioTranscricaoFalhou, msg.key, msg.messageTimestamp).catch(() => {})
+            console.log(`⏭️  [${sender}]: resposta automática desativada (Zaya) — encaminhado ao ZVendas${midiaRecebida ? ` (${midiaRecebida})` : ''}`)
         }
     })
 }
@@ -2196,6 +2733,65 @@ async function tratarMensagemGrupoFinanceiro(sock, msg, from) {
 
     resultado.dados.ehPendente = financeiroAgent.pareceDespesaPendenteOuParcelada(text) || resultado.dados.status === 'Pendente'
     await processarDespesaFinanceiro(sock, from, participante, resultado.dados)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grupo "Zark e Ziont | Administração" — identifica o JID na 1ª mensagem (mesmo padrão
+// do grupo Financeiro) e repassa ao Zyon respostas marcadas "zy_<id>" (alguém do grupo
+// respondendo uma pergunta que o Zyon fez sobre um cliente do chat da Shopee).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function postZyon(endpoint, dados) {
+    return new Promise(resolve => {
+        const zyonUrl = process.env.ZYON_URL || 'http://localhost:3001'
+        const data = JSON.stringify(dados)
+        let parsedUrl
+        try { parsedUrl = new URL(`${zyonUrl}${endpoint}`) } catch {
+            console.error(`❌ [Zaya] ZYON_URL inválida: ${zyonUrl}`)
+            return resolve()
+        }
+        const lib = parsedUrl.protocol === 'https:' ? https : http
+        const port = parsedUrl.port ? Number(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80)
+        const req = lib.request({
+            hostname: parsedUrl.hostname,
+            port,
+            path: parsedUrl.pathname,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+        }, res => {
+            console.log(`📨 [Zaya→Zyon] POST ${endpoint} (HTTP ${res.statusCode})`)
+            res.resume()
+            resolve()
+        })
+        req.on('error', err => { console.error(`❌ [Zaya] Erro ao chamar Zyon ${endpoint}: ${err.message}`); resolve() })
+        req.write(data)
+        req.end()
+    })
+}
+
+async function tratarMensagemGrupoZyonAdmin(sock, msg, from) {
+    if (!zyonAdminGroupJid) {
+        try {
+            const meta = await sock.groupMetadata(from)
+            const subject = (meta.subject || '').toLowerCase()
+            if (subject.includes('zark') && subject.includes('ziont') && subject.includes('administra')) {
+                zyonAdminGroupJid = from
+                console.log(`🛍️ [Zaya/Zyon] Grupo "Zark e Ziont | Administração" identificado — JID: ${from}`)
+            }
+        } catch {}
+    }
+    if (zyonAdminGroupJid && from !== zyonAdminGroupJid) return
+    if (!zyonAdminGroupJid) return // ainda não identificado — não arrisca processar grupo errado
+
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || null
+    if (!text) return
+
+    const matchResposta = text.match(/\bzy_(\d+)\b/)
+    if (!matchResposta) return
+    const id = matchResposta[1]
+    const resposta = text.replace(matchResposta[0], '').trim() || text
+    console.log(`🛍️ [Zaya/Zyon] Resposta do grupo Administração para zy_${id}: ${resposta}`)
+    await postZyon('/resposta-grupo', { id, resposta })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2978,4 +3574,5 @@ console.log('⚠️  Monitoramento de pedidos atrasados: ciclo ~1h — aviso ao 
 console.log(`👷 Lucas: ${process.env.LUCAS_PHONE ? `55${process.env.LUCAS_PHONE}` : '(LUCAS_PHONE não definido)'}`)
 console.log(`👷 Adriano: ${process.env.ADRIANO_PHONE ? `55${process.env.ADRIANO_PHONE}` : '(ADRIANO_PHONE não definido)'}`)
 console.log(`📋 Grupo Ziont JID: ${process.env.ZIONT_GROUP_JID || '(será detectado automaticamente na 1ª mensagem)'}`)
+console.log(`🛍️ Suporte ao ZVendas ativado (endpoints /send-message, /apply-label, /mark-unread, /zvendas-notificacao, repasse de decisão de desconto)`)
 connectToWhatsApp()
