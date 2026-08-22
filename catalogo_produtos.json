@@ -1,0 +1,87 @@
+{
+  "produtos": [
+    {
+      "id": "camiseta_basica_pp",
+      "nome": "Camiseta Básica em Malha PP",
+      "categoria": "camiseta",
+      "uso_recomendado": ["dia a dia", "eventos", "brindes", "equipe (informal)"],
+      "preco": 34.90,
+      "tecido": "Malha PP 100% Poliéster",
+      "acabamento": "Gola redonda, manga curta, unissex",
+      "estampa": {
+        "tipo": "DTF colorida, alta definição",
+        "areas": ["frente", "verso", "frente e verso"],
+        "medida_maxima": "42cm (altura) x 29,7cm (largura) — tamanho A3",
+        "medida_combo_frente_verso": "Frente 9x9cm + Verso 28x28cm"
+      },
+      "cores": ["Amarelo-bebê", "Amarelo-canário", "Azul-bebê", "Azul-marinho", "Azul-royal", "Branco", "Cinza", "Creme", "Laranja", "Lilás", "Marrom", "Preto", "Rosa-claro", "Rosa-pink", "Verde-bandeira", "Verde-musgo", "Vermelho", "Vinho"],
+      "tamanhos": ["P", "M", "G", "GG", "XG"],
+      "prazo_envio": "5 dias úteis após confirmação do pagamento",
+      "observacoes": "Cliente envia a arte pelo chat só depois do pagamento confirmado."
+    },
+    {
+      "id": "camiseta_microfibra_manga_longa_uv",
+      "nome": "Camiseta Microfibra Manga Longa com Proteção UV50",
+      "categoria": "camiseta",
+      "uso_recomendado": ["academia", "esporte", "treino ao ar livre", "uniforme esportivo"],
+      "preco": 49.90,
+      "tecido": "Microfibra de poliéster + 8% elastano, 180g",
+      "acabamento": "Manga longa, gola redonda rebatida, proteção UV fator 50, unissex",
+      "estampa": {
+        "tipo": "DTF colorida, alta definição",
+        "areas": ["frente", "verso", "frente e verso"],
+        "medida_maxima": "42cm (altura) x 29,7cm (largura) — tamanho A3",
+        "medida_combo_frente_verso": "Frente 9x9cm + Verso 28x28cm"
+      },
+      "cores": ["Amarelo-canário", "Azul-bebê", "Azul-marinho", "Azul-royal", "Branco", "Camuflada", "Cinza", "Creme", "Laranja", "Preto", "Rosa-bebê", "Verde-bebê", "Verde-bandeira", "Verde-neon", "Vermelho"],
+      "tamanhos": ["P", "M", "G", "GG", "XG"],
+      "prazo_envio": "5 dias úteis após confirmação do pagamento",
+      "observacoes": "Cliente envia a arte pelo chat só depois do pagamento confirmado. Ideal pra pedidos de academia (ex: peito + costas grandes + manga)."
+    },
+    {
+      "id": "camiseta_algodao_premium",
+      "nome": "Camiseta Básica de Algodão Premium",
+      "categoria": "camiseta",
+      "uso_recomendado": ["dia a dia", "conforto premium", "brindes corporativos"],
+      "preco": 44.90,
+      "tecido": "Algodão premium fio 30/1, 170g",
+      "acabamento": "Gola canelada com reforço ombro a ombro, manga curta, unissex",
+      "estampa": {
+        "tipo": "DTF colorida, alta definição",
+        "areas": ["frente", "verso", "frente e verso"],
+        "medida_maxima": "42cm (altura) x 29,7cm (largura) — tamanho A3",
+        "medida_combo_frente_verso": "Frente 9x9cm + Verso 28x28cm"
+      },
+      "cores": ["Amarelo-canário", "Azul-marinho", "Azul-royal", "Azul-turquesa", "Branco", "Laranja", "Marrom", "Preto", "Rosa-claro", "Rosa-neon", "Rosa-pink", "Uva", "Verde-bandeira", "Verde-musgo", "Vermelho", "Vinho"],
+      "tamanhos": ["P", "M", "G", "GG", "XG"],
+      "prazo_envio": "5 dias úteis após confirmação do pagamento",
+      "observacoes": "Cliente envia a arte pelo chat só depois do pagamento confirmado."
+    },
+    {
+      "id": "polo_pique_poliester",
+      "nome": "Camisa Polo Piquet Poliéster",
+      "categoria": "polo",
+      "uso_recomendado": ["uniforme corporativo", "equipe", "eventos formais"],
+      "preco": 49.90,
+      "tecido": "Piquet poliéster",
+      "acabamento": "Gola polo com botões, manga curta, unissex",
+      "estampa": {
+        "tipo": "DTF colorida",
+        "areas": ["peito (pequeno)", "costas (médio)"],
+        "medida_maxima": "SEM estampa grande tipo A3 — só peito 9x9cm e/ou costas 28x28cm",
+        "atencao": "NUNCA ofereça estampa de frente toda ou tamanho A3 nessa peça, só a básica/microfibra/algodão aceitam isso."
+      },
+      "cores": ["Amarelo-canário", "Azul-claro", "Azul-marinho", "Branco", "Cinza", "Creme", "Preto", "Vermelho", "Vinho"],
+      "tamanhos": ["P", "M", "G", "GG", "XG"],
+      "prazo_envio": "5 dias úteis após confirmação do pagamento",
+      "observacoes": "Esse é o modelo padrão pra quando o cliente pede 'uniforme pra equipe' — sugerir primeiro, mas oferecer as outras 3 se ele quiser estampa maior ou preço menor."
+    }
+  ],
+  "regras_gerais": {
+    "pagamento": "100% adiantado via Pix",
+    "chave_pix": "45421352846",
+    "pedido_minimo": "sem pedido mínimo",
+    "prazo_producao": "5 dias úteis",
+    "fluxo_arte": "Arte só é enviada pelo cliente DEPOIS da confirmação do pagamento."
+  }
+}

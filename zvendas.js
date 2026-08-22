@@ -420,8 +420,29 @@ const MENSAGEM_ABORDAGEM_1B = 'Tudo bem?'
 
 // Mensagem 2 (apresentação da Ziont/pitch) NÃO é mais enviada automaticamente — só
 // dispara quando o prospect responde de verdade pela 1ª vez (ver hook em
-// tratarMensagemRecebida, seção FASE 2.5 abaixo).
-const MENSAGEM_ABORDAGEM_2 = 'Me chamo Maurício, trabalho com a Ziont. Fazemos camiseta e uniforme personalizado. Vocês usam uniforme pra equipe?'
+// tratarMensagemRecebida, seção FASE 2.5 abaixo). Duas variantes por segmentação
+// de negócio (ver pareceBaixaConversao) — negócio de baixa conversão (farmácia,
+// clínica/hospital etc., já usam uniforme regulamentado que não é camiseta
+// estampada) recebe uma pergunta mais aberta sobre campanha/evento pontual em vez
+// de "uniforme pra equipe" (que tende a morrer em "não usamos" nesse segmento).
+const MENSAGEM_ABORDAGEM_2_PADRAO = 'Me chamo Maurício, trabalho com a Ziont. Fazemos camiseta e uniforme personalizado. Vocês usam uniforme pra equipe?'
+const MENSAGEM_ABORDAGEM_2_BAIXA_CONVERSAO = 'Me chamo Maurício, trabalho com a Ziont. Fazemos camiseta e uniforme personalizado. Vocês fazem camiseta personalizada pra alguma campanha, evento ou ação da equipe?'
+
+// Termos de TERMOS_BUSCA (maps-prospeccao.js) que caem no segmento de baixa
+// conversão — já usam uniforme regulamentado (jaleco, EPI, farda oficial), não
+// camiseta estampada do dia a dia. "hospital"/"bombeiro"/"segurança pública" não
+// são termos de busca hoje (não têm como aparecer via termoBusca ainda), mas ficam
+// listados pra já cobrir se algum dia entrarem em TERMOS_BUSCA.
+const TERMOS_BAIXA_CONVERSAO = ['farmácia', 'farmacia', 'hospital', 'clínica', 'clinica', 'bombeiro', 'defesa civil', 'segurança pública', 'seguranca publica']
+
+function pareceBaixaConversao(termoBusca) {
+    const norm = String(termoBusca || '').toLowerCase()
+    return TERMOS_BAIXA_CONVERSAO.some(t => norm.includes(t))
+}
+
+function gerarMensagemAbordagem2(empresa) {
+    return pareceBaixaConversao(empresa?.termoBusca) ? MENSAGEM_ABORDAGEM_2_BAIXA_CONVERSAO : MENSAGEM_ABORDAGEM_2_PADRAO
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FASE 2.5 — Follow-up pra quem recebeu a Mensagem 1/1b (saudação) e nunca respondeu
@@ -432,7 +453,7 @@ const DIAS_FOLLOWUP_1 = 3 // dias após a Mensagem 1 (dataContato), se ainda sem
 const DIAS_FOLLOWUP_2 = 6 // dias após o Follow-up 1 (dataUltimoFollowup), se ainda sem resposta
 
 async function gerarAbordagem(empresa) {
-    return MENSAGEM_ABORDAGEM_2
+    return gerarMensagemAbordagem2(empresa)
 }
 
 async function abordarEmpresa(empresa) {
@@ -537,62 +558,145 @@ const FERRAMENTA_RESPOSTA = {
                     empresa: { type: ['string', 'null'] },
                     quantidade: { type: ['number', 'null'] },
                     tipoProduto: { type: ['string', 'null'] },
+                    cor: { type: ['string', 'null'], description: 'Cor escolhida pelo cliente, se já mencionada. null se ainda não perguntado/respondido.' },
+                    tamanho: { type: ['string', 'null'], description: 'Tamanho (P, M, G, GG, XG) escolhido, se já mencionado. null se ainda não perguntado/respondido.' },
                     arteRecebida: { type: 'boolean' },
+                    frase: { type: ['string', 'null'], description: 'Texto/frase personalizada que o cliente quer estampada, se pediu algo além da arte/logo. null se não mencionou.' },
                     posicionamento: { type: ['string', 'null'], description: 'Onde vai a estampa: peito esquerdo, frente toda, costas ou manga. null se ainda não perguntado/respondido.' },
                 },
-                required: ['nomeCliente', 'empresa', 'quantidade', 'tipoProduto', 'arteRecebida', 'posicionamento'],
+                required: ['nomeCliente', 'empresa', 'quantidade', 'tipoProduto', 'cor', 'tamanho', 'arteRecebida', 'frase', 'posicionamento'],
             },
         },
         required: ['mensagens', 'naoCompreendido', 'etiqueta', 'pedidoConfirmado', 'descontoSolicitado', 'percentualDesconto', 'dadosColetados'],
     },
 }
 
-function montarSecaoCatalogo() {
-    const { produtos } = carregarMemoria().catalogo || { produtos: [] }
-    if (!produtos.length) {
-        return `CATÁLOGO: ainda não carregado. NÃO invente nomes de produto/tipo de camiseta — se o cliente perguntar o que vocês têm, diga que já já confirma as opções certinho (sem citar tipos específicos) e passe pro próximo passo (quantidade/uso).`
+// ─────────────────────────────────────────────────────────────────────────────
+// Catálogo estático (catalogo_produtos.json) — fonte de verdade pro PROMPT (preço,
+// tecido, estampa, cores, prazo). Diferente de mem.catalogo (WhatsApp Business,
+// usado só por enviarCatalogoNaConversa/obterLinkAvaliacoes pra mandar os cartões
+// de produto DE VERDADE) — esse aqui é sempre completo e nunca depende de nenhuma
+// chamada de rede, é o que evita o Claude cair em "vou verificar" sobre tecido/
+// preço/cor (bug real observado: WhatsApp Business não tem campo de tecido nenhum,
+// então o Claude simplesmente não tinha de onde tirar essa resposta antes disso).
+// Carregado 1x e cacheado em memória — arquivo estático, não muda em produção sem
+// reiniciar o processo (mesmo padrão de qualquer outro require de config).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ARQUIVO_CATALOGO_ESTATICO = path.join(__dirname, 'catalogo_produtos.json')
+let catalogoEstaticoCache = null
+
+function carregarCatalogoEstatico() {
+    if (catalogoEstaticoCache) return catalogoEstaticoCache
+    try {
+        catalogoEstaticoCache = JSON.parse(fs.readFileSync(ARQUIVO_CATALOGO_ESTATICO, 'utf8'))
+    } catch (err) {
+        console.error('⚠️ [ZVendas] Erro ao carregar catalogo_produtos.json:', err.message)
+        catalogoEstaticoCache = { produtos: [], regras_gerais: {} }
     }
-    const lista = produtos.map(p => `- ${p.nome}${p.preco ? ` (R$ ${p.preco.toFixed(2)})` : ''}${p.descricao ? ` — ${p.descricao}` : ''}`).join('\n')
-    return `CATÁLOGO REAL (os ÚNICOS produtos que existem — NUNCA cite tipo de camiseta que não esteja nesta lista):\n${lista}`
+    return catalogoEstaticoCache
 }
 
-function montarSecaoCores() {
-    const coresPorProduto = carregarMemoria().coresPorProduto || {}
-    const entradas = Object.entries(coresPorProduto)
-    if (!entradas.length) return ''
-    const lista = entradas.map(([produto, cores]) => `- ${produto}: ${cores.join(', ')}`).join('\n')
+function formatarPreco(preco) {
+    return Number(preco || 0).toFixed(2).replace('.', ',')
+}
+
+function montarSecaoCatalogoEstatico() {
+    const { produtos, regras_gerais } = carregarCatalogoEstatico()
+    if (!produtos.length) {
+        return `CATÁLOGO: erro ao carregar catalogo_produtos.json. NÃO invente preço/tecido/cor — avise que vai confirmar os dados certinho.`
+    }
+    const linhas = produtos.map((p, i) => {
+        const restricao = p.estampa?.atencao ? ` — ATENÇÃO: ${p.estampa.atencao}` : ''
+        const faixaTamanhos = p.tamanhos.length > 1 ? `${p.tamanhos[0]} a ${p.tamanhos[p.tamanhos.length - 1]}` : p.tamanhos[0]
+        return `${i + 1}. ${p.nome} — R$ ${formatarPreco(p.preco)} — ${p.tecido} — estampa DTF: ${p.estampa?.medida_maxima || 'não informado'}${restricao} — ${p.cores.length} cores — tamanhos ${faixaTamanhos}`
+    }).join('\n')
+    const r = regras_gerais || {}
+    return `## CATÁLOGO — os ÚNICOS produtos que existem, use estas informações pra responder na hora. NUNCA diga "vou verificar" sobre preço, tecido, cor ou prazo — está tudo aqui:\n\n${linhas}\n\nRegras gerais: pagamento ${r.pagamento || '100% adiantado via Pix'} (chave: ${r.chave_pix || PIX_ZIONT}), ${r.pedido_minimo || 'sem pedido mínimo'}, prazo de produção ${r.prazo_producao || '5 dias úteis'}. ${r.fluxo_arte || ''}`
+}
+
+function montarSecaoCoresEstatico() {
+    const { produtos } = carregarCatalogoEstatico()
+    if (!produtos.length) return ''
+    const lista = produtos.map(p => `- ${p.nome}: ${p.cores.join(', ')}`).join('\n')
     return `\nCORES DISPONÍVEIS POR PRODUTO (só existem essas — se o cliente pedir uma cor que não está na lista do produto dele, informe com simpatia que essa cor não tem e ofereça as opções reais que existem, sem inventar nem confirmar cor inexistente):\n${lista}\n`
 }
 
-function montarSystemPrompt(linkAvaliacoes) {
-    return `Você é um vendedor da Ziont, empresa especializada em camisetas personalizadas e uniformes corporativos em São Paulo, conversando pelo WhatsApp.
+// Resumo curto, direto pro CLIENTE (não pro prompt da IA) — usado como fallback de
+// texto quando o pedido de catálogo/material não pode ser respondido com os
+// cartões nativos do WhatsApp Business (ver tratarMensagemRecebida), pra nunca
+// deixar o cliente sem nenhuma resposta.
+function montarResumoCatalogoCliente() {
+    const { produtos } = carregarCatalogoEstatico()
+    if (!produtos.length) return null
+    return produtos.map(p => `${p.nome} — R$ ${formatarPreco(p.preco)}`).join('\n')
+}
 
-${montarSecaoCatalogo()}
-${montarSecaoCores()}
+// Slots já coletados NESTA conversa, injetados no prompt a cada chamada — é isso
+// que impede o Claude de reperguntar cor/quantidade/nome/etc que o cliente já
+// respondeu (não basta pedir "releia o histórico" no prompt: um resumo estruturado
+// aqui é muito mais confiável que o modelo re-derivar isso do texto cru de novo
+// a cada chamada, mesmo padrão já usado alhures no projeto pra dados calculados).
+function montarSecaoDadosColetados(dadosColetados) {
+    const d = dadosColetados || {}
+    const linhas = []
+    if (ehValorColetadoValido(d.tipoProduto)) linhas.push(`- Tipo de produto: ${d.tipoProduto}`)
+    if (ehValorColetadoValido(d.quantidade)) linhas.push(`- Quantidade: ${d.quantidade}`)
+    if (ehValorColetadoValido(d.cor)) linhas.push(`- Cor: ${d.cor}`)
+    if (ehValorColetadoValido(d.tamanho)) linhas.push(`- Tamanho: ${d.tamanho}`)
+    if (d.arteRecebida) linhas.push(`- Arte/logo: já recebida`)
+    if (ehValorColetadoValido(d.frase)) linhas.push(`- Frase/texto personalizado: ${d.frase}`)
+    if (ehValorColetadoValido(d.posicionamento)) linhas.push(`- Posicionamento da estampa: ${d.posicionamento}`)
+    if (ehValorColetadoValido(d.nomeCliente)) linhas.push(`- Nome do cliente: ${d.nomeCliente}`)
+    if (ehValorColetadoValido(d.empresa)) linhas.push(`- Empresa: ${d.empresa}`)
+    if (!linhas.length) return ''
+    return `\nDADOS JÁ COLETADOS NESTA CONVERSA (NUNCA pergunte de novo nenhum destes campos — use o valor já informado e avance pro próximo passo que falta):\n${linhas.join('\n')}\n`
+}
+
+function montarSystemPrompt(linkAvaliacoes, dadosColetados = {}) {
+    return `Você é o ZVendas, atendente comercial da Ziont, empresa especializada em camisetas personalizadas e uniformes corporativos em São Paulo, conversando pelo WhatsApp.
+
+${montarSecaoCatalogoEstatico()}
+${montarSecaoCoresEstatico()}
+${montarSecaoDadosColetados(dadosColetados)}
 
 COMO ESCREVER (muito importante):
 - Escreva como uma pessoa real digitando no celular, não como um atendimento formal de empresa.
 - Cada mensagem: 1 frase, no máximo 2 quando for muito necessário. Nunca parágrafos longos.
 - Evite frases com cara de script tipo "Podemos conversar sobre?" — prefira perguntas diretas relacionadas ao negócio específico da empresa (ex: "Vocês usam uniforme pra equipe?" em vez de algo genérico).
-- Se precisar passar mais de uma informação, quebre em várias mensagens curtas (array "mensagens") em vez de uma mensagem grande — é assim que gente de verdade manda WhatsApp, em várias bolhas.
-- No máximo UMA pergunta por mensagem. Nunca empilhe duas ou três perguntas na mesma bolha (ex: nunca "quantas peças, qual cor e qual o prazo?" tudo junto) — pergunte uma coisa, espere a resposta, depois pergunta a próxima.
+- Se precisar passar mais de uma informação sobre o MESMO assunto, quebre em várias mensagens curtas (array "mensagens") em vez de uma mensagem grande — é assim que gente de verdade manda WhatsApp, em várias bolhas.
 - Nada de listas numeradas, tópicos, bullet points ou menu de opções (1-x, 2-y...) — isso é jeito de bot, não de pessoa.
 - No máximo 1 emoji por mensagem, e só quando fizer sentido — não use emoji em toda mensagem.
 - Direto e simples, sem formalidade excessiva ("Prezado", "Fico à disposição", etc.).
 
-NUNCA REPETIR (muito importante): antes de perguntar qualquer coisa, releia TODO o histórico da conversa acima E os dados já coletados. Se quantidade, tipo de camiseta, nome ou empresa já foram ditos em qualquer mensagem anterior do cliente, NÃO pergunte de novo — use o que já foi dito e avance pro próximo passo que falta (fluxo: quantidade+tipo → arte/logo → dados finais → confirmar pedido). Perguntar de novo algo que o cliente já respondeu é o pior erro possível aqui.
+REGRAS DE CONVERSA (OBRIGATÓRIAS — a maioria dos erros que já aconteceram veio de ignorar uma destas):
+1. UMA pergunta por mensagem/turno. Nunca envie duas perguntas na mesma mensagem nem em mensagens separadas dentro do mesmo array "mensagens" (ex: nunca "quantas peças, qual cor e qual o prazo?" tudo junto, nem "qual cor?" seguido de "qual tamanho?" nas duas próximas bolhas). Cada item de "mensagens" deve ser sobre o MESMO assunto/resposta, nunca perguntas diferentes empilhadas.
+2. Depois de perguntar algo, PARE. Não pergunte de novo nem avance pra próxima pergunta até o cliente responder — você só é chamado de novo quando uma mensagem nova do cliente chegar, então isso já é garantido pelo sistema, mas nunca tente "adiantar" perguntas futuras na mesma resposta.
+3. Antes de perguntar qualquer campo (tipo de produto, quantidade, cor, tamanho, arte/logo, frase, posicionamento, nome, empresa), confira a seção "DADOS JÁ COLETADOS" acima e todo o histórico da conversa. Se já foi respondido, NÃO pergunte de novo — use o valor que já tem e avance pro próximo passo que falta.
+4. Ao receber uma imagem, áudio ou arquivo, responda com UMA ÚNICA confirmação curta (ex: "Recebi! 👍", combinada com a próxima pergunta se fizer sentido, ver regra 6b do fluxo). Nunca mande duas confirmações pro mesmo anexo.
+5. Se o cliente colocar uma condição explícita (ex: "só esse tecido", "só essa cor", "tem que ser até essa data"), responda essa condição IMEDIATAMENTE na próxima mensagem, antes de qualquer outra pergunta — nunca deixe uma informação crítica pra depois.
+6. Se o cliente pedir catálogo, fotos, tabela de preço ou "material", responda na hora com um resumo dos modelos e preços do CATÁLOGO acima. Nunca fique em silêncio nem diga que vai verificar — o catálogo já está todo aqui em cima.
+7. Antes de perguntar "vocês usam uniforme pra equipe?" (ou qualquer variação dessa pergunta), veja a seção SEGMENTAÇÃO POR TIPO DE NEGÓCIO abaixo — o tipo de negócio muda como essa pergunta deve ser feita.
+8. Ao fechar o pedido (pedidoConfirmado=true), o sistema já gera automaticamente o registro interno do pedido (número, quantidade, posicionamento, Pix, prazo de entrega) pro grupo de produção — você só precisa confirmar com o cliente de forma natural que o pedido foi registrado e que o Pix está aguardando, sem precisar montar nenhum resumo formatado na conversa.
+
+SEGMENTAÇÃO POR TIPO DE NEGÓCIO:
+
+Nem todo tipo de negócio tem a mesma chance de comprar uniforme personalizado. Use isso pra calibrar a abordagem:
+
+Alta conversão (já usam ou adotam fácil camiseta/polo personalizada como uniforme): Academia (maior conversão de todas), Pizzaria/restaurante/delivery, Obra/construção civil, Oficina mecânica, Salão de beleza/barbearia, Loja de varejo, Produção de eventos.
+
+Baixa conversão (já usam uniforme regulamentado — jaleco, EPI, farda oficial — que não é camiseta estampada): Farmácia, Hospital/clínica médica, Bombeiro/defesa civil, Segurança pública.
+
+Para negócios de baixa conversão, NÃO pergunte "vocês usam uniforme pra equipe?" do mesmo jeito — a resposta tende a ser não e a conversa morre aí. Pergunte de forma mais aberta, oferecendo ocasião alternativa: "Vocês fazem camiseta personalizada pra alguma campanha, evento ou ação da equipe?" — o interesse aqui costuma ser pontual (evento, dia da conscientização, confraternização), não uniforme do dia a dia. Mantenha essa mesma framing (campanha/evento) pelo resto da conversa com esse tipo de cliente, não volte a falar de "uniforme do dia a dia" com ele.
 
 FLUXO DE VENDA:
-1. Quando o cliente demonstrar interesse: entenda o que ele precisa (quantidade, tipo de camiseta, uso).
-2. Ofereça o produto certo com base na necessidade — usando SOMENTE os produtos do CATÁLOGO REAL acima.
-3. Prazo de entrega: 5 dias úteis.
-4. Não há pedido mínimo — qualquer quantidade.
-5. Quando o cliente confirmar que quer fechar (mesmo que o pagamento ainda não tenha sido feito — o pedido entra como "aguardando pagamento"): colete nome, empresa, quantidade e tipo de camiseta, e marque pedidoConfirmado=true nessa mesma resposta.
-6. Peça a arte/logo pelo próprio WhatsApp.
-6b. Assim que a arte chegar (arteRecebida=true), pergunte o posicionamento em UMA ÚNICA mensagem já com as opções resumidas — nunca pergunte isso em várias mensagens separadas. Exemplo exato do formato: "Recebi! 👍 Onde você quer a estampa? Peito esquerdo, frente toda, costas ou manga?". Essa regra (uma mensagem só, com as opções já embutidas) vale pra qualquer pergunta de múltipla escolha parecida, não só posicionamento.
-6c. Com quantidade + tipo + arte + posicionamento todos coletados, avance: informe o valor total (se souber) e confirme o pedido.
-7. Pagamento é 100% adiantado via Pix (chave: ${PIX_ZIONT}).${SHOPEE_LINK ? `\n   Se fizer sentido, também pode indicar o catálogo: ${SHOPEE_LINK}` : ''}
-8. Se o cliente pedir desconto: a única mensagem sobre isso é exatamente "deixa eu verificar aqui pra você 😊" (nada além disso) e marque descontoSolicitado=true — você NUNCA aprova ou nega desconto sozinho, quem decide é o Maurício.
+1. Quando o cliente demonstrar interesse: entenda o que ele precisa (quantidade, tipo de camiseta, cor, tamanho, uso).
+2. Ofereça o produto certo com base na necessidade — usando SOMENTE os produtos do CATÁLOGO acima.
+3. Quando o cliente confirmar que quer fechar (mesmo que o pagamento ainda não tenha sido feito — o pedido entra como "aguardando pagamento"): colete nome, empresa, quantidade e tipo de camiseta, e marque pedidoConfirmado=true nessa mesma resposta.
+4. Peça a arte/logo pelo próprio WhatsApp (lembre: arte só é enviada pelo cliente depois do pagamento confirmado, conforme o catálogo).
+5. Assim que a arte chegar (arteRecebida=true), pergunte o posicionamento em UMA ÚNICA mensagem já com as opções resumidas — nunca pergunte isso em várias mensagens separadas. Exemplo exato do formato: "Recebi! 👍 Onde você quer a estampa? Peito esquerdo, frente toda, costas ou manga?". Essa regra (uma mensagem só, com as opções já embutidas) vale pra qualquer pergunta de múltipla escolha parecida, não só posicionamento. Pra Polo, lembre que só existe estampa pequena (peito e/ou costas), nunca ofereça "frente toda".
+6. Com quantidade + tipo + cor + tamanho + arte + posicionamento todos coletados, avance: informe o valor total e confirme o pedido.
+7. Se o cliente pedir desconto: a única mensagem sobre isso é exatamente "deixa eu verificar aqui pra você 😊" (nada além disso) e marque descontoSolicitado=true — você NUNCA aprova ou nega desconto sozinho, quem decide é o Maurício.
 
 Se o cliente perguntar diretamente se está falando com um robô, IA ou automação, responda com honestidade que é um atendimento automatizado da Ziont — nunca negue isso nem finja ser uma pessoa quando perguntado diretamente.
 
@@ -640,13 +744,13 @@ async function classificarHumanoOuBot(texto) {
     }
 }
 
-async function chamarClaudeVendedor(historico) {
+async function chamarClaudeVendedor(historico, dadosColetados = {}) {
     const mensagensClaude = agruparPorTurno(historico)
     const linkAvaliacoes = await obterLinkAvaliacoes()
     const resp = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 500,
-        system: montarSystemPrompt(linkAvaliacoes),
+        system: montarSystemPrompt(linkAvaliacoes, dadosColetados),
         messages: mensagensClaude,
         tools: [FERRAMENTA_RESPOSTA],
         tool_choice: { type: 'tool', name: 'responder_cliente' },
@@ -715,6 +819,9 @@ const PADROES_PEDIDO_CATALOGO = [
     /o\s+que\s+voc[êe]s?\s+(t[êe]m|faz[eê]m|vend[eê]m|oferece[m]?)/i,
     /quais\s+camisetas?/i,
     /\bpre[çc]os?\b/i,
+    /\bmaterial\b/i,
+    /tabela\s+de\s+pre[çc]o/i,
+    /modelos?\s+(que\s+)?voc[êe]s?\s+t[êe]m/i,
 ]
 function pareceQuererCatalogo(texto) {
     return PADROES_PEDIDO_CATALOGO.some(re => re.test(texto || ''))
@@ -850,7 +957,31 @@ async function anunciarPedidoFechado(jid, pedido) {
     await aplicarEtiqueta(jid, ETIQUETAS.cliente)
 }
 
+// Dedup por ID de mensagem — o Baileys pode reentregar a mesma mensagem em
+// reconexão/resync (mesmo padrão de bug já visto e corrigido no grupo financeiro
+// da Zaya.js). Sem isso, uma reentrega duplicava a entrada no histórico e disparava
+// uma 2ª chamada ao Claude pro mesmo evento — rajada de mensagens/confirmação
+// duplicada de mídia era exatamente esse sintoma. Set limitado (não é Map: só
+// interessa "já vi ou não", sem guardar mais nada) pra não crescer sem limite.
+const MENSAGENS_PROCESSADAS_MAX = 500
+const mensagensProcessadasIds = new Set()
+
+function jaProcessadaMensagem(msgId) {
+    if (!msgId) return false // sem id (ex: chamada de teste/legada) — não dá pra deduplicar, deixa passar
+    if (mensagensProcessadasIds.has(msgId)) return true
+    mensagensProcessadasIds.add(msgId)
+    if (mensagensProcessadasIds.size > MENSAGENS_PROCESSADAS_MAX) {
+        mensagensProcessadasIds.delete(mensagensProcessadasIds.values().next().value)
+    }
+    return false
+}
+
 async function tratarMensagemRecebida(from, text, pushName, ehInterativo, temMidia, arteCaminho, downloadFalhou, audioTranscricaoFalhou, key, messageTimestamp) {
+    if (jaProcessadaMensagem(key?.id)) {
+        console.log(`⏸️ [ZVendas] Mensagem duplicada ignorada (id ${key.id}) — provável reentrega do Baileys`)
+        return
+    }
+
     // Registra a mensagem e decide o que fazer tudo dentro do lock — evita perder a
     // etiqueta/estágio numa corrida com a Fase 1/2 rodando em paralelo.
     const decisao = await comMemoria(mem => {
@@ -899,7 +1030,8 @@ async function tratarMensagemRecebida(from, text, pushName, ehInterativo, temMid
         }
 
         const respostasCliente = conversa.historico.filter(h => h.de === 'cliente').length
-        return { seguir: true, jid: conversa.jid, telefone: conversa.telefone, nome: conversa.nome || conversa.empresa || from, ehPrimeiraResposta: respostasCliente === 1 }
+        const emp = mem.empresasContatadas.find(e => normalizarTelefone(e.telefone) === normalizarTelefone(conversa.telefone))
+        return { seguir: true, jid: conversa.jid, telefone: conversa.telefone, nome: conversa.nome || conversa.empresa || from, ehPrimeiraResposta: respostasCliente === 1, termoBusca: emp?.termoBusca || null }
     })
 
     if (decisao.ignorar) return
@@ -935,12 +1067,13 @@ async function tratarMensagemRecebida(from, text, pushName, ehInterativo, temMid
         // mais "primeira resposta" e segue o fluxo normal (Fase 3) automaticamente.
         // É assim que "responder a qualquer momento sai da sequência de follow-up"
         // funciona, sem precisar de código extra na Fase 2.5.
-        console.log(`💬 [ZVendas] 1ª resposta de ${decisao.nome} — enviando Mensagem 2 (pitch)`)
+        const mensagem2 = gerarMensagemAbordagem2({ termoBusca: decisao.termoBusca })
+        console.log(`💬 [ZVendas] 1ª resposta de ${decisao.nome} — enviando Mensagem 2 (pitch${pareceBaixaConversao(decisao.termoBusca) ? ', variante baixa conversão' : ''})`)
         try {
-            await enviarMensagem(decisao.jid, MENSAGEM_ABORDAGEM_2)
+            await enviarMensagem(decisao.jid, mensagem2)
             await comMemoria(mem => {
                 const conversa = mem.conversasAtivas.find(c => c.jid === decisao.jid)
-                if (conversa) conversa.historico.push({ de: 'zvendas', texto: MENSAGEM_ABORDAGEM_2, em: new Date().toISOString() })
+                if (conversa) conversa.historico.push({ de: 'zvendas', texto: mensagem2, em: new Date().toISOString() })
                 const emp = mem.empresasContatadas.find(e => normalizarTelefone(e.telefone) === normalizarTelefone(decisao.telefone))
                 if (emp) emp.aguardandoResposta = false
             })
@@ -977,8 +1110,13 @@ async function tratarMensagemRecebida(from, text, pushName, ehInterativo, temMid
     // digitação real (calcularDelayDigitacaoMs, 3-30s, com indicador "digitando...")
     // aplicado antes de cada mensagem via enviarMensagem.
 
-    // Pedido de catálogo/produto/preço — resolvido na hora com o link real, sem passar
-    // pelo Claude (evita ele inventar/listar produto de cabeça).
+    // Pedido de catálogo/produto/preço/material — resolvido na hora com os cartões
+    // reais do WhatsApp Business, sem passar pelo Claude (evita ele inventar/listar
+    // produto de cabeça). Bug real observado: se enviarCatalogoNaConversa falhasse em
+    // QUALQUER ponto (ex: Zaya fora do ar), o catch só logava o erro e o cliente ficava
+    // sem nenhuma resposta — o "return" logo depois nem deixava cair no fluxo geral do
+    // Claude. Agora, se o envio nativo falhar, cai num fallback em texto usando o
+    // catalogo_produtos.json (estático, nunca depende de rede) — nunca fica em silêncio.
     if (pareceQuererCatalogo(text)) {
         try {
             await enviarCatalogoNaConversa(decisao.jid)
@@ -988,7 +1126,19 @@ async function tratarMensagemRecebida(from, text, pushName, ehInterativo, temMid
             })
             console.log(`📦 [ZVendas] Catálogo enviado: ${decisao.nome}`)
         } catch (err) {
-            console.error('❌ [ZVendas] Erro ao enviar catálogo:', err.message)
+            console.error('❌ [ZVendas] Erro ao enviar catálogo (nativo), caindo pro resumo em texto:', err.message)
+            try {
+                const resumo = montarResumoCatalogoCliente()
+                const texto = resumo ? `Nossos modelos:\n\n${resumo}\n\nQual te interessou? 😊` : 'Já já te mando os modelos certinho, só um instante 🙂'
+                await enviarMensagem(decisao.jid, texto)
+                await comMemoria(mem => {
+                    const conversa = mem.conversasAtivas.find(c => c.jid === decisao.jid)
+                    if (conversa) conversa.historico.push({ de: 'zvendas', texto, em: new Date().toISOString() })
+                })
+                console.log(`📦 [ZVendas] Catálogo (fallback em texto) enviado: ${decisao.nome}`)
+            } catch (err2) {
+                console.error('❌ [ZVendas] Erro também no fallback de catálogo em texto:', err2.message)
+            }
         }
         return
     }
@@ -1016,136 +1166,155 @@ function agendarProcessamentoComDebounce(jid, nome) {
     debounceProcessamento.set(jid, timeoutId)
 }
 
+// Trava contra rajada/duplicidade: gerarEEnviarRespostaClaude é chamada tanto pelo
+// debounce (agendarProcessamentoComDebounce) quanto pela verificação periódica
+// (verificarClientesSemResposta) — sem essa trava, duas chamadas concorrentes pro
+// MESMO jid (ex: debounce disparando bem na hora que a verificação periódica também
+// decide agir, ou uma reentrega de mensagem do Baileys que escapou do dedup abaixo)
+// cada uma lia o histórico ANTES da outra responder, cada uma chamava o Claude, e as
+// DUAS mandavam mensagem — rajada de mensagens duplicadas/inconsistentes pro cliente,
+// exatamente o bug relatado. jid só sai do Set no finally, cobrindo até erro.
+const processandoResposta = new Set()
+
 // Chama o Claude com o histórico atual da conversa, aplica dedup, manda as mensagens,
 // atualiza etiqueta/dadosColetados/desconto/pedido. Compartilhado entre o fluxo normal
 // (tratarMensagemRecebida) e a verificação periódica de clientes sem resposta.
 async function gerarEEnviarRespostaClaude(jid, nome) {
-    const historicoAtual = await comMemoria(mem => {
-        const conversa = mem.conversasAtivas.find(c => c.jid === jid)
-        return conversa ? conversa.historico.slice(-10) : null
-    })
-    if (!historicoAtual) return
-
-    let resultado
+    if (processandoResposta.has(jid)) {
+        console.log(`⏸️ [ZVendas] Já processando resposta pra ${nome || jid} — ignorando chamada concorrente`)
+        return
+    }
+    processandoResposta.add(jid)
     try {
-        resultado = await chamarClaudeVendedor(historicoAtual)
-    } catch (err) {
-        console.error('❌ [ZVendas] Erro ao chamar Claude:', err.message)
-        return
-    }
-    if (!resultado) return
-
-    // Não conseguiu mapear a mensagem do cliente pra nenhuma ação clara — não manda
-    // nada errado, só marca a conversa como não lida pra revisão manual (via Zaya,
-    // que segura a sessão de verdade) usando a referência da última mensagem recebida
-    // (guardada em tratarMensagemRecebida). Sem essa referência (conversa antiga, de
-    // antes desse campo existir), só loga — não tem como marcar não lida sem ela.
-    if (resultado.naoCompreendido) {
-        const info = await comMemoria(mem => {
+        const { historicoAtual, dadosColetados } = await comMemoria(mem => {
             const conversa = mem.conversasAtivas.find(c => c.jid === jid)
-            return conversa ? { telefone: conversa.telefone, ultimaMensagemRecebida: conversa.ultimaMensagemRecebida || null } : null
+            return conversa ? { historicoAtual: conversa.historico.slice(-10), dadosColetados: conversa.dadosColetados || {} } : {}
         })
-        console.log(`⚠️ [ZVendas] Mensagem não compreendida de ${info?.telefone || jid} — marcada como não lida para revisão manual`)
-        if (info?.ultimaMensagemRecebida) {
-            try {
-                const r = await zayaRequest('/mark-unread', { jid, key: info.ultimaMensagemRecebida.key, messageTimestamp: info.ultimaMensagemRecebida.messageTimestamp })
-                if (!r.ok) throw new Error(r.error || 'falha desconhecida')
-            } catch (err) {
-                console.error(`⚠️ [ZVendas] Erro ao marcar ${jid} como não lida:`, err.message)
-            }
-        }
-        return
-    }
+        if (!historicoAtual) return
 
-    // Segurança de código, não só de prompt: "Cliente" só é uma etiqueta válida quando o
-    // pedido foi realmente confirmado nesta mensagem — evita o modelo marcar fechamento
-    // cedo demais só porque o cliente respondeu algo positivo tipo "podemos sim".
-    if (resultado.etiqueta === ETIQUETAS.cliente && !resultado.pedidoConfirmado) {
-        console.log(`⚠️ [ZVendas] Claude marcou etiqueta "Cliente" sem pedidoConfirmado — corrigindo pra "${ETIQUETAS.emAndamento}"`)
-        resultado.etiqueta = ETIQUETAS.emAndamento
-    }
-
-    const candidatas = Array.isArray(resultado.mensagens) && resultado.mensagens.length ? resultado.mensagens : [resultado.resposta].filter(Boolean)
-
-    // Dedup: nunca reenvia uma mensagem idêntica a alguma das últimas já mandadas nessa
-    // conversa. Compara contra um CONJUNTO das últimas mensagens "zvendas" recentes (não
-    // só a última) — um PAR de mensagens repetido (A+B de novo depois de A+B) não é pego
-    // comparando só com "a mensagem anterior", já que A não bate com B nem vice-versa.
-    const recentesZvendas = new Set(
-        historicoAtual.filter(h => h.de === 'zvendas').slice(-6).map(h => h.texto.trim().toLowerCase())
-    )
-    const mensagens = []
-    for (const texto of candidatas) {
-        const norm = (texto || '').trim().toLowerCase()
-        if (norm && (recentesZvendas.has(norm) || mensagens.some(m => m.trim().toLowerCase() === norm))) {
-            console.log(`🔁 [ZVendas] Mensagem repetida detectada, não reenviando: "${texto}"`)
-            continue
-        }
-        mensagens.push(texto)
-    }
-
-    for (const texto of mensagens) {
+        let resultado
         try {
-            await enviarMensagem(jid, texto)
+            resultado = await chamarClaudeVendedor(historicoAtual, dadosColetados)
         } catch (err) {
-            console.error('❌ [ZVendas] Erro ao enviar resposta ao cliente:', err.message)
+            console.error('❌ [ZVendas] Erro ao chamar Claude:', err.message)
+            return
         }
-    }
-    if (resultado.etiqueta) {
-        await aplicarEtiqueta(jid, resultado.etiqueta)
-        console.log(`🏷️ [ZVendas] Etiqueta atualizada: ${nome} → ${resultado.etiqueta}`)
-    }
+        if (!resultado) return
 
-    let desconto = null
-    let pedido = null
-    await comMemoria(mem => {
-        const conversa = mem.conversasAtivas.find(c => c.jid === jid)
-        if (!conversa) return
-
-        conversa.dadosColetados = conversa.dadosColetados || {}
-        for (const [k, v] of Object.entries(resultado.dadosColetados || {})) {
-            if (ehValorColetadoValido(v)) conversa.dadosColetados[k] = v
-        }
-        if (ehValorColetadoValido(resultado.dadosColetados?.nomeCliente)) conversa.nome = resultado.dadosColetados.nomeCliente
-        if (ehValorColetadoValido(resultado.dadosColetados?.empresa)) conversa.empresa = resultado.dadosColetados.empresa
-        for (const texto of mensagens) {
-            conversa.historico.push({ de: 'zvendas', texto, em: new Date().toISOString() })
-        }
-
-        if (resultado.etiqueta) {
-            conversa.estagio = resultado.etiqueta
-            const emp = mem.empresasContatadas.find(e => normalizarTelefone(e.telefone) === normalizarTelefone(conversa.telefone))
-            if (emp) emp.etiqueta = resultado.etiqueta
-        }
-
-        if (resultado.descontoSolicitado) {
-            const idDecisao = `zv_${Date.now()}`
-            desconto = {
-                idDecisao,
-                telefone: conversa.telefone,
-                jid: conversa.jid,
-                cliente: conversa.nome || conversa.empresa || conversa.telefone,
-                pedido: `${conversa.dadosColetados.quantidade ?? '?'} ${conversa.dadosColetados.tipoProduto || 'camiseta(s)'}`,
-                descontoSolicitado: resultado.percentualDesconto ?? null,
-                criadoEm: new Date().toISOString(),
+        // Não conseguiu mapear a mensagem do cliente pra nenhuma ação clara — não manda
+        // nada errado, só marca a conversa como não lida pra revisão manual (via Zaya,
+        // que segura a sessão de verdade) usando a referência da última mensagem recebida
+        // (guardada em tratarMensagemRecebida). Sem essa referência (conversa antiga, de
+        // antes desse campo existir), só loga — não tem como marcar não lida sem ela.
+        if (resultado.naoCompreendido) {
+            const info = await comMemoria(mem => {
+                const conversa = mem.conversasAtivas.find(c => c.jid === jid)
+                return conversa ? { telefone: conversa.telefone, ultimaMensagemRecebida: conversa.ultimaMensagemRecebida || null } : null
+            })
+            console.log(`⚠️ [ZVendas] Mensagem não compreendida de ${info?.telefone || jid} — marcada como não lida para revisão manual`)
+            if (info?.ultimaMensagemRecebida) {
+                try {
+                    const r = await zayaRequest('/mark-unread', { jid, key: info.ultimaMensagemRecebida.key, messageTimestamp: info.ultimaMensagemRecebida.messageTimestamp })
+                    if (!r.ok) throw new Error(r.error || 'falha desconhecida')
+                } catch (err) {
+                    console.error(`⚠️ [ZVendas] Erro ao marcar ${jid} como não lida:`, err.message)
+                }
             }
-            mem.aguardandoDesconto.push(desconto)
+            return
         }
 
-        if (resultado.pedidoConfirmado) {
-            pedido = registrarPedidoFechado(mem, conversa)
+        // Segurança de código, não só de prompt: "Cliente" só é uma etiqueta válida quando o
+        // pedido foi realmente confirmado nesta mensagem — evita o modelo marcar fechamento
+        // cedo demais só porque o cliente respondeu algo positivo tipo "podemos sim".
+        if (resultado.etiqueta === ETIQUETAS.cliente && !resultado.pedidoConfirmado) {
+            console.log(`⚠️ [ZVendas] Claude marcou etiqueta "Cliente" sem pedidoConfirmado — corrigindo pra "${ETIQUETAS.emAndamento}"`)
+            resultado.etiqueta = ETIQUETAS.emAndamento
         }
-    })
 
-    // Efeitos de rede (mensagem ao Maurício, post no grupo) ficam fora do lock
-    if (desconto) {
-        console.log(`⚠️ [ZVendas] Desconto solicitado por ${desconto.cliente} — aguardando Maurício`)
-        notificarMauricio(
-            `⚠️ *ZVendas — desconto solicitado*\n\nCliente: ${desconto.cliente}\nPedido: ${desconto.pedido}\nDesconto pedido: ${desconto.descontoSolicitado ? desconto.descontoSolicitado + '%' : 'não especificado'}\n\nResponda "autoriza X%" ou "não autoriza".\nID: ${desconto.idDecisao}`
+        const candidatas = Array.isArray(resultado.mensagens) && resultado.mensagens.length ? resultado.mensagens : [resultado.resposta].filter(Boolean)
+
+        // Dedup: nunca reenvia uma mensagem idêntica a alguma das últimas já mandadas nessa
+        // conversa. Compara contra um CONJUNTO das últimas mensagens "zvendas" recentes (não
+        // só a última) — um PAR de mensagens repetido (A+B de novo depois de A+B) não é pego
+        // comparando só com "a mensagem anterior", já que A não bate com B nem vice-versa.
+        const recentesZvendas = new Set(
+            historicoAtual.filter(h => h.de === 'zvendas').slice(-6).map(h => h.texto.trim().toLowerCase())
         )
-    }
-    if (pedido) {
-        await anunciarPedidoFechado(jid, pedido)
+        const mensagens = []
+        for (const texto of candidatas) {
+            const norm = (texto || '').trim().toLowerCase()
+            if (norm && (recentesZvendas.has(norm) || mensagens.some(m => m.trim().toLowerCase() === norm))) {
+                console.log(`🔁 [ZVendas] Mensagem repetida detectada, não reenviando: "${texto}"`)
+                continue
+            }
+            mensagens.push(texto)
+        }
+
+        for (const texto of mensagens) {
+            try {
+                await enviarMensagem(jid, texto)
+            } catch (err) {
+                console.error('❌ [ZVendas] Erro ao enviar resposta ao cliente:', err.message)
+            }
+        }
+        if (resultado.etiqueta) {
+            await aplicarEtiqueta(jid, resultado.etiqueta)
+            console.log(`🏷️ [ZVendas] Etiqueta atualizada: ${nome} → ${resultado.etiqueta}`)
+        }
+
+        let desconto = null
+        let pedido = null
+        await comMemoria(mem => {
+            const conversa = mem.conversasAtivas.find(c => c.jid === jid)
+            if (!conversa) return
+
+            conversa.dadosColetados = conversa.dadosColetados || {}
+            for (const [k, v] of Object.entries(resultado.dadosColetados || {})) {
+                if (ehValorColetadoValido(v)) conversa.dadosColetados[k] = v
+            }
+            if (ehValorColetadoValido(resultado.dadosColetados?.nomeCliente)) conversa.nome = resultado.dadosColetados.nomeCliente
+            if (ehValorColetadoValido(resultado.dadosColetados?.empresa)) conversa.empresa = resultado.dadosColetados.empresa
+            for (const texto of mensagens) {
+                conversa.historico.push({ de: 'zvendas', texto, em: new Date().toISOString() })
+            }
+
+            if (resultado.etiqueta) {
+                conversa.estagio = resultado.etiqueta
+                const emp = mem.empresasContatadas.find(e => normalizarTelefone(e.telefone) === normalizarTelefone(conversa.telefone))
+                if (emp) emp.etiqueta = resultado.etiqueta
+            }
+
+            if (resultado.descontoSolicitado) {
+                const idDecisao = `zv_${Date.now()}`
+                desconto = {
+                    idDecisao,
+                    telefone: conversa.telefone,
+                    jid: conversa.jid,
+                    cliente: conversa.nome || conversa.empresa || conversa.telefone,
+                    pedido: `${conversa.dadosColetados.quantidade ?? '?'} ${conversa.dadosColetados.tipoProduto || 'camiseta(s)'}`,
+                    descontoSolicitado: resultado.percentualDesconto ?? null,
+                    criadoEm: new Date().toISOString(),
+                }
+                mem.aguardandoDesconto.push(desconto)
+            }
+
+            if (resultado.pedidoConfirmado) {
+                pedido = registrarPedidoFechado(mem, conversa)
+            }
+        })
+
+        // Efeitos de rede (mensagem ao Maurício, post no grupo) ficam fora do lock
+        if (desconto) {
+            console.log(`⚠️ [ZVendas] Desconto solicitado por ${desconto.cliente} — aguardando Maurício`)
+            notificarMauricio(
+                `⚠️ *ZVendas — desconto solicitado*\n\nCliente: ${desconto.cliente}\nPedido: ${desconto.pedido}\nDesconto pedido: ${desconto.descontoSolicitado ? desconto.descontoSolicitado + '%' : 'não especificado'}\n\nResponda "autoriza X%" ou "não autoriza".\nID: ${desconto.idDecisao}`
+            )
+        }
+        if (pedido) {
+            await anunciarPedidoFechado(jid, pedido)
+        }
+    } finally {
+        processandoResposta.delete(jid)
     }
 }
 
@@ -1365,4 +1534,7 @@ module.exports = {
     enviarProduto, enviarCatalogoNaConversa, gerarEEnviarRespostaClaude,
     verificarClientesSemResposta, agendarVerificacaoClientesSemResposta, verificarFollowUpsPendentes,
     carregarCatalogo, agendarAtualizacaoCatalogo, proximoCanal, processarProximaAbordagem,
+    carregarCatalogoEstatico, montarSecaoCatalogoEstatico, montarSecaoCoresEstatico,
+    montarResumoCatalogoCliente, montarSecaoDadosColetados, pareceBaixaConversao,
+    gerarMensagemAbordagem2, jaProcessadaMensagem,
 }
