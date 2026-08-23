@@ -15,6 +15,9 @@ const cron = require('node-cron')
 const Groq = require('groq-sdk')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+// llama-3.3-70b-versatile foi descontinuado nessa conta (model_not_found) — GROQ_MODEL
+// no .env centraliza o modelo, mesmo padrão usado em todos os outros arquivos.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Arquivos de memória e estado
@@ -321,7 +324,7 @@ MEMÓRIA ATUAL:
 `
 
     const response = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+        model: GROQ_MODEL,
         max_tokens: 800,
         messages: [
             { role: 'system', content: ZEON_SYSTEM_PROMPT + '\n\n' + memoriaResumo },
@@ -711,7 +714,7 @@ async function processarMensagemMauricio(mensagem) {
             let reformulada = null
             try {
                 reformulada = await groq.chat.completions.create({
-                    model: 'llama-3.3-70b-versatile',
+                    model: GROQ_MODEL,
                     max_tokens: 80,
                     messages: [{
                         role: 'user',
@@ -894,7 +897,7 @@ Dados de: ${dadosParaAnalisar.atualizadoEm ? new Date(dadosParaAnalisar.atualiza
     let decisao
     try {
         decisao = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
+            model: GROQ_MODEL,
             max_tokens: 300,
             response_format: { type: 'json_object' },
             messages: [{
@@ -973,7 +976,7 @@ Responda APENAS em JSON:
     let avaliacao
     try {
         avaliacao = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
+            model: GROQ_MODEL,
             max_tokens: 700,
             response_format: { type: 'json_object' },
             messages: [{

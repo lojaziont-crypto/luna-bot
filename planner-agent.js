@@ -13,10 +13,16 @@ require('dotenv').config()
 const fs = require('fs')
 const path = require('path')
 const Groq = require('groq-sdk')
+const Anthropic = require('@anthropic-ai/sdk')
 const rawPuppeteer = require('puppeteer')
 const { resolverChrome } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const anthropic = new Anthropic({ timeout: 20000 }) // fallback se a Groq falhar (ver interpretarDespesa)
+// llama-3.3-70b-versatile foi descontinuado nessa conta (model_not_found) — GROQ_MODEL
+// no .env centraliza o modelo, mesmo padrão usado em todos os outros arquivos.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
+const CLAUDE_MODEL_FALLBACK = 'claude-haiku-4-5-20251001'
 
 const PLANNER_URL = process.env.PLANNER_URL || 'https://web.meuplannerfinanceiro.com.br/login'
 const PLANNER_BASE = 'https://web.meuplannerfinanceiro.com.br'
@@ -213,24 +219,55 @@ REGRAS:
 Responda EXCLUSIVAMENTE em JSON, sem texto fora do JSON:
 {"valor": 0.00, "categoria": "...", "subcategoria": "...", "data": "AAAA-MM-DD", "confianca": 0.0, "status": "Concluído", "cartao": ""}`
 
+// Claude às vezes envolve o JSON em ```json ... ``` mesmo quando instruído a não fazer
+// isso — tira a cerca de código antes de parsear (Groq com response_format json_object
+// não precisa disso, mas não faz mal aplicar nos dois casos).
+function extrairJSON(texto) {
+    const limpo = String(texto || '').replace(/```json\s*/gi, '').replace(/```/g, '').trim()
+    return JSON.parse(limpo)
+}
+
+async function extrairDespesaViaGroq(texto, hoje) {
+    const resp = await groq.chat.completions.create({
+        model: GROQ_MODEL,
+        max_tokens: 400,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+            { role: 'system', content: `${PROMPT_DESPESA}\n\nData de hoje: ${hoje}` },
+            { role: 'user', content: texto },
+        ],
+    })
+    return extrairJSON(resp.choices[0].message.content)
+}
+
+async function extrairDespesaViaClaude(texto, hoje) {
+    const resp = await anthropic.messages.create({
+        model: CLAUDE_MODEL_FALLBACK,
+        max_tokens: 400,
+        system: `${PROMPT_DESPESA}\n\nData de hoje: ${hoje}`,
+        messages: [{ role: 'user', content: texto }],
+    })
+    const bloco = resp.content.find(b => b.type === 'text')
+    return extrairJSON(bloco?.text)
+}
+
 // Retorna { ok, dados?, motivo? }. dados = { valor, categoria, subcategoria, descricao, data, status, confianca }
 async function interpretarDespesa(texto) {
     const hoje = hojeBR()
     let bruto
     try {
-        const resp = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
-            max_tokens: 400,
-            temperature: 0.1,
-            response_format: { type: 'json_object' },
-            messages: [
-                { role: 'system', content: `${PROMPT_DESPESA}\n\nData de hoje: ${hoje}` },
-                { role: 'user', content: texto },
-            ],
-        })
-        bruto = JSON.parse(resp.choices[0].message.content)
-    } catch (err) {
-        return { ok: false, motivo: `Não consegui interpretar a mensagem (${err.message}).` }
+        bruto = await extrairDespesaViaGroq(texto, hoje)
+    } catch (errGroq) {
+        // Nunca repassa o erro técnico (pode conter o JSON bruto da API, ex: "model_not_found")
+        // pro dono via WhatsApp — só loga aqui e tenta o fallback antes de desistir de vez.
+        console.error(`⚠️  [Planner] Groq falhou ao interpretar despesa, tentando fallback via Claude Haiku. Detalhe técnico: ${errGroq.message}`)
+        try {
+            bruto = await extrairDespesaViaClaude(texto, hoje)
+        } catch (errClaude) {
+            console.error(`❌ [Planner] Fallback via Claude também falhou ao interpretar despesa. Detalhe técnico: ${errClaude.message}`)
+            return { ok: false, motivo: 'Não consegui processar essa despesa agora, tenta de novo em instantes.' }
+        }
     }
 
     const valor = Number(String(bruto.valor).replace(',', '.'))

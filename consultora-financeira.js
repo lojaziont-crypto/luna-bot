@@ -22,6 +22,10 @@ const memoriaStore = require('./zaya-memoria')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const anthropic = new Anthropic({ timeout: 20000 }) // ANTHROPIC_API_KEY do .env
+// Modelo Groq centralizado — llama-3.3-70b-versatile foi descontinuado nessa conta
+// (model_not_found); openai/gpt-oss-120b é o maior modelo geral disponível agora.
+// GROQ_MODEL no .env permite trocar sem mexer em código se a Groq mudar de novo.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
 const MAX_TOKENS = 400
@@ -159,7 +163,7 @@ Responda EXCLUSIVAMENTE em JSON:
 async function classificarMensagem(texto) {
     try {
         const resp = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
+            model: GROQ_MODEL,
             max_tokens: 150,
             temperature: 0,
             response_format: { type: 'json_object' },

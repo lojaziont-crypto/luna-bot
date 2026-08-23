@@ -19,6 +19,9 @@ puppeteer.use(StealthPlugin())
 const { resolverChrome } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+// llama-3.3-70b-versatile foi descontinuado nessa conta (model_not_found) — GROQ_MODEL
+// no .env centraliza o modelo, mesmo padrão usado em todos os outros arquivos.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
 
 const PLANNER_URL = 'https://web.meuplannerfinanceiro.com.br'
 const LANCAMENTOS_URL = `${PLANNER_URL}/controle/lancamentos`
@@ -126,7 +129,7 @@ function parseExtracao(conteudo) {
 async function extrairDeTexto(texto) {
     const hoje = new Date().toISOString().slice(0, 10)
     const response = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+        model: GROQ_MODEL,
         max_tokens: 500,
         response_format: { type: 'json_object' },
         messages: [

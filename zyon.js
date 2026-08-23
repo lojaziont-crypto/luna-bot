@@ -21,6 +21,9 @@ const {
 } = require('./shopee-agent')
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+// llama-3.3-70b-versatile foi descontinuado nessa conta (model_not_found) — GROQ_MODEL
+// no .env centraliza o modelo, mesmo padrão usado em todos os outros arquivos.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
 
 const PEDIDOS_FILE = path.join(__dirname, 'pedidos_vistos.json')
 const BOOST_LOG_FILE = path.join(__dirname, 'zyon_boost_log.json')
@@ -348,7 +351,7 @@ async function coletarRelatorioGerencial() {
 
         // Gera resumo via Groq
         const resumo = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
+            model: GROQ_MODEL,
             max_tokens: 400,
             messages: [{
                 role: 'user',
@@ -511,7 +514,7 @@ const zyonServer = http.createServer(async (req, res) => {
                 } else {
                     // Interpreta a tarefa com Groq
                     interpretacao = await groq.chat.completions.create({
-                        model: 'llama-3.3-70b-versatile',
+                        model: GROQ_MODEL,
                         max_tokens: 200,
                         response_format: { type: 'json_object' },
                         messages: [{

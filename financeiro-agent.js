@@ -25,6 +25,9 @@ const { resolverChrome } = require('./shopee-agent')
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const anthropic = new Anthropic({ timeout: 30000 })
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
+// llama-3.3-70b-versatile foi descontinuado nessa conta (model_not_found) — GROQ_MODEL
+// no .env centraliza o modelo, mesmo padrão usado em todos os outros arquivos.
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
 
 const FINANCEIRO_URL = 'https://grupoz.base44.app/financeiro'
 
@@ -173,24 +176,47 @@ function descreverCategoriasConhecidas(lista) {
     return lista.map(c => (c.subs && c.subs.length) ? `${c.nome} (${c.subs.join(', ')})` : c.nome).join(' | ')
 }
 
+async function extrairDespesaTextoViaGroq(texto, hoje, categoriasConhecidas) {
+    const resp = await groq.chat.completions.create({
+        model: GROQ_MODEL,
+        max_tokens: 400,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+            { role: 'system', content: `${montarPromptDespesa(descreverCategoriasConhecidas(categoriasConhecidas))}\n\nData de hoje: ${hoje}` },
+            { role: 'user', content: texto },
+        ],
+    })
+    return extrairJSON(resp.choices[0].message.content)
+}
+
+async function extrairDespesaTextoViaClaude(texto, hoje, categoriasConhecidas) {
+    const resp = await anthropic.messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: 400,
+        system: `${montarPromptDespesa(descreverCategoriasConhecidas(categoriasConhecidas))}\n\nData de hoje: ${hoje}`,
+        messages: [{ role: 'user', content: texto }],
+    })
+    const bloco = resp.content.find(b => b.type === 'text')
+    return extrairJSON(bloco?.text || '')
+}
+
 // Retorna { ok, dados?, motivo? }. dados = { valor, empresa, categoria, subcategoria, descricao, data, status, conta, cartao, confianca }
 async function interpretarDespesaTexto(texto, categoriasConhecidas = []) {
     const hoje = hojeBR()
     let bruto
     try {
-        const resp = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
-            max_tokens: 400,
-            temperature: 0.1,
-            response_format: { type: 'json_object' },
-            messages: [
-                { role: 'system', content: `${montarPromptDespesa(descreverCategoriasConhecidas(categoriasConhecidas))}\n\nData de hoje: ${hoje}` },
-                { role: 'user', content: texto },
-            ],
-        })
-        bruto = extrairJSON(resp.choices[0].message.content)
-    } catch (err) {
-        return { ok: false, motivo: `Não consegui interpretar a mensagem (${err.message}).` }
+        bruto = await extrairDespesaTextoViaGroq(texto, hoje, categoriasConhecidas)
+    } catch (errGroq) {
+        // Nunca repassa o erro técnico (pode conter o JSON bruto da API, ex: "model_not_found")
+        // pro grupo via WhatsApp — só loga aqui e tenta o fallback antes de desistir de vez.
+        console.error(`⚠️  [Financeiro] Groq falhou ao interpretar despesa, tentando fallback via Claude Haiku. Detalhe técnico: ${errGroq.message}`)
+        try {
+            bruto = await extrairDespesaTextoViaClaude(texto, hoje, categoriasConhecidas)
+        } catch (errClaude) {
+            console.error(`❌ [Financeiro] Fallback via Claude também falhou ao interpretar despesa. Detalhe técnico: ${errClaude.message}`)
+            return { ok: false, motivo: 'Não consegui processar essa despesa agora, tenta de novo em instantes.' }
+        }
     }
     return normalizarDadosBrutos(bruto, hoje)
 }
