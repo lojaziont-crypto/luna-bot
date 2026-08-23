@@ -12,7 +12,7 @@ const path = require('path')
 const http = require('http')
 const https = require('https')
 const Anthropic = require('@anthropic-ai/sdk')
-const { TERMOS_BUSCA, buscarEmpresasNoMaps: buscarEmpresasNoMapsCompartilhado, pareceCelular } = require('./maps-prospeccao')
+const { TERMOS_BUSCA, buscarEmpresasNoMaps: buscarEmpresasNoMapsCompartilhado, pareceCelular, ehSegmentoBloqueado } = require('./maps-prospeccao')
 
 const anthropic = new Anthropic({ timeout: 30000 }) // ANTHROPIC_API_KEY do .env
 
@@ -63,14 +63,15 @@ function memoriaPadrao() {
         // "empresa 1 → zaya, empresa 2 → matheus, empresa 3 → zaya..." independente de
         // qual dos dois processos a encontrou primeiro.
         proximoCanalIndex: 0,
-        // { data: 'AAAA-MM-DD', quantidade, meta } — limite de 15-25 empresas novas/dia
-        // (canal Zaya — descobertas por cicloProspeccao daqui, não por quantas de fato
-        // acabam atribuídas a este canal, ver comentário em proximoCanal)
+        // { data: 'AAAA-MM-DD', quantidade, meta } — limite de 30-50 empresas novas/dia
+        // (dobrado junto com a frequência dos ciclos — canal Zaya, descobertas por
+        // cicloProspeccao daqui, não por quantas de fato acabam atribuídas a este
+        // canal, ver comentário em proximoCanal)
         contadorDiario: { data: null, quantidade: 0, meta: 0 },
         // Mesma coisa que contadorDiario, só que pro canal Matheus (zmatheus.js)
         contadorDiarioMatheus: { data: null, quantidade: 0, meta: 0 },
         // { data: 'AAAA-MM-DD', proximaBuscaNumero } — sequência progressiva de intervalos
-        // entre buscas (1,2,4,8,16,32min, depois fixo 64min), reinicia por dia
+        // entre buscas (30s,1,2,4,8,16min, depois fixo 32min), reinicia por dia
         sequenciaBusca: { data: null, proximaBuscaNumero: 1 },
         // { atualizadoEm, produtos: [{nome, descricao, preco, moeda}] } — catálogo real do
         // WhatsApp Business, pra nunca inventar produto que não existe.
@@ -290,7 +291,7 @@ async function cicloProspeccao() {
     const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
     const { restante } = await comMemoria(mem => {
         if (mem.contadorDiario.data !== hoje) {
-            mem.contadorDiario = { data: hoje, quantidade: 0, meta: aleatorioEntre(15, 25) }
+            mem.contadorDiario = { data: hoje, quantidade: 0, meta: aleatorioEntre(30, 50) }
         }
         return { restante: mem.contadorDiario.meta - mem.contadorDiario.quantidade }
     })
@@ -323,6 +324,14 @@ async function cicloProspeccao() {
     const comWhatsapp = []
     for (const emp of candidatas) {
         if (comWhatsapp.length >= restante) break
+        // Segmento bloqueado (farmácia, hospital, clínica, dentista, laboratório,
+        // veterinária etc.) — pula sem contar no ciclo, nem chega a checar WhatsApp.
+        // 2ª camada de segurança: cobre o caso de aparecer por baixo de um termo de
+        // busca permitido (TERMOS_BUSCA já não inclui nenhum termo bloqueado).
+        if (ehSegmentoBloqueado(emp.nome, emp.categoria)) {
+            console.log(`🚫 [ZVendas] Segmento bloqueado ignorado: ${emp.nome}${emp.categoria ? ` (${emp.categoria})` : ''}`)
+            continue
+        }
         if (!pareceCelular(emp.telefone)) {
             console.log(`📵 [ZVendas] Número fixo ignorado: ${emp.telefone}`)
             continue
@@ -342,7 +351,7 @@ async function cicloProspeccao() {
     // WhatsApp — evita segurar a memória travada por dezenas de segundos.
     await comMemoria(mem => {
         if (mem.contadorDiario.data !== hoje) {
-            mem.contadorDiario = { data: hoje, quantidade: 0, meta: aleatorioEntre(15, 25) }
+            mem.contadorDiario = { data: hoje, quantidade: 0, meta: aleatorioEntre(30, 50) }
         }
         const jaContatadas = new Set(mem.empresasContatadas.map(e => normalizarTelefone(e.telefone)))
         const restanteAgora = mem.contadorDiario.meta - mem.contadorDiario.quantidade
@@ -365,14 +374,16 @@ async function cicloProspeccao() {
 }
 
 // Sequência de intervalos entre buscas (minutos), progressiva ao longo do dia:
-// 1min, 2min, 4min, 8min, 16min, 32min, e a partir da 7ª busca fica fixo em 64min.
+// 30s, 1min, 2min, 4min, 8min, 16min, e a partir da 7ª busca fica fixo em 32min
+// (frequência dobrada em relação aos valores originais — 1/2/4/8/16/32min fixo em
+// 64min — mesmo lote por ciclo, só mais ciclos por dia).
 // Reinicia todo dia (contado por data America/Sao_Paulo). Roda 24h — cada empresa
 // encontrada só entra na fila se estiver "aberto agora" no Maps no momento da busca.
-const DELAYS_PROGRESSIVOS_MIN = [1, 2, 4, 8, 16, 32]
+const DELAYS_PROGRESSIVOS_MIN = [0.5, 1, 2, 4, 8, 16]
 
 function proximoDelayBuscaMinutos(numeroBusca) {
     const idx = numeroBusca - 1
-    return idx < DELAYS_PROGRESSIVOS_MIN.length ? DELAYS_PROGRESSIVOS_MIN[idx] : 64
+    return idx < DELAYS_PROGRESSIVOS_MIN.length ? DELAYS_PROGRESSIVOS_MIN[idx] : 32
 }
 
 async function agendarProspeccao() {
@@ -428,12 +439,15 @@ const MENSAGEM_ABORDAGEM_1B = 'Tudo bem?'
 const MENSAGEM_ABORDAGEM_2_PADRAO = 'Me chamo Maurício, trabalho com a Ziont. Fazemos camiseta e uniforme personalizado. Vocês usam uniforme pra equipe?'
 const MENSAGEM_ABORDAGEM_2_BAIXA_CONVERSAO = 'Me chamo Maurício, trabalho com a Ziont. Fazemos camiseta e uniforme personalizado. Vocês fazem camiseta personalizada pra alguma campanha, evento ou ação da equipe?'
 
-// Termos de TERMOS_BUSCA (maps-prospeccao.js) que caem no segmento de baixa
-// conversão — já usam uniforme regulamentado (jaleco, EPI, farda oficial), não
-// camiseta estampada do dia a dia. "hospital"/"bombeiro"/"segurança pública" não
-// são termos de busca hoje (não têm como aparecer via termoBusca ainda), mas ficam
-// listados pra já cobrir se algum dia entrarem em TERMOS_BUSCA.
-const TERMOS_BAIXA_CONVERSAO = ['farmácia', 'farmacia', 'hospital', 'clínica', 'clinica', 'bombeiro', 'defesa civil', 'segurança pública', 'seguranca publica']
+// Segmentos de baixa conversão que continuam sendo ABORDADOS, só com o pitch
+// alternativo de campanha/evento (diferente do bloqueio total em
+// maps-prospeccao.js/ehSegmentoBloqueado, que nem chega a ser contatado). Farmácia/
+// hospital/clínica saíram daqui — passaram pro bloqueio total, já que também não
+// compram camiseta e não faz mais sentido gastar abordagem nelas. Bombeiro/defesa
+// civil/segurança pública não são termos de busca hoje (não têm como aparecer via
+// termoBusca ainda), mas ficam listados pra já cobrir se algum dia entrarem em
+// TERMOS_BUSCA — mantidos como pediu o dono, sem bloqueio.
+const TERMOS_BAIXA_CONVERSAO = ['bombeiro', 'defesa civil', 'segurança pública', 'seguranca publica']
 
 function pareceBaixaConversao(termoBusca) {
     const norm = String(termoBusca || '').toLowerCase()
@@ -1509,7 +1523,7 @@ const server = http.createServer((req, res) => {
 // via `node -e`) NUNCA deve abrir porta nem começar a raspar/mandar mensagem sozinho.
 if (require.main === module) {
     console.log('⚡ Iniciando ZVendas...')
-    console.log('🔍 Prospecção automática: 24h, só empresas "aberto agora", intervalos progressivos 1/2/4/8/16/32min depois fixo 64min (±30s), 8-10 empresas/ciclo (fixo descartado antes de checar WhatsApp), 15-25/dia')
+    console.log('🔍 Prospecção automática: 24h, só empresas "aberto agora", intervalos progressivos 30s/1/2/4/8/16min depois fixo 32min (±30s), 8-10 empresas/ciclo (fixo e segmento bloqueado descartados antes de checar WhatsApp), 30-50/dia')
     console.log('🔀 Canal: empresas novas alternam entre "zaya" e "matheus" (zvendas_memoria.json compartilhado) — este processo só aborda as do canal "zaya"')
     console.log('📱 Abordagem inicial: ciclo 15-40min, 2 mensagens (saudação + "Tudo bem?") com 8-15s de intervalo, depois aguarda resposta')
     console.log('💬 Atendimento: 24h, delay de digitação humanizado 3-30s (com indicador "digitando...") antes de cada mensagem')
@@ -1536,5 +1550,5 @@ module.exports = {
     carregarCatalogo, agendarAtualizacaoCatalogo, proximoCanal, processarProximaAbordagem,
     carregarCatalogoEstatico, montarSecaoCatalogoEstatico, montarSecaoCoresEstatico,
     montarResumoCatalogoCliente, montarSecaoDadosColetados, pareceBaixaConversao,
-    gerarMensagemAbordagem2, jaProcessadaMensagem,
+    gerarMensagemAbordagem2, jaProcessadaMensagem, proximoDelayBuscaMinutos,
 }

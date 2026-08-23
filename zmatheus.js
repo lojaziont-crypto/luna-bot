@@ -31,7 +31,7 @@ const http = require('http')
 const { Boom } = require('@hapi/boom')
 const qrcode = require('qrcode-terminal')
 const pino = require('pino')
-const { TERMOS_BUSCA, buscarEmpresasNoMaps, pareceCelular } = require('./maps-prospeccao')
+const { TERMOS_BUSCA, buscarEmpresasNoMaps, pareceCelular, ehSegmentoBloqueado } = require('./maps-prospeccao')
 
 const esperar = ms => new Promise(r => setTimeout(r, ms))
 const aleatorioEntre = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min
@@ -156,7 +156,7 @@ async function aplicarLabelContato(sock, jid, nome) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Prospecção — mesma lógica do zvendas.js (Google Maps, "aberto agora", intervalos
-// progressivos, meta diária 15-25), canal "matheus" (contadorDiarioMatheus,
+// progressivos, meta diária 30-50), canal "matheus" (contadorDiarioMatheus,
 // sequenciaBuscaMatheus são campos PRÓPRIOS — não competem com os do zvendas.js).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -172,7 +172,7 @@ async function cicloProspeccao(sock) {
     const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
     const { restante } = await comMemoria(mem => {
         if (mem.contadorDiarioMatheus.data !== hoje) {
-            mem.contadorDiarioMatheus = { data: hoje, quantidade: 0, meta: aleatorioEntre(15, 25) }
+            mem.contadorDiarioMatheus = { data: hoje, quantidade: 0, meta: aleatorioEntre(30, 50) }
         }
         return { restante: mem.contadorDiarioMatheus.meta - mem.contadorDiarioMatheus.quantidade }
     })
@@ -204,6 +204,12 @@ async function cicloProspeccao(sock) {
     const comWhatsapp = []
     for (const emp of candidatas) {
         if (comWhatsapp.length >= restante) break
+        // Segmento bloqueado (farmácia, hospital, clínica, dentista, laboratório,
+        // veterinária etc.) — pula sem contar no ciclo, nem chega a checar WhatsApp.
+        if (ehSegmentoBloqueado(emp.nome, emp.categoria)) {
+            console.log(`🚫 [ZMatheus] Segmento bloqueado ignorado: ${emp.nome}${emp.categoria ? ` (${emp.categoria})` : ''}`)
+            continue
+        }
         if (!pareceCelular(emp.telefone)) {
             console.log(`📵 [ZMatheus] Número fixo ignorado: ${emp.telefone}`)
             continue
@@ -221,7 +227,7 @@ async function cicloProspeccao(sock) {
 
     await comMemoria(mem => {
         if (mem.contadorDiarioMatheus.data !== hoje) {
-            mem.contadorDiarioMatheus = { data: hoje, quantidade: 0, meta: aleatorioEntre(15, 25) }
+            mem.contadorDiarioMatheus = { data: hoje, quantidade: 0, meta: aleatorioEntre(30, 50) }
         }
         const jaContatadas = new Set(mem.empresasContatadas.map(e => normalizarTelefone(e.telefone)))
         const restanteAgora = mem.contadorDiarioMatheus.meta - mem.contadorDiarioMatheus.quantidade
@@ -243,11 +249,14 @@ async function cicloProspeccao(sock) {
     })
 }
 
-const DELAYS_PROGRESSIVOS_MIN = [1, 2, 4, 8, 16, 32]
+// Frequência dobrada em relação aos valores originais (1/2/4/8/16/32min fixo em
+// 64min) — mesmo lote por ciclo, só mais ciclos por dia. Mesma sequência do
+// zvendas.js (canal Zaya), campo próprio (sequenciaBuscaMatheus) pra não competir.
+const DELAYS_PROGRESSIVOS_MIN = [0.5, 1, 2, 4, 8, 16]
 
 function proximoDelayBuscaMinutos(numeroBusca) {
     const idx = numeroBusca - 1
-    return idx < DELAYS_PROGRESSIVOS_MIN.length ? DELAYS_PROGRESSIVOS_MIN[idx] : 64
+    return idx < DELAYS_PROGRESSIVOS_MIN.length ? DELAYS_PROGRESSIVOS_MIN[idx] : 32
 }
 
 function agendarProspeccao(sock) {
@@ -448,7 +457,7 @@ const server = http.createServer((req, res) => {
 if (require.main === module) {
     console.log('⚡ Iniciando ZMatheus...')
     console.log(`📱 Conectando ao WhatsApp do Matheus (${MATHEUS_PHONE}) — auth em ${AUTH_DIR}`)
-    console.log('🔍 Prospecção: mesma lógica do ZVendas (Google Maps, "aberto agora"), 8-10 empresas/ciclo (fixo descartado antes de checar WhatsApp), canal "matheus", zvendas_memoria.json compartilhado')
+    console.log('🔍 Prospecção: mesma lógica do ZVendas (Google Maps, "aberto agora"), intervalos progressivos 30s/1/2/4/8/16min depois fixo 32min, 8-10 empresas/ciclo (fixo e segmento bloqueado descartados antes de checar WhatsApp), 30-50/dia, canal "matheus", zvendas_memoria.json compartilhado')
     console.log('📨 Abordagem: 2 mensagens fixas (saudação + "Tudo bem?"), 8-15s de intervalo — sem IA, sem atendimento, para depois disso')
     server.listen(PORT, () => console.log(`🚀 ZMatheus HTTP server na porta ${PORT}`))
     connectToWhatsApp()
@@ -458,5 +467,5 @@ module.exports = {
     // exportado só pra permitir testes/simulação isolada (node -e)
     carregarMemoria, salvarMemoria, memoriaPadrao, normalizarTelefone, comMemoria, proximoCanal,
     cicloProspeccao, abordarEmpresa, saudacaoPorHorario, processarProximaAbordagem,
-    checarWhatsapp, ETIQUETAS,
+    checarWhatsapp, ETIQUETAS, proximoDelayBuscaMinutos,
 }
