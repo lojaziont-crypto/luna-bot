@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-19T18:03:25.419Z",
+  "updatedAt": "2026-11-19T23:26:05.386Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -458,6 +458,28 @@
       "sourceUrl": "https://bomix.com.br/contato/",
       "contactLabel": "Formulário oficial de Capital Humano; telefone comercial",
       "fit": "Fabricante industrial com operação de recebimento, estoque, inventário, expedição e distribuição; a vaga de supervisão exige formação superior.",
+      "whatsappVerified": false
+    },
+    {
+      "id": "petrobahia",
+      "name": "Petrobahia",
+      "segment": "Distribuição de combustíveis, suprimentos e logística",
+      "location": "Salvador, BA",
+      "phone": "7140209000",
+      "sourceUrl": "https://www.petrobahia.com.br/contato/",
+      "contactLabel": "Central institucional; candidaturas pela página oficial da Gupy",
+      "fit": "Distribuidora regional com operações de suprimentos, estoque, compras, frete e logística; mantém vagas atuais relacionadas a suprimentos e transporte.",
+      "whatsappVerified": false
+    },
+    {
+      "id": "kuehne-nagel-salvador",
+      "name": "Kuehne+Nagel Brasil",
+      "segment": "Logística e transporte internacional",
+      "location": "Salvador, BA",
+      "phone": "7136172006",
+      "sourceUrl": "https://home.kuehne-nagel.com/locations?query=Brazil",
+      "contactLabel": "Telefone institucional da unidade; candidaturas no portal oficial de carreiras",
+      "fit": "Operação logística com vagas em inventário, armazém e gestão de operações; boa aderência a estoque e controle operacional.",
       "whatsappVerified": false
     }
   ],
@@ -1409,6 +1431,30 @@
       "capturedAt": "2026-11-19",
       "status": "nova",
       "id": "presencial-supervisor-almoxarifado-bomix-simoes-filho-3944554"
+    },
+    {
+      "title": "Analista de Suprimento e Logística",
+      "company": "Petrobahia",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "source": "Petrobahia / Gupy",
+      "url": "https://petrobahia.gupy.io/jobs/12900245?jobBoardSource=gupy_public_page",
+      "description": "Planejamento e controle de estoques, compras e transferências, fretes, contratos, custos e indicadores de logística, com interface com fornecedores e áreas comerciais. Exige graduação completa em Administração, Ciências Contábeis ou Logística; ERP e Office intermediário são desejáveis.",
+      "capturedAt": "2026-11-19",
+      "status": "nova",
+      "id": "presencial-analista-suprimento-logistica-petrobahia-salvador-12900245"
+    },
+    {
+      "title": "Assistente de Inventário - Salvador",
+      "company": "Kuehne+Nagel Brasil",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "source": "Kuehne+Nagel / Gupy",
+      "url": "https://kuehne-nagel.gupy.io/jobs/12795603?jobBoardSource=gupy_public_page",
+      "description": "Conferência de localização e quantidade de materiais, inventário e movimentos no sistema, investigação de divergências e apoio à acuracidade do estoque. Exige ensino médio e conhecimento ou experiência com estoque, inventário ou armazém; inscrições abertas até 27/01/2027.",
+      "capturedAt": "2026-11-19",
+      "status": "nova",
+      "id": "presencial-assistente-inventario-kuehne-nagel-salvador-12795603"
     }
   ],
   "excludedCompanies": [
