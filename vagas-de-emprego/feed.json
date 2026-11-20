@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-19T23:26:05.386Z",
+  "updatedAt": "2026-11-20T14:56:27.817Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -481,6 +481,28 @@
       "contactLabel": "Telefone institucional da unidade; candidaturas no portal oficial de carreiras",
       "fit": "Operação logística com vagas em inventário, armazém e gestão de operações; boa aderência a estoque e controle operacional.",
       "whatsappVerified": false
+    },
+    {
+      "id": "dhl-supply-chain-salvador",
+      "name": "DHL Supply Chain",
+      "segment": "Logística, armazenagem e transporte",
+      "location": "Campinas de Pirajá, Salvador, BA",
+      "phone": "7133796593",
+      "sourceUrl": "https://www.econodata.com.br/consulta-empresa/02836056017939-dhl-supply-chain-brazil-ltda",
+      "contactLabel": "Telefone corporativo público listado para a unidade; candidaturas pelo portal oficial de carreiras",
+      "fit": "Operação local de logística e armazenagem com vaga recente em movimentação, estoque e conferência; aderente à experiência operacional.",
+      "whatsappVerified": false
+    },
+    {
+      "id": "ftd-educacao-salvador",
+      "name": "FTD Educação",
+      "segment": "Editora e soluções educacionais",
+      "location": "Pituba, Salvador, BA",
+      "phone": "558007722300",
+      "sourceUrl": "https://portal.ftd.com.br/contato/",
+      "contactLabel": "WhatsApp oficial de atendimento; candidaturas pelo portal Trabalhe na FTD",
+      "fit": "Vaga regional de estratégia e operação comercial com indicadores, CRM, relatórios e organização de demandas.",
+      "whatsappVerified": true
     }
   ],
   "jobs": [
@@ -1455,6 +1477,30 @@
       "capturedAt": "2026-11-19",
       "status": "nova",
       "id": "presencial-assistente-inventario-kuehne-nagel-salvador-12795603"
+    },
+    {
+      "title": "ASSISTENTE DE TRANSPORTES",
+      "company": "DHL Supply Chain",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "source": "LinkedIn Jobs / DHL Supply Chain",
+      "url": "https://br.linkedin.com/jobs/view/assistente-de-transportes-at-dhl-supply-chain-4492700958",
+      "description": "Separação, armazenagem, conferência e movimentação de materiais; controle de inventário, organização, carga e descarga. Exige ensino médio completo e atenção a padrões de segurança. Vaga recente em operação logística presencial.",
+      "capturedAt": "2026-11-20",
+      "status": "nova",
+      "id": "presencial-assistente-transportes-dhl-salvador-4492700958"
+    },
+    {
+      "title": "Pessoa Analista de Estratégia Comercial Pleno",
+      "company": "FTD Educação",
+      "location": "Salvador, BA",
+      "workMode": "híbrido",
+      "source": "FTD / Gupy",
+      "url": "https://vempraftd.gupy.io/jobs/12684193?jobBoardSource=gupy_public_page",
+      "description": "Apoio à operação comercial regional, organização de carteiras e demandas, atualização de bases, indicadores, relatórios e análises para decisões comerciais. Requer superior completo ou em andamento em área correlata, experiência comercial/planejamento/operações, Excel ou Sheets intermediário, CRM e acompanhamento de indicadores.",
+      "capturedAt": "2026-11-20",
+      "status": "nova",
+      "id": "hibrido-pessoa-analista-estrategia-comercial-pleno-ftd-salvador-12684193"
     }
   ],
   "excludedCompanies": [
