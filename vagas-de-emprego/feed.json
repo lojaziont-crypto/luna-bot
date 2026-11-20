@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-20T14:56:27.817Z",
+  "updatedAt": "2026-11-20T21:03:02.040Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -502,6 +502,17 @@
       "sourceUrl": "https://portal.ftd.com.br/contato/",
       "contactLabel": "WhatsApp oficial de atendimento; candidaturas pelo portal Trabalhe na FTD",
       "fit": "Vaga regional de estratégia e operação comercial com indicadores, CRM, relatórios e organização de demandas.",
+      "whatsappVerified": true
+    },
+    {
+      "id": "amoedo-distribuidora",
+      "name": "Amoedo Distribuidora",
+      "segment": "Distribuição de produtos veterinários",
+      "location": "Salvador, BA",
+      "phone": "7133911348",
+      "sourceUrl": "https://www.amoedodistribuidora.com/contato/",
+      "contactLabel": "WhatsApp corporativo oficial de atendimento; candidatura pelo anúncio da empresa no LinkedIn",
+      "fit": "Distribuidora com rotinas de estoque, entregas e controle de entradas e saídas; o anúncio recente corresponde diretamente à experiência operacional.",
       "whatsappVerified": true
     }
   ],
@@ -1501,6 +1512,18 @@
       "capturedAt": "2026-11-20",
       "status": "nova",
       "id": "hibrido-pessoa-analista-estrategia-comercial-pleno-ftd-salvador-12684193"
+    },
+    {
+      "title": "Auxiliar de Distribuição",
+      "company": "Amoedo Distribuidora",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "source": "LinkedIn Jobs / Amoedo Distribuidora",
+      "url": "https://br.linkedin.com/jobs/view/auxiliar-de-distribui%C3%A7%C3%A3o-at-amoedo-distribuidora-4491782711",
+      "description": "Organização de estoque, realização de entregas e controle de entradas e saídas dos produtos comercializados. Vaga em tempo integral numa distribuidora com sede na Bahia.",
+      "capturedAt": "2026-11-20",
+      "status": "nova",
+      "id": "presencial-auxiliar-distribuicao-amoedo-salvador-4491782711"
     }
   ],
   "excludedCompanies": [
