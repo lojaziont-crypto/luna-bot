@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-20T21:03:02.040Z",
+  "updatedAt": "2026-11-21T12:03:42.289Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -621,9 +621,9 @@
       "salaryMin": 3038,
       "salaryMax": 3238,
       "source": "Indeed",
-      "url": "https://br.indeed.com/q-analista-de-marketplace-l-salvador%2C-ba-vagas.html",
-      "description": "Operação de inventário e entregas no Mercado Envíos, com foco em indicadores, excelência operacional e gestão de pessoas na operação.",
-      "capturedAt": "2026-11-02",
+      "url": "https://br.indeed.com/q-operador-de-logistica-l-salvador%2C-ba-vagas.html",
+      "description": "Vaga presencial CLT em Salvador para operação do Mercado Envíos. Anúncio consultado em 21/11/2026: salário-base de R$ 3.038, bônus mensal de presencialidade de R$ 200 e benefícios. A descrição cita atuação como multiplicador de treinamento operacional, disseminação de procedimentos e planos de ação ligados a indicadores. Requisitos de triagem informados: ensino médio completo, experiência apoiando liderança/gestão de pessoas na operação, experiência com gestão de motoristas e uso de Excel ou Google Sheets; confira os detalhes e candidatura no anúncio.",
+      "capturedAt": "2026-11-21",
       "status": "nova",
       "id": "remote-operador-logistico-2-mercado-envios-mercado-livre-salvador-ba"
     },
