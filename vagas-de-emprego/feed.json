@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-21T12:03:42.289Z",
+  "updatedAt": "2026-11-21T15:02:12.841Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -514,6 +514,15 @@
       "contactLabel": "WhatsApp corporativo oficial de atendimento; candidatura pelo anúncio da empresa no LinkedIn",
       "fit": "Distribuidora com rotinas de estoque, entregas e controle de entradas e saídas; o anúncio recente corresponde diretamente à experiência operacional.",
       "whatsappVerified": true
+    },
+    {
+      "id": "manpowergroup",
+      "name": "ManpowerGroup",
+      "segment": "Recrutamento e seleção / mão de obra temporária",
+      "location": "Salvador, BA",
+      "sourceUrl": "https://trabalheconosco.vagas.com.br/manpowergroup",
+      "contactLabel": "Portal oficial de vagas e candidatura",
+      "fit": "Canal oficial para consultar oportunidades da ManpowerGroup. A empresa informa que recrutadores não recebem currículos por WhatsApp ou e-mail; candidaturas devem ser feitas pelo portal. O cliente desta vaga de Assistente de Logística não foi identificado no anúncio."
     }
   ],
   "jobs": [
@@ -1524,6 +1533,20 @@
       "capturedAt": "2026-11-20",
       "status": "nova",
       "id": "presencial-auxiliar-distribuicao-amoedo-salvador-4491782711"
+    },
+    {
+      "title": "Assistente de Logística",
+      "company": "ManpowerGroup (cliente não informado)",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "salaryMin": 2800,
+      "salaryMax": 2800,
+      "source": "Divulga Vagas",
+      "url": "https://divulgavagas.com.br/vaga-de-emprego/assistente-de-logistica-120668-34921035",
+      "description": "Vaga de recrutamento externo publicada em 20/11/2026, válida até 11/12/2026; a empresa cliente não é identificada no anúncio. Atividades: recebimento e conferência de mercadorias/notas fiscais, atualização de controles e indicadores, relatórios e suporte às rotinas operacionais e administrativas do armazém. Requisitos: ensino superior em andamento, Excel intermediário, experiência com ERP; vivência em logística/armazém é desejável. Jornada: seg–sex 10h–19h e sáb 10h–14h. Benefícios informados: VA, VR, VT, assistência médica/odontológica e seguro de vida. Candidatura deve ser feita pelo anúncio; confira disponibilidade e detalhes.",
+      "capturedAt": "2026-11-21",
+      "status": "nova",
+      "id": "presencial-assistente-logistica-manpower-salvador-120668"
     }
   ],
   "excludedCompanies": [
