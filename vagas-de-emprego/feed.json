@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-21T15:02:12.841Z",
+  "updatedAt": "2026-11-21T18:04:45.286Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -523,6 +523,15 @@
       "sourceUrl": "https://trabalheconosco.vagas.com.br/manpowergroup",
       "contactLabel": "Portal oficial de vagas e candidatura",
       "fit": "Canal oficial para consultar oportunidades da ManpowerGroup. A empresa informa que recrutadores não recebem currículos por WhatsApp ou e-mail; candidaturas devem ser feitas pelo portal. O cliente desta vaga de Assistente de Logística não foi identificado no anúncio."
+    },
+    {
+      "id": "unimarka-distribuidora",
+      "name": "Unimarka Distribuidora",
+      "segment": "Distribuição atacadista de bens de consumo para o varejo",
+      "location": "Salvador, BA",
+      "sourceUrl": "https://atracaodetalentos.totvs.app/unimarka/extended",
+      "contactLabel": "Trabalhe Conosco — candidatura online",
+      "fit": "Distribuidora com operação de vendas e atendimento a varejistas. O portal oficial lista vaga ativa de Executivo de Vendas em Salvador. Não foi localizado canal público de WhatsApp destinado a recrutamento; candidatura pelo Trabalhe Conosco."
     }
   ],
   "jobs": [
@@ -1547,6 +1556,18 @@
       "capturedAt": "2026-11-21",
       "status": "nova",
       "id": "presencial-assistente-logistica-manpower-salvador-120668"
+    },
+    {
+      "title": "Executivo de Vendas",
+      "company": "Unimarka Distribuidora",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "source": "Unimarka — Trabalhe Conosco",
+      "url": "https://atracaodetalentos.totvs.app/unimarka/1340/executivo-de-vendas",
+      "description": "Vaga ativa no portal oficial da Unimarka. O anúncio detalhado informa atuação em vendas para grandes clientes, gestão e desenvolvimento de carteira, prospecção, visitas a varejistas, negociação, acompanhamento de metas e execução no ponto de venda. Ensino superior completo ou em curso, preferencialmente em Administração, Economia ou Gestão Comercial; experiência em vendas é diferencial. Benefícios divulgados: bônus/premiações, participação nos resultados, vale-alimentação, ajuda de custo, plano de saúde e seguro de vida. Salário não informado. Candidatura pelo portal oficial.",
+      "capturedAt": "2026-11-21",
+      "status": "nova",
+      "id": "presencial-executivo-vendas-unimarka-salvador-1340"
     }
   ],
   "excludedCompanies": [
