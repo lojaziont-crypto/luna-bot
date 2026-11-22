@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-22T14:59:02.101Z",
+  "updatedAt": "2026-11-22T21:00:39.555Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -560,6 +560,24 @@
       "sourceUrl": "https://ism.gupy.io/jobs/12800131?jobBoardSource=gupy_public_page",
       "contactLabel": "Trabalhe Conosco — candidatura pelo portal oficial Gupy",
       "fit": "A vaga ativa de Ajudante de Armazém envolve estoque, expedição, movimentação de cargas e indicadores no CD de Salvador. O portal de carreira é o canal público de recrutamento; não foi confirmado WhatsApp corporativo destinado a candidatos."
+    },
+    {
+      "id": "grupo-doce-mel",
+      "name": "Grupo Doce Mel",
+      "segment": "Produção, logística e distribuição de frutas e alimentos",
+      "location": "Centro de Distribuição, Simões Filho, BA",
+      "sourceUrl": "https://grupodocemel.gupy.io/",
+      "contactLabel": "Trabalhe Conosco — candidatura online no Gupy oficial",
+      "fit": "O portal oficial lista vaga efetiva de Auxiliar Operacional de Logística no CD de Simões Filho, com atividades de estoque e armazenagem. Não foi confirmado WhatsApp corporativo destinado ao recrutamento."
+    },
+    {
+      "id": "solar-coca-cola",
+      "name": "Solar Coca-Cola",
+      "segment": "Fabricação e distribuição de bebidas",
+      "location": "Centro de Distribuição, Simões Filho, BA",
+      "sourceUrl": "https://solarbr.com.br/trabalhe-conosco/",
+      "contactLabel": "Trabalhe Conosco — candidatura online no Gupy oficial",
+      "fit": "A empresa tem vaga de Auxiliar de Expedição para a operação de Simões Filho, alinhada a logística, estoque, carga e expedição. Não foi confirmado WhatsApp corporativo destinado ao recrutamento."
     }
   ],
   "jobs": [
@@ -1620,6 +1638,30 @@
       "source": "ISM — Trabalhe Conosco / Gupy",
       "url": "https://ism.gupy.io/jobs/12800131?jobBoardSource=gupy_public_page",
       "description": "Vaga efetiva no Centro de Distribuição de Salvador. Atividades: verificar validade e organizar produtos estocados, separar cargas para expedição, proteger e identificar paletes, apoiar carga e descarga, reembalar produtos avariados e acompanhar KPIs do armazém. Requisitos: manuseio de materiais e organização de estoque; conhecimento de 5S e processos operacionais é desejável. Benefícios incluem vale-refeição, vale-transporte ou combustível, vale-alimentação, plano de saúde e odontológico e seguro de vida. A candidatura é pelo portal oficial da ISM.",
+      "capturedAt": "2026-11-22",
+      "status": "nova"
+    },
+    {
+      "id": "doce-mel-auxiliar-operacional-logistica-simoes-filho-12662649",
+      "title": "Auxiliar Operacional de Logística (CD Simões Filho)",
+      "company": "Grupo Doce Mel",
+      "location": "Simões Filho, BA",
+      "workMode": "presencial",
+      "source": "Grupo Doce Mel — portal oficial Gupy",
+      "url": "https://grupodocemel.gupy.io/jobs/12662649?jobBoardSource=gupy_public_page",
+      "description": "Vaga efetiva no centro de distribuição de Simões Filho. Atividades/requisitos incluem noções de estoque e armazenagem, atenção, proatividade e ensino fundamental completo. Benefícios divulgados: vale-alimentação, ajuda de custo de transporte, seguro de vida, plano de saúde e odontológico, TotalPass e convênio com universidades. Candidatura pelo Gupy oficial.",
+      "capturedAt": "2026-11-22",
+      "status": "nova"
+    },
+    {
+      "id": "solar-coca-cola-auxiliar-expedicao-simoes-filho-12724444",
+      "title": "Auxiliar de Expedição",
+      "company": "Solar Coca-Cola",
+      "location": "Simões Filho, BA",
+      "workMode": "presencial",
+      "source": "Solar Coca-Cola — Trabalhe Conosco / Gupy",
+      "url": "https://solarcocacola.gupy.io/job/eyJqb2JJZCI6MTI3MjQ0NDQsInNvdXJjZSI6Imd1cHlfcG9ydGFsIn0=?jobBoardSource=gupy_portal",
+      "description": "Vaga operacional de expedição. Atividades: separar e manusear produtos para formar paletes e carregar caminhões, triar vasilhames e produtos retornados de rotas, apoiar carga/descarga e manter o ambiente organizado. Requer ensino fundamental completo e matemática básica; experiência em logística e ensino médio são diferenciais. Benefícios incluem assistência médica e odontológica, seguro de vida, vale-alimentação, vale-refeição/refeitório e vale-transporte ou fretado. Candidatura pelo portal oficial.",
       "capturedAt": "2026-11-22",
       "status": "nova"
     }
