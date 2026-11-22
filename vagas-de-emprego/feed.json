@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-21T20:58:17.484Z",
+  "updatedAt": "2026-11-22T11:57:29.673Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -541,6 +541,16 @@
       "sourceUrl": "https://icomon.pandape.infojobs.com.br/",
       "contactLabel": "Trabalhe Conosco — candidatura online",
       "fit": "A empresa mantém portal oficial de vagas; há oportunidade aberta de Almoxarife Pleno em Lauro de Freitas, ligada a controle de materiais, estoque e logística. O portal não lista WhatsApp de recrutamento."
+    },
+    {
+      "id": "baianao-moveis-e-eletro",
+      "name": "Baianão Móveis e Eletro",
+      "segment": "Varejo de móveis e eletrodomésticos, com operação de e-commerce",
+      "location": "Salvador, BA",
+      "phone": "71996198380",
+      "sourceUrl": "https://www.universobaianao.com.br/trabalhe-conosco",
+      "contactLabel": "WhatsApp/telefone do RH divulgado no portal oficial",
+      "fit": "A vaga de Assistente de E-commerce já registrada no feed se alinha a canais digitais e operação comercial. O portal oficial atualmente mostra zero vagas e oferece banco de talentos; o contato publicado é identificado como Fale com o RH."
     }
   ],
   "jobs": [
