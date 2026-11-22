@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-22T11:57:29.673Z",
+  "updatedAt": "2026-11-22T14:59:02.101Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -551,6 +551,15 @@
       "sourceUrl": "https://www.universobaianao.com.br/trabalhe-conosco",
       "contactLabel": "WhatsApp/telefone do RH divulgado no portal oficial",
       "fit": "A vaga de Assistente de E-commerce já registrada no feed se alinha a canais digitais e operação comercial. O portal oficial atualmente mostra zero vagas e oferece banco de talentos; o contato publicado é identificado como Fale com o RH."
+    },
+    {
+      "id": "industria-sao-miguel-ism",
+      "name": "Indústria São Miguel (ISM)",
+      "segment": "Indústria e distribuição de bebidas",
+      "location": "Centro de Distribuição, Salvador, BA",
+      "sourceUrl": "https://ism.gupy.io/jobs/12800131?jobBoardSource=gupy_public_page",
+      "contactLabel": "Trabalhe Conosco — candidatura pelo portal oficial Gupy",
+      "fit": "A vaga ativa de Ajudante de Armazém envolve estoque, expedição, movimentação de cargas e indicadores no CD de Salvador. O portal de carreira é o canal público de recrutamento; não foi confirmado WhatsApp corporativo destinado a candidatos."
     }
   ],
   "jobs": [
@@ -1601,6 +1610,18 @@
       "capturedAt": "2026-11-21",
       "status": "nova",
       "id": "presencial-almoxarife-pleno-icomon-lauro-freitas-3936692"
+    },
+    {
+      "id": "ism-ajudante-armazem-salvador-12800131",
+      "title": "Ajudante de Armazém",
+      "company": "Indústria São Miguel (ISM)",
+      "location": "Salvador, BA",
+      "workMode": "presencial",
+      "source": "ISM — Trabalhe Conosco / Gupy",
+      "url": "https://ism.gupy.io/jobs/12800131?jobBoardSource=gupy_public_page",
+      "description": "Vaga efetiva no Centro de Distribuição de Salvador. Atividades: verificar validade e organizar produtos estocados, separar cargas para expedição, proteger e identificar paletes, apoiar carga e descarga, reembalar produtos avariados e acompanhar KPIs do armazém. Requisitos: manuseio de materiais e organização de estoque; conhecimento de 5S e processos operacionais é desejável. Benefícios incluem vale-refeição, vale-transporte ou combustível, vale-alimentação, plano de saúde e odontológico e seguro de vida. A candidatura é pelo portal oficial da ISM.",
+      "capturedAt": "2026-11-22",
+      "status": "nova"
     }
   ],
   "excludedCompanies": [
