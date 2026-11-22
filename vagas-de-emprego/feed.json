@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-22T17:55:35.144Z",
+  "updatedAt": "2026-11-22T14:59:02.101Z",
   "uiConfig": {
     "version": 1,
     "theme": {
@@ -1620,19 +1620,6 @@
       "source": "ISM — Trabalhe Conosco / Gupy",
       "url": "https://ism.gupy.io/jobs/12800131?jobBoardSource=gupy_public_page",
       "description": "Vaga efetiva no Centro de Distribuição de Salvador. Atividades: verificar validade e organizar produtos estocados, separar cargas para expedição, proteger e identificar paletes, apoiar carga e descarga, reembalar produtos avariados e acompanhar KPIs do armazém. Requisitos: manuseio de materiais e organização de estoque; conhecimento de 5S e processos operacionais é desejável. Benefícios incluem vale-refeição, vale-transporte ou combustível, vale-alimentação, plano de saúde e odontológico e seguro de vida. A candidatura é pelo portal oficial da ISM.",
-      "capturedAt": "2026-11-22",
-      "status": "nova"
-    },
-    {
-      "id": "baianao-operador-empilhadeira-salvador",
-      "title": "Operador(a) de Empilhadeira",
-      "company": "Baianão Móveis e Eletro",
-      "location": "Salvador, BA",
-      "workMode": "presencial",
-      "salaryMax": 2097.26,
-      "source": "Baianão — Trabalhe Conosco",
-      "url": "https://www.universobaianao.com.br/trabalhe-conosco",
-      "description": "Vaga exibida no portal oficial, na área de Expedição e Faturamento, para atuação presencial em Salvador. Salário divulgado: R$ 2.097,26. O portal aponta a candidatura pelo canal de carreiras; o RH também mantém contato público na própria página.",
       "capturedAt": "2026-11-22",
       "status": "nova"
     }
